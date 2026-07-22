@@ -1,0 +1,11 @@
+{
+  "domain": "miranda",
+  "name": "Miranda",
+  "codeowners": ["@archer-developer"],
+  "config_flow": true,
+  "dependencies": ["conversation"],
+  "documentation": "https://github.com/archer-developer/miranda/blob/master/ha-integration/miranda/README.md",
+  "integration_type": "service",
+  "requirements": [],
+  "version": "0.1.0"
+}

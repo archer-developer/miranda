@@ -12,6 +12,20 @@ import (
 	"github.com/archer-developer/miranda/internal/llm/llmtest"
 )
 
+func TestServer_Healthz_IsUnauthenticated(t *testing.T) {
+	provider := llmtest.New("local")
+	o, _, _ := newTestOrchestrator(t, provider)
+	server := NewServer(o, o.hub, "secret", nil, nil)
+
+	ts := httptest.NewServer(server)
+	defer ts.Close()
+
+	resp, err := http.Get(ts.URL + "/healthz")
+	require.NoError(t, err)
+	defer resp.Body.Close()
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+}
+
 func TestServer_HandleInput_ReturnsJSONReply(t *testing.T) {
 	provider := llmtest.New("local", llmtest.Response{Text: "hello"})
 	o, _, _ := newTestOrchestrator(t, provider)

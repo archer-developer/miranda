@@ -35,6 +35,7 @@ func NewServer(orchestrator *Orchestrator, h *hub.Hub, authToken string, webUI h
 	s := &Server{orchestrator: orchestrator, hub: h, authToken: authToken, logger: logger}
 
 	mux := http.NewServeMux()
+	mux.HandleFunc("GET /healthz", s.handleHealthz)
 	mux.HandleFunc("POST /api/v1/input", s.handleInput)
 	mux.HandleFunc("GET /ws/logs", s.handleWSLogs)
 	if webUI != nil {
@@ -47,6 +48,14 @@ func NewServer(orchestrator *Orchestrator, h *hub.Hub, authToken string, webUI h
 
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	s.mux.ServeHTTP(w, r)
+}
+
+// handleHealthz is an unauthenticated liveness check — used by the Home
+// Assistant thin client's config flow to validate connectivity before
+// saving, and by any external process supervisor/monitoring.
+func (s *Server) handleHealthz(w http.ResponseWriter, r *http.Request) {
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write([]byte("ok"))
 }
 
 func (s *Server) handleInput(w http.ResponseWriter, r *http.Request) {
