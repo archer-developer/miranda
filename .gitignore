@@ -1,0 +1,11 @@
+/miranda
+/dist/
+/data/*.db
+/data/*.db-*
+/data/memory/*.md
+!/data/memory/.gitkeep
+/config/config.yaml
+.DS_Store
+.idea/
+*.log
+/bin/

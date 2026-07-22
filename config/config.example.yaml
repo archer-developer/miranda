@@ -1,0 +1,77 @@
+# Miranda agent configuration.
+#
+# Every field here has a built-in default (see internal/config/config.go),
+# so you only need to override what differs from the default. Copy this file
+# to config.yaml and edit it; config.yaml is gitignored since it typically
+# contains real entity ids and other environment-specific details (secrets
+# themselves stay out of this file entirely — see the *_env fields below,
+# which name environment variables to read at startup).
+
+server:
+  # Address the unified command interface + web UI listen on.
+  http_addr: ":8787"
+  # Bearer token required on POST /api/v1/input and the web UI's API calls.
+  # Leave empty for LAN-only dev use with no auth.
+  auth_token: ""
+
+storage:
+  sqlite_path: "./data/miranda.db"
+  memory_dir: "./data/memory"
+
+llm:
+  # Tried in this order: first is normal/default, later ones are the
+  # reliability fallback chain if an earlier provider errors or times out.
+  providers:
+    - name: local-qwen
+      type: openai_compat # any OpenAI Chat Completions compatible backend
+      base_url: "http://localhost:11434/v1" # e.g. Ollama, vLLM, LM Studio, OpenRouter
+      model: "qwen2.5:14b"
+      api_key_env: "" # env var name holding the API key, if the backend needs one
+    - name: claude
+      type: anthropic
+      model: "claude-sonnet-5"
+      api_key_env: "ANTHROPIC_API_KEY"
+  default_provider: local-qwen
+  escalation:
+    # Lets the primary/local model hand a hard turn off to a stronger model
+    # by calling this tool itself, instead of every turn paying for the
+    # expensive model.
+    enabled: true
+    tool_name: "escalate_to_claude"
+    target_provider: claude
+
+memory:
+  # End-of-session LLM summarization pass that merges durable facts into
+  # data/memory/<user_id>.md, as a safety net alongside the explicit tool below.
+  auto_summarize: true
+  # Lets the model call remember_this mid-conversation to save a fact immediately.
+  explicit_tool: true
+
+mcp:
+  servers:
+    - name: ha
+      url: "http://homeassistant.local:8123/api/mcp"
+      token_env: "HA_MCP_TOKEN" # Home Assistant Long-Lived Access Token
+      enabled: true
+    # - name: noolite
+    #   url: "http://localhost:8090"
+    #   token_env: "NOOLITE_MCP_TOKEN"
+    #   enabled: false
+
+tts:
+  primary: yandex_station
+  yandex_station:
+    entities: [] # media_player.* entity ids of your Yandex Stations
+    chunk_max_chars: 100 # Yandex Station's real-world text limit, even locally
+    idle_poll_interval_ms: 300
+  # Home Assistant's own TTS pipeline, used only if the primary channel is
+  # disabled or fails.
+  fallback: ha_tts
+  ha_tts:
+    enabled: false
+    entity_id: "" # e.g. tts.piper
+    target_player: "" # e.g. media_player.satellite1
+
+web_ui:
+  enabled: true
+  log_buffer_size: 1000 # recent log lines replayed to a newly connected browser tab
