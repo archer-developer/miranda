@@ -1,0 +1,29 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Подключение к Miranda",
+        "description": "Укажите адрес запущенного Miranda Agent Service.",
+        "data": {
+          "base_url": "Базовый URL (например, http://192.168.1.50:8787)",
+          "auth_token": "Bearer-токен (оставьте пустым, если server.auth_token не задан)"
+        }
+      }
+    },
+    "error": {
+      "cannot_connect": "Не удалось подключиться к Miranda по указанному адресу. Проверьте URL, что Miranda запущена и что этот экземпляр Home Assistant может достучаться до неё по сети."
+    },
+    "abort": {
+      "already_configured": "Этот экземпляр Miranda уже настроен."
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "data": {
+          "timeout": "Таймаут запроса (секунды)"
+        }
+      }
+    }
+  }
+}

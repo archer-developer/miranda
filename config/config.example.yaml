@@ -75,3 +75,33 @@ tts:
 web_ui:
   enabled: true
   log_buffer_size: 1000 # recent log lines replayed to a newly connected browser tab
+  default_language: "ru" # ru | be | en — used for the login page and any user without their own `language`
+
+# Web UI login is mandatory — with no users listed here, the dashboard is
+# unreachable (fails closed by design, not a bug). Generate a password hash
+# with `go run ./cmd/hashpw <password>`; plaintext passwords are never
+# stored anywhere.
+#
+# Username doubles as the canonical identity for history/memory
+# (data/memory/<username>.md). ha_user_id, if set, maps a Home Assistant
+# speaker-recognition user id to this same username, so a person's memory is
+# shared whether they talk to Miranda via HA voice or via a logged-in web UI
+# session — find it under that HA user's profile, or log the raw value
+# Miranda receives from HA and copy it here. The example hashes below are
+# both for the password "555" — change them before exposing this to
+# anything but your own LAN.
+users:
+  - username: alex
+    password_hash: "$2a$10$6MwP/mihjsXkugdv4NtBOezKCw0fHnOgepn9LJOPQyWkEr0WA8w2e" # "555"
+    full_name: "Alex"
+    avatar: "" # https URL, or a path served under /static/avatars/
+    ha_user_id: ""
+    telegram_name: ""
+    language: "ru"
+  - username: anna
+    password_hash: "$2a$10$cR6srtGvKY2swOq0Nd.lvuuplR.Retvj3PBX6PyLiFIzMBVE10FLi" # "555"
+    full_name: "Anna"
+    avatar: ""
+    ha_user_id: ""
+    telegram_name: ""
+    language: "ru"

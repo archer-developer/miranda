@@ -60,7 +60,7 @@ func newHarness(t *testing.T, provider *llmtest.FakeProvider, mcpClients ...mcp.
 		escalation, 100, "debug",
 	)
 
-	server := httpapi.NewServer(orchestrator, eventHub, "", nil, nil)
+	server := httpapi.NewServer(orchestrator, eventHub, "", nil, nil, nil, nil)
 	ts := httptest.NewServer(server)
 	t.Cleanup(ts.Close)
 

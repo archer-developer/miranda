@@ -25,11 +25,19 @@ import (
 	"github.com/archer-developer/miranda/internal/llm/router"
 	"github.com/archer-developer/miranda/internal/mcp"
 	"github.com/archer-developer/miranda/internal/memory"
+	"github.com/archer-developer/miranda/internal/session"
 	"github.com/archer-developer/miranda/internal/tts"
+	"github.com/archer-developer/miranda/internal/users"
 	"github.com/archer-developer/miranda/internal/webui"
 )
 
 const shutdownTimeout = 10 * time.Second
+
+// sessionTTL is how long a web UI login stays valid. Long-lived on purpose:
+// this is a home dashboard on a trusted LAN, not a public multi-tenant
+// service, and re-entering a password on every visit isn't worth the
+// marginal security gain here.
+const sessionTTL = 30 * 24 * time.Hour
 
 func main() {
 	logger := slog.New(slog.NewTextHandler(os.Stdout, nil))
@@ -77,6 +85,15 @@ func run(configPath string, logger *slog.Logger) error {
 
 	eventHub := hub.New(cfg.WebUI.LogBufferSize)
 
+	usersRegistry, err := users.NewRegistry(cfg.Users)
+	if err != nil {
+		return err
+	}
+	if usersRegistry.Empty() {
+		logger.Warn("no users configured — the web UI is unreachable until config.yaml lists at least one account under `users:`")
+	}
+	sessions := session.NewStore(sessionTTL)
+
 	defaultUserID := "debug"
 	orchestrator := httpapi.NewOrchestrator(
 		llmRouter, toolManager, historyStore, memoryStore, dispatcher, eventHub,
@@ -85,14 +102,14 @@ func run(configPath string, logger *slog.Logger) error {
 
 	var webHandler http.Handler
 	if cfg.WebUI.Enabled {
-		wh, err := webui.New(historyStore)
+		wh, err := webui.New(historyStore, usersRegistry, sessions, cfg.WebUI.DefaultLanguage, cfg.Storage.AvatarsDir)
 		if err != nil {
 			return err
 		}
 		webHandler = wh
 	}
 
-	server := httpapi.NewServer(orchestrator, eventHub, cfg.Server.AuthToken, webHandler, logger)
+	server := httpapi.NewServer(orchestrator, eventHub, cfg.Server.AuthToken, webHandler, logger, usersRegistry, sessions)
 	httpServer := &http.Server{Addr: cfg.Server.HTTPAddr, Handler: server}
 
 	return serveUntilInterrupted(httpServer, logger)

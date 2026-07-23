@@ -21,6 +21,29 @@ type Config struct {
 	MCP     MCPConfig     `yaml:"mcp"`
 	TTS     TTSConfig     `yaml:"tts"`
 	WebUI   WebUIConfig   `yaml:"web_ui"`
+	Users   []UserConfig  `yaml:"users"`
+}
+
+// UserConfig is one login account for the web UI, and doubles as the
+// canonical identity for history/memory: the same Username is used as the
+// user_id key regardless of whether a turn arrives via an authenticated web
+// UI session or via Home Assistant (in which case HAUserID, if set, is used
+// to map HA's speaker-recognition user id back to this Username — see
+// internal/users). Only Username and PasswordHash are required; the rest
+// are optional profile fields.
+type UserConfig struct {
+	Username     string `yaml:"username"`
+	PasswordHash string `yaml:"password_hash"` // bcrypt, see internal/users.HashPassword
+	FullName     string `yaml:"full_name,omitempty"`
+	// Avatar is either an http(s) URL, or a bare filename that must exist in
+	// StorageConfig.AvatarsDir (served at /static/avatars/<filename>).
+	Avatar       string `yaml:"avatar,omitempty"`
+	HAUserID     string `yaml:"ha_user_id,omitempty"`
+	TelegramName string `yaml:"telegram_name,omitempty"`
+	// Language is the web UI's default locale for this user after login
+	// ("ru", "be", or "en"); the header switcher can still override it per
+	// session. Defaults to the server-wide web_ui.default_language.
+	Language string `yaml:"language,omitempty"`
 }
 
 // ServerConfig controls the unified command interface / web UI HTTP server.
@@ -29,10 +52,13 @@ type ServerConfig struct {
 	AuthToken string `yaml:"auth_token"`
 }
 
-// StorageConfig points at the on-disk SQLite history DB and markdown memory dir.
+// StorageConfig points at the on-disk SQLite history DB, markdown memory
+// dir, and local user avatar images.
 type StorageConfig struct {
 	SQLitePath string `yaml:"sqlite_path"`
 	MemoryDir  string `yaml:"memory_dir"`
+	// AvatarsDir is served at /static/avatars/ — see UserConfig.Avatar.
+	AvatarsDir string `yaml:"avatars_dir"`
 }
 
 // LLMProvider describes one configured model backend, either an
@@ -106,6 +132,10 @@ type TTSConfig struct {
 type WebUIConfig struct {
 	Enabled       bool `yaml:"enabled"`
 	LogBufferSize int  `yaml:"log_buffer_size"`
+	// DefaultLanguage is used for the login page (before we know which user
+	// is signing in) and as the fallback for any user without their own
+	// UserConfig.Language. One of "ru", "be", "en".
+	DefaultLanguage string `yaml:"default_language"`
 }
 
 // Default returns the built-in configuration used when config.yaml is absent
@@ -119,6 +149,7 @@ func Default() Config {
 		Storage: StorageConfig{
 			SQLitePath: "./data/miranda.db",
 			MemoryDir:  "./data/memory",
+			AvatarsDir: "./data/avatars",
 		},
 		LLM: LLMConfig{
 			Providers:       nil,
@@ -149,9 +180,13 @@ func Default() Config {
 			},
 		},
 		WebUI: WebUIConfig{
-			Enabled:       true,
-			LogBufferSize: 1000,
+			Enabled:         true,
+			LogBufferSize:   1000,
+			DefaultLanguage: "ru",
 		},
+		// No default Users: web UI login is mandatory and fails closed until
+		// config.yaml lists at least one account (see internal/users).
+		Users: nil,
 	}
 }
 

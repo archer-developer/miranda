@@ -1,6 +1,11 @@
 // Miranda web UI: WebSocket log tail, debug command form, dialog browser.
 // Deliberately dependency-free (no build step) — see internal/webui.
+// Localized strings come from window.MIRANDA_I18N, injected by the server
+// (internal/webui/view.go) for the current session's language.
 (() => {
+  const i18n = window.MIRANDA_I18N || {};
+  const t = (key, fallback) => i18n[key] || fallback;
+
   const logEl = document.getElementById("log");
   const wsDot = document.getElementById("ws-dot");
   const wsStatus = document.getElementById("ws-status");
@@ -27,11 +32,11 @@
 
     ws.onopen = () => {
       wsDot.className = "h-2.5 w-2.5 rounded-full bg-emerald-500";
-      wsStatus.textContent = "connected";
+      wsStatus.textContent = t("ws_connected", "connected");
     };
     ws.onclose = () => {
       wsDot.className = "h-2.5 w-2.5 rounded-full bg-red-500";
-      wsStatus.textContent = "disconnected — retrying…";
+      wsStatus.textContent = t("ws_disconnected", "disconnected — retrying…");
       setTimeout(connectLogs, 2000);
     };
     ws.onerror = () => ws.close();
@@ -44,38 +49,34 @@
     };
   }
 
-  function authHeaders() {
-    const token = document.getElementById("debug-token").value.trim();
-    const headers = { "Content-Type": "application/json" };
-    if (token) headers["Authorization"] = `Bearer ${token}`;
-    return headers;
-  }
-
+  // Same-origin fetch() sends the session cookie automatically — no manual
+  // Authorization header needed here; identity for these requests comes
+  // entirely from the logged-in session (see internal/httpapi's dual
+  // bearer-token/session auth on POST /api/v1/input).
   document.getElementById("debug-form").addEventListener("submit", async (e) => {
     e.preventDefault();
     const text = document.getElementById("debug-text").value.trim();
     if (!text) return;
-    const userID = document.getElementById("debug-user").value.trim();
     const replyEl = document.getElementById("debug-reply");
 
     replyEl.classList.remove("hidden");
-    replyEl.textContent = "Sending…";
+    replyEl.textContent = t("sending_ellipsis", "Sending…");
 
     try {
       const res = await fetch("/api/v1/input", {
         method: "POST",
-        headers: authHeaders(),
-        body: JSON.stringify({ source: "web_ui", user_id: userID, text }),
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ source: "web_ui", text }),
       });
       if (!res.ok) {
-        replyEl.textContent = `Error: ${res.status} ${await res.text()}`;
+        replyEl.textContent = `${t("request_failed", "Request failed:")} ${res.status} ${await res.text()}`;
         return;
       }
       const data = await res.json();
       replyEl.textContent = data.reply;
       document.getElementById("debug-text").value = "";
     } catch (err) {
-      replyEl.textContent = `Request failed: ${err}`;
+      replyEl.textContent = `${t("request_failed", "Request failed:")} ${err}`;
     }
   });
 
@@ -84,15 +85,13 @@
     const listEl = document.getElementById("dialogs-list");
     if (!userID) return;
 
-    listEl.textContent = "Loading…";
+    listEl.textContent = t("loading_ellipsis", "Loading…");
     try {
-      const res = await fetch(`/api/dialogs?user_id=${encodeURIComponent(userID)}`, {
-        headers: authHeaders(),
-      });
+      const res = await fetch(`/api/dialogs?user_id=${encodeURIComponent(userID)}`);
       const conversations = await res.json();
       listEl.innerHTML = "";
       if (!conversations || conversations.length === 0) {
-        listEl.textContent = "No conversations yet.";
+        listEl.textContent = t("no_conversations", "No conversations yet.");
         return;
       }
       for (const c of conversations) {
@@ -103,12 +102,12 @@
         listEl.appendChild(item);
       }
     } catch (err) {
-      listEl.textContent = `Failed to load: ${err}`;
+      listEl.textContent = `${t("failed_to_load", "Failed to load:")} ${err}`;
     }
   });
 
   async function loadConversation(id, container) {
-    const res = await fetch(`/api/dialogs/${encodeURIComponent(id)}`, { headers: authHeaders() });
+    const res = await fetch(`/api/dialogs/${encodeURIComponent(id)}`);
     const messages = await res.json();
     const detail = document.createElement("div");
     detail.className = "mt-2 space-y-1 border-t border-slate-800 pt-2 text-xs text-slate-400";

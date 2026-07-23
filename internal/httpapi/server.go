@@ -14,7 +14,15 @@ import (
 	"github.com/coder/websocket/wsjson"
 
 	"github.com/archer-developer/miranda/internal/hub"
+	"github.com/archer-developer/miranda/internal/session"
+	"github.com/archer-developer/miranda/internal/users"
 )
+
+// webUISource is the InputRequest.Source value forced onto any request
+// authenticated via a web UI session cookie, regardless of what the client
+// sent — a browser can't be allowed to claim source: "ha_assist" and ride
+// the HA user-id-mapping path, or spoof another user_id.
+const webUISource = "web_ui"
 
 // Server is Miranda's HTTP server: the unified command interface, the
 // WebSocket log stream, and (if provided) the embedded web UI.
@@ -23,16 +31,28 @@ type Server struct {
 	orchestrator *Orchestrator
 	hub          *hub.Hub
 	authToken    string
+	users        *users.Registry
+	sessions     *session.Store
 	logger       *slog.Logger
 }
 
 // NewServer builds a Server. webUI, if non-nil, is mounted at "/" (see
 // internal/webui) — nil is fine for tests that only care about the API.
-func NewServer(orchestrator *Orchestrator, h *hub.Hub, authToken string, webUI http.Handler, logger *slog.Logger) *Server {
+// usersRegistry/sessions authenticate browser-originated requests (web UI
+// login) as an alternative to authToken's bearer-token auth (HA/curl/scripts);
+// either may be nil, in which case that auth path is simply unavailable.
+func NewServer(orchestrator *Orchestrator, h *hub.Hub, authToken string, webUI http.Handler, logger *slog.Logger, usersRegistry *users.Registry, sessions *session.Store) *Server {
 	if logger == nil {
 		logger = slog.Default()
 	}
-	s := &Server{orchestrator: orchestrator, hub: h, authToken: authToken, logger: logger}
+	s := &Server{
+		orchestrator: orchestrator,
+		hub:          h,
+		authToken:    authToken,
+		users:        usersRegistry,
+		sessions:     sessions,
+		logger:       logger,
+	}
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", s.handleHealthz)
@@ -59,7 +79,8 @@ func (s *Server) handleHealthz(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleInput(w http.ResponseWriter, r *http.Request) {
-	if !s.authorized(r) {
+	sessionUser, authenticated := s.authorize(r)
+	if !authenticated {
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return
 	}
@@ -72,6 +93,19 @@ func (s *Server) handleInput(w http.ResponseWriter, r *http.Request) {
 	if req.Text == "" {
 		http.Error(w, "text is required", http.StatusBadRequest)
 		return
+	}
+
+	if sessionUser != "" {
+		// Session-cookie auth: identity comes entirely from who's logged
+		// in, never from client-supplied fields.
+		req.UserID = sessionUser
+		req.Source = webUISource
+	} else if s.users != nil {
+		// Bearer-token auth (HA thin client, curl, scripts): translate a
+		// raw HA speaker-recognition user id to our canonical username, if
+		// it matches a configured user, so memory/history stay keyed the
+		// same way regardless of which channel a person used.
+		req.UserID = s.users.ResolveUserID(req.Source, req.UserID)
 	}
 
 	s.hub.Publish(hub.Event{Source: req.Source, Message: fmt.Sprintf("%s: %s", req.UserID, req.Text)})
@@ -88,7 +122,27 @@ func (s *Server) handleInput(w http.ResponseWriter, r *http.Request) {
 	_ = json.NewEncoder(w).Encode(resp)
 }
 
-func (s *Server) authorized(r *http.Request) bool {
+// authorize checks both auth paths: a bearer token (returns sessionUser ==
+// "") or a valid web UI session cookie (returns the session's username).
+func (s *Server) authorize(r *http.Request) (sessionUser string, ok bool) {
+	if s.bearerAuthorized(r) {
+		return "", true
+	}
+	if s.sessions == nil {
+		return "", false
+	}
+	cookie, err := r.Cookie(session.CookieName)
+	if err != nil {
+		return "", false
+	}
+	username, valid := s.sessions.Validate(cookie.Value)
+	if !valid {
+		return "", false
+	}
+	return username, true
+}
+
+func (s *Server) bearerAuthorized(r *http.Request) bool {
 	if s.authToken == "" {
 		return true // no token configured: LAN-only dev mode
 	}
@@ -97,8 +151,15 @@ func (s *Server) authorized(r *http.Request) bool {
 
 // handleWSLogs streams hub events to a connected web UI tab in real time,
 // replaying the recent buffer immediately on connect so a late-opened tab
-// isn't blind to what already happened.
+// isn't blind to what already happened. Gated by the same dual auth as
+// handleInput — the live log can contain full conversation text, so it's
+// not something to leave open to anyone who finds the URL.
 func (s *Server) handleWSLogs(w http.ResponseWriter, r *http.Request) {
+	if _, ok := s.authorize(r); !ok {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+
 	conn, err := websocket.Accept(w, r, nil)
 	if err != nil {
 		return
