@@ -134,24 +134,25 @@ func (s *Server) handleInput(w http.ResponseWriter, r *http.Request) {
 	_ = json.NewEncoder(w).Encode(resp)
 }
 
-// authorize checks both auth paths: a bearer token (returns sessionUser ==
-// "") or a valid web UI session cookie (returns the session's username).
+// authorize checks both auth paths, preferring a valid web UI session
+// cookie over bearer-token auth: a browser tab is logged in as someone
+// specific, and that identity must win even when server.auth_token is empty
+// (which makes bearerAuthorized always pass — LAN-only dev mode). Checking
+// the bearer token first would make that identity unreachable, since an
+// empty auth_token would short-circuit every request as anonymous before
+// the cookie is ever looked at.
 func (s *Server) authorize(r *http.Request) (sessionUser string, ok bool) {
+	if s.sessions != nil {
+		if cookie, err := r.Cookie(session.CookieName); err == nil {
+			if username, valid := s.sessions.Validate(cookie.Value); valid {
+				return username, true
+			}
+		}
+	}
 	if s.bearerAuthorized(r) {
 		return "", true
 	}
-	if s.sessions == nil {
-		return "", false
-	}
-	cookie, err := r.Cookie(session.CookieName)
-	if err != nil {
-		return "", false
-	}
-	username, valid := s.sessions.Validate(cookie.Value)
-	if !valid {
-		return "", false
-	}
-	return username, true
+	return "", false
 }
 
 func (s *Server) bearerAuthorized(r *http.Request) bool {
