@@ -9,6 +9,7 @@ import (
 	"github.com/archer-developer/miranda/internal/history"
 	"github.com/archer-developer/miranda/internal/hub"
 	"github.com/archer-developer/miranda/internal/llm"
+	"github.com/archer-developer/miranda/internal/llmtrace"
 )
 
 // preferencesSection is the memory section the summarization pass owns. It's
@@ -74,6 +75,8 @@ func (o *Orchestrator) SummarizeIdleSessions(ctx context.Context, idleFor time.D
 // Shared by the idle sweep and the explicit end_conversation tool, so both
 // paths close a session the same way.
 func (o *Orchestrator) summarizeConversation(ctx context.Context, convID, userID string) error {
+	ctx = llmtrace.WithConversationID(ctx, convID)
+
 	messages, err := o.history.ConversationMessages(ctx, convID)
 	if err != nil {
 		return fmt.Errorf("load messages: %w", err)

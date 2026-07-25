@@ -7,12 +7,16 @@ package main
 import (
 	"context"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"syscall"
 	"time"
+
+	"gopkg.in/natefinch/lumberjack.v2"
 
 	"github.com/archer-developer/miranda/internal/config"
 	"github.com/archer-developer/miranda/internal/envfile"
@@ -24,6 +28,7 @@ import (
 	"github.com/archer-developer/miranda/internal/llm/anthropic"
 	"github.com/archer-developer/miranda/internal/llm/openaicompat"
 	"github.com/archer-developer/miranda/internal/llm/router"
+	"github.com/archer-developer/miranda/internal/llmtrace"
 	"github.com/archer-developer/miranda/internal/mcp"
 	"github.com/archer-developer/miranda/internal/memory"
 	"github.com/archer-developer/miranda/internal/session"
@@ -55,10 +60,13 @@ const idleSweepInterval = time.Minute
 const dotEnvPath = ".env"
 
 func main() {
-	logger := slog.New(slog.NewTextHandler(os.Stdout, nil))
+	// Bootstrap logger: stdout only, since config.yaml (which says where the
+	// real log files go) hasn't been loaded yet. Only used for the handful of
+	// messages between here and setupLogging succeeding.
+	bootstrap := slog.New(slog.NewTextHandler(os.Stdout, nil))
 
 	if err := envfile.Load(dotEnvPath); err != nil {
-		logger.Warn("failed to load .env, continuing with the process environment as-is", "error", err)
+		bootstrap.Warn("failed to load .env, continuing with the process environment as-is", "error", err)
 	}
 
 	configPath := "config/config.yaml"
@@ -66,17 +74,57 @@ func main() {
 		configPath = v
 	}
 
-	if err := run(configPath, logger); err != nil {
+	cfg, err := config.Load(configPath)
+	if err != nil {
+		bootstrap.Error("fatal", "error", err)
+		os.Exit(1)
+	}
+
+	logger, closeLogs, err := setupLogging(cfg.Logging)
+	if err != nil {
+		bootstrap.Error("fatal", "error", err)
+		os.Exit(1)
+	}
+	defer closeLogs()
+
+	if err := run(cfg, logger); err != nil {
 		logger.Error("fatal", "error", err)
 		os.Exit(1)
 	}
 }
 
-func run(configPath string, logger *slog.Logger) error {
-	cfg, err := config.Load(configPath)
-	if err != nil {
-		return err
+// setupLogging builds the application logger so everything it logs is
+// mirrored to a size-rotated file under cfg.Dir in addition to stdout — the
+// same messages you'd see in the terminal are also on disk for later
+// review. The returned close func closes the underlying log file and should
+// run at shutdown (best-effort: lumberjack writes synchronously, so nothing
+// is lost even if the process exits without calling it).
+func setupLogging(cfg config.LoggingConfig) (*slog.Logger, func(), error) {
+	if err := os.MkdirAll(cfg.Dir, 0o755); err != nil {
+		return nil, func() {}, fmt.Errorf("main: create log dir %s: %w", cfg.Dir, err)
 	}
+
+	appLogFile := rotatingLogFile(cfg, "miranda.log")
+	logger := slog.New(slog.NewTextHandler(io.MultiWriter(os.Stdout, appLogFile), nil))
+	return logger, func() { _ = appLogFile.Close() }, nil
+}
+
+// rotatingLogFile builds a size-rotated log file named filename under
+// cfg.Dir, per cfg's rotation policy (see config.LoggingConfig).
+func rotatingLogFile(cfg config.LoggingConfig, filename string) *lumberjack.Logger {
+	return &lumberjack.Logger{
+		Filename:   filepath.Join(cfg.Dir, filename),
+		MaxSize:    cfg.MaxSizeMB,
+		MaxBackups: cfg.MaxBackups,
+		MaxAge:     cfg.MaxAgeDays,
+		Compress:   true,
+	}
+}
+
+func run(cfg config.Config, logger *slog.Logger) error {
+	llmTraceFile := rotatingLogFile(cfg.Logging, "llm.log")
+	defer func() { _ = llmTraceFile.Close() }()
+	llmTracer := llmtrace.New(llmTraceFile)
 
 	historyStore, err := history.Open(cfg.Storage.SQLitePath)
 	if err != nil {
@@ -97,6 +145,7 @@ func run(configPath string, logger *slog.Logger) error {
 	if err != nil {
 		return err
 	}
+	llmRouter.SetTracer(llmTracer)
 
 	toolManager := connectMCP(cfg.MCP.Servers, logger)
 

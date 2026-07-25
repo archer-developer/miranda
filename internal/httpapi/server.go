@@ -7,6 +7,7 @@ package httpapi
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 
@@ -79,6 +80,17 @@ func (s *Server) handleHealthz(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleInput(w http.ResponseWriter, r *http.Request) {
+	// Logged raw and first — before auth, before parsing — so a
+	// misconfigured HA integration (wrong token, unexpected payload shape,
+	// wrong field names) is still fully visible in logs/miranda.log instead
+	// of silently 401ing or 400ing with nothing to go on.
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		http.Error(w, "failed to read request body", http.StatusBadRequest)
+		return
+	}
+	s.logger.Info("received input request", "remote_addr", r.RemoteAddr, "body", string(body))
+
 	sessionUser, authenticated := s.authorize(r)
 	if !authenticated {
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
@@ -86,7 +98,7 @@ func (s *Server) handleInput(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var req InputRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := json.Unmarshal(body, &req); err != nil {
 		http.Error(w, "invalid JSON body", http.StatusBadRequest)
 		return
 	}

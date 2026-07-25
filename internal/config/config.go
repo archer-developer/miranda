@@ -16,6 +16,7 @@ import (
 type Config struct {
 	Server  ServerConfig  `yaml:"server"`
 	Storage StorageConfig `yaml:"storage"`
+	Logging LoggingConfig `yaml:"logging"`
 	LLM     LLMConfig     `yaml:"llm"`
 	Agent   AgentConfig   `yaml:"agent"`
 	Memory  MemoryConfig  `yaml:"memory"`
@@ -60,6 +61,26 @@ type StorageConfig struct {
 	MemoryDir  string `yaml:"memory_dir"`
 	// AvatarsDir is served at /static/avatars/ — see UserConfig.Avatar.
 	AvatarsDir string `yaml:"avatars_dir"`
+}
+
+// LoggingConfig controls file logging: the general application log (a
+// mirror of everything printed to the terminal) and the separate LLM
+// request/response trace log (internal/llmtrace) used to debug why a given
+// prompt did or didn't produce the expected tool calls/reply. Both rotate by
+// size so they never grow unbounded.
+type LoggingConfig struct {
+	// Dir is where log files are written (miranda.log, llm.log). Created
+	// automatically if missing.
+	Dir string `yaml:"dir"`
+	// MaxSizeMB is the size in megabytes a log file reaches before it's
+	// rotated to a numbered backup.
+	MaxSizeMB int `yaml:"max_size_mb"`
+	// MaxBackups is how many rotated backups to keep before the oldest is
+	// deleted. 0 means keep all of them (bounded only by MaxAgeDays, if set).
+	MaxBackups int `yaml:"max_backups"`
+	// MaxAgeDays is how long to keep a rotated backup regardless of
+	// MaxBackups. 0 means no age-based cleanup.
+	MaxAgeDays int `yaml:"max_age_days"`
 }
 
 // LLMProvider describes one configured model backend, either an
@@ -187,6 +208,12 @@ func Default() Config {
 			MemoryDir:  "./data/memory",
 			AvatarsDir: "./data/avatars",
 		},
+		Logging: LoggingConfig{
+			Dir:        "./logs",
+			MaxSizeMB:  10,
+			MaxBackups: 5,
+			MaxAgeDays: 30,
+		},
 		LLM: LLMConfig{
 			Providers:       nil,
 			DefaultProvider: "",
@@ -220,7 +247,9 @@ func Default() Config {
 			},
 		},
 		Agent: AgentConfig{
-			SystemPrompt: "You are Miranda, a home voice assistant. Be concise — your replies are often spoken aloud.",
+			SystemPrompt: "Тебя зовут Miranda, ты домашний ассистент. Твоя задача помогать Саше и Ане управлять их умным домом и помогать им во всем, что ты умеешь. " +
+				"Твои ответы озвучиваются голосом если не указано иного - отвечай кратко и по сути. " +
+				"Длина ответа должна быть до 100 символов при обычном ответе и до 1000 при явной просьбе рассказать подробно.",
 		},
 		WebUI: WebUIConfig{
 			Enabled:         true,

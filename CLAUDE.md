@@ -176,3 +176,21 @@ Config flags below live on `config.MemoryConfig` unless otherwise noted.
   overwrite memory wholesale rather than append/replace-a-section — a human
   editing their own memory is expected to see and control the whole
   document.
+
+### Logging
+
+Two size-rotated files under `config.Logging.Dir` (`./logs` by default; see
+`internal/config.LoggingConfig`):
+
+- `miranda.log` — a mirror of everything the app logs to stdout
+  (`cmd/miranda.setupLogging`).
+- `llm.log` — a request/response trace written by `internal/llm/router`
+  (`Router.SetTracer`, formatted by `internal/llmtrace`), independent of
+  which provider handled the turn. Every single provider call (including
+  both legs of an escalation handoff) gets one block: the exact system
+  prompt, message history, and tool names sent, and the model's final
+  text/tool calls or error — tagged with `conversation=<id>` (threaded
+  through `ctx` via `llmtrace.WithConversationID`, set once
+  `resolveConversation`/`summarizeConversation` know the conversation id).
+  This is the tool for debugging *why* a given prompt didn't produce the
+  tool call or reply you expected.

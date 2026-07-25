@@ -3,6 +3,7 @@ package httpapi
 import (
 	"bytes"
 	"encoding/json"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -49,6 +50,51 @@ func TestServer_HandleInput_ReturnsJSONReply(t *testing.T) {
 	require.Equal(t, "hello", out.Reply)
 }
 
+func TestServer_HandleInput_LogsRawRequestBody(t *testing.T) {
+	provider := llmtest.New("local", llmtest.Response{Text: "hello"})
+	o, _, _ := newTestOrchestrator(t, provider)
+
+	var logBuf bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&logBuf, nil))
+	server := NewServer(o, o.hub, "", nil, logger, nil, nil)
+
+	ts := httptest.NewServer(server)
+	defer ts.Close()
+
+	raw := []byte(`{"source":"ha_assist","user_id":"unknown","text":"привет","conversation_id":"abc-123"}`)
+	resp, err := http.Post(ts.URL+"/api/v1/input", "application/json", bytes.NewReader(raw))
+	require.NoError(t, err)
+	defer resp.Body.Close()
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+
+	logged := logBuf.String()
+	require.Contains(t, logged, "received input request")
+	require.Contains(t, logged, `\"source\":\"ha_assist\"`)
+	require.Contains(t, logged, `\"conversation_id\":\"abc-123\"`)
+}
+
+func TestServer_HandleInput_LogsRawRequestBodyEvenWhenUnauthorized(t *testing.T) {
+	provider := llmtest.New("local")
+	o, _, _ := newTestOrchestrator(t, provider)
+
+	var logBuf bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&logBuf, nil))
+	server := NewServer(o, o.hub, "secret-token", nil, logger, nil, nil)
+
+	ts := httptest.NewServer(server)
+	defer ts.Close()
+
+	raw := []byte(`{"source":"ha_assist","user_id":"unknown","text":"это не пройдёт"}`)
+	resp, err := http.Post(ts.URL+"/api/v1/input", "application/json", bytes.NewReader(raw))
+	require.NoError(t, err)
+	defer resp.Body.Close()
+	require.Equal(t, http.StatusUnauthorized, resp.StatusCode)
+
+	// Even a request that fails auth must still show up raw in the log —
+	// that's exactly the case someone debugging a bad HA token needs to see.
+	require.Contains(t, logBuf.String(), "это не пройдёт")
+}
+
 func TestServer_HandleInput_RejectsMissingText(t *testing.T) {
 	provider := llmtest.New("local")
 	o, _, _ := newTestOrchestrator(t, provider)
@@ -90,7 +136,7 @@ func TestServer_HandleInput_RequiresBearerTokenWhenConfigured(t *testing.T) {
 
 func TestServer_HandleInput_ResolvesHAUserIDToCanonicalUsername(t *testing.T) {
 	provider := llmtest.New("local", llmtest.Response{Text: "hello"})
-	o, _, _ := newTestOrchestrator(t, provider)
+	o, historyStore, _ := newTestOrchestrator(t, provider)
 
 	registry, err := users.NewRegistry([]config.UserConfig{
 		{Username: "alex", PasswordHash: "x", HAUserID: "ha-uuid-alex"},
@@ -107,8 +153,19 @@ func TestServer_HandleInput_ResolvesHAUserIDToCanonicalUsername(t *testing.T) {
 	defer resp.Body.Close()
 	require.Equal(t, http.StatusOK, resp.StatusCode)
 
-	require.Len(t, provider.Requests, 1)
+	var out InputResponse
+	require.NoError(t, json.NewDecoder(resp.Body).Decode(&out))
+
+	// The whole point of resolution: history/memory must be keyed by the
+	// canonical username, never by HA's raw speaker-recognition id.
+	convos, err := historyStore.RecentConversations(t.Context(), "alex", 10)
 	require.NoError(t, err)
+	require.Len(t, convos, 1)
+	require.Equal(t, out.ConversationID, convos[0].ID)
+
+	convosByRawID, err := historyStore.RecentConversations(t.Context(), "ha-uuid-alex", 10)
+	require.NoError(t, err)
+	require.Empty(t, convosByRawID)
 }
 
 func TestServer_HandleInput_SessionCookieGrantsAccessAndSetsIdentity(t *testing.T) {

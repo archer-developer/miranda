@@ -9,6 +9,7 @@ import (
 	"github.com/archer-developer/miranda/internal/hub"
 	"github.com/archer-developer/miranda/internal/llm"
 	"github.com/archer-developer/miranda/internal/llm/router"
+	"github.com/archer-developer/miranda/internal/llmtrace"
 	"github.com/archer-developer/miranda/internal/mcp"
 	"github.com/archer-developer/miranda/internal/memory"
 	"github.com/archer-developer/miranda/internal/tts"
@@ -110,6 +111,10 @@ func (o *Orchestrator) Handle(ctx context.Context, req InputRequest) (InputRespo
 	if err != nil {
 		return InputResponse{}, err
 	}
+	// Tags every LLM call this turn makes (via the router's trace log) with
+	// which conversation it belongs to, so logs/llm.log can be correlated
+	// with a specific dialog.
+	ctx = llmtrace.WithConversationID(ctx, convID)
 
 	memContent, err := o.memory.Read(userID)
 	if err != nil {

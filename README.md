@@ -84,6 +84,22 @@ Claude), `mcp.servers` (tool sources, see below), `tts` (Yandex Station /
 HA TTS routing), `storage` (SQLite + memory file paths), `users` (web UI
 login accounts — see **Web UI** below).
 
+## Logging
+
+Everything printed to the terminal is also mirrored to
+`logging.dir/miranda.log` (`./logs/miranda.log` by default), rotated by size
+so it never grows unbounded (`logging.max_size_mb` / `max_backups` /
+`max_age_days`).
+
+Separately, `logging.dir/llm.log` traces every single LLM request and
+response: the exact system prompt, message history, and tools sent, plus
+the model's reply text/tool calls (or the error, if the call failed) —
+this is the tool for figuring out *why* a prompt didn't produce the tool
+call or answer you expected. It's written by `internal/llm/router`
+regardless of which provider handled the turn (including both legs of an
+escalation handoff), and each block is tagged with `conversation=<id>` so
+you can grep one dialog's turns out of the file.
+
 ## Web UI
 
 Miranda serves a monitoring dashboard at its configured `server.http_addr`

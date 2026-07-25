@@ -11,6 +11,7 @@ import (
 
 	"github.com/archer-developer/miranda/internal/config"
 	"github.com/archer-developer/miranda/internal/llm"
+	"github.com/archer-developer/miranda/internal/llmtrace"
 )
 
 // Router dispatches chat turns to the configured llm.Providers.
@@ -18,6 +19,7 @@ type Router struct {
 	providers  map[string]llm.Provider
 	order      []string // fallback chain, in the order providers were configured
 	escalation config.EscalationConfig
+	tracer     *llmtrace.Logger // optional: nil means tracing is off (Logger.Record is a no-op on nil)
 }
 
 // New builds a Router over providers, tried in the given slice order for
@@ -35,6 +37,13 @@ func New(providers []llm.Provider, escalation config.EscalationConfig) (*Router,
 	}
 
 	return &Router{providers: m, order: order, escalation: escalation}, nil
+}
+
+// SetTracer wires up request/response tracing (see internal/llmtrace) —
+// optional, and left unset (nil) by default so tests and any caller that
+// doesn't care about it don't need to touch this.
+func (r *Router) SetTracer(tracer *llmtrace.Logger) {
+	r.tracer = tracer
 }
 
 // Chat runs req through the fallback chain and, if escalation triggers,
@@ -70,7 +79,10 @@ func (r *Router) startChat(ctx context.Context, req llm.ChatRequest) (<-chan llm
 
 // pump forwards chunks from the active provider's stream to out, intercepting
 // a call to the escalation tool to reroute the rest of the turn to the
-// escalation target provider instead of surfacing that tool call to the caller.
+// escalation target provider instead of surfacing that tool call to the
+// caller. It also accumulates the full response so it can hand one complete
+// trace block to r.tracer once the call finishes, however it finishes
+// (normal completion, error, or handoff to escalate).
 func (r *Router) pump(ctx context.Context, req llm.ChatRequest, stream <-chan llm.StreamChunk, providerName string, out chan<- llm.StreamChunk, onProviderUsed func(string)) {
 	defer close(out)
 
@@ -82,19 +94,33 @@ func (r *Router) pump(ctx context.Context, req llm.ChatRequest, stream <-chan ll
 		}
 	}
 
+	var text string
+	var toolCalls []llm.ToolCall
+
 	for chunk := range stream {
 		if chunk.Err != nil {
 			out <- chunk
+			r.tracer.Record(ctx, req, providerName, text, toolCalls, chunk.Err)
 			return
 		}
 
 		if chunk.ToolCall != nil && r.escalation.Enabled && chunk.ToolCall.Name == r.escalation.ToolName {
+			// The intercepted call itself is a complete, real request/response
+			// worth its own trace block before rerouting.
+			r.tracer.Record(ctx, req, providerName, text, append(toolCalls, *chunk.ToolCall), nil)
 			r.escalate(ctx, req, *chunk.ToolCall, out, report)
 			return
 		}
 
+		if chunk.TextDelta != "" {
+			text += chunk.TextDelta
+		}
+		if chunk.ToolCall != nil {
+			toolCalls = append(toolCalls, *chunk.ToolCall)
+		}
 		if chunk.Done {
 			report(providerName)
+			r.tracer.Record(ctx, req, providerName, text, toolCalls, nil)
 		}
 		out <- chunk
 	}
@@ -102,23 +128,41 @@ func (r *Router) pump(ctx context.Context, req llm.ChatRequest, stream <-chan ll
 
 // escalate re-issues the conversation to the escalation target provider,
 // with a synthetic tool result acknowledging the handoff, and forwards its
-// stream as the rest of this turn's output.
+// stream as the rest of this turn's output — tracing that reroute as its own
+// request/response block (a distinct req from the one that triggered it, via
+// appendEscalationTurn).
 func (r *Router) escalate(ctx context.Context, req llm.ChatRequest, call llm.ToolCall, out chan<- llm.StreamChunk, report func(string)) {
 	target, ok := r.providers[r.escalation.TargetProvider]
 	if !ok {
-		out <- llm.StreamChunk{Err: fmt.Errorf("router: escalation target %q not configured", r.escalation.TargetProvider)}
+		err := fmt.Errorf("router: escalation target %q not configured", r.escalation.TargetProvider)
+		out <- llm.StreamChunk{Err: err}
 		return
 	}
 
-	escStream, err := target.Chat(ctx, appendEscalationTurn(req, call))
+	escReq := appendEscalationTurn(req, call)
+	escStream, err := target.Chat(ctx, escReq)
 	if err != nil {
-		out <- llm.StreamChunk{Err: fmt.Errorf("router: escalation to %s failed: %w", target.Name(), err)}
+		wrapped := fmt.Errorf("router: escalation to %s failed: %w", target.Name(), err)
+		out <- llm.StreamChunk{Err: wrapped}
+		r.tracer.Record(ctx, escReq, target.Name(), "", nil, wrapped)
 		return
 	}
 
+	var text string
+	var toolCalls []llm.ToolCall
 	for c := range escStream {
+		if c.Err != nil {
+			r.tracer.Record(ctx, escReq, target.Name(), text, toolCalls, c.Err)
+		}
+		if c.TextDelta != "" {
+			text += c.TextDelta
+		}
+		if c.ToolCall != nil {
+			toolCalls = append(toolCalls, *c.ToolCall)
+		}
 		if c.Done {
 			report(target.Name())
+			r.tracer.Record(ctx, escReq, target.Name(), text, toolCalls, nil)
 		}
 		out <- c
 	}

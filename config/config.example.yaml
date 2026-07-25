@@ -18,6 +18,16 @@ storage:
   sqlite_path: "./data/miranda.db"
   memory_dir: "./data/memory"
 
+logging:
+  # Mirrors everything on stdout into logging.dir/miranda.log, plus a
+  # separate logging.dir/llm.log tracing every LLM request (system prompt,
+  # messages, tools) and response (text/tool calls) — useful for debugging
+  # why a prompt didn't produce the expected behavior. Both rotate by size.
+  dir: "./logs"
+  max_size_mb: 10
+  max_backups: 5
+  max_age_days: 30
+
 llm:
   # Tried in this order: first is normal/default, later ones are the
   # reliability fallback chain if an earlier provider errors or times out.

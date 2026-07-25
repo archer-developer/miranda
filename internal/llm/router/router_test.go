@@ -1,6 +1,7 @@
 package router
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"testing"
@@ -10,6 +11,7 @@ import (
 	"github.com/archer-developer/miranda/internal/config"
 	"github.com/archer-developer/miranda/internal/llm"
 	"github.com/archer-developer/miranda/internal/llm/llmtest"
+	"github.com/archer-developer/miranda/internal/llmtrace"
 )
 
 func drainText(t *testing.T, ch <-chan llm.StreamChunk) string {
@@ -114,4 +116,59 @@ func TestRouter_EscalationTargetNotConfiguredReturnsErrChunk(t *testing.T) {
 		}
 	}
 	require.Error(t, gotErr)
+}
+
+func TestRouter_TracesRequestAndResponseWhenTracerSet(t *testing.T) {
+	provider := llmtest.New("local", llmtest.Response{Text: "hi"})
+	r, err := New([]llm.Provider{provider}, noEscalation())
+	require.NoError(t, err)
+
+	var buf bytes.Buffer
+	r.SetTracer(llmtrace.New(&buf))
+
+	ch, err := r.Chat(context.Background(), llm.ChatRequest{
+		Messages: []llm.Message{{Role: llm.RoleUser, Content: "hello"}},
+	}, nil)
+	require.NoError(t, err)
+	require.Equal(t, "hi", drainText(t, ch))
+
+	out := buf.String()
+	require.Contains(t, out, "provider=local")
+	require.Contains(t, out, "user: hello")
+	require.Contains(t, out, "text: hi")
+}
+
+func TestRouter_TracesEscalationAsTwoBlocks(t *testing.T) {
+	escalation := config.EscalationConfig{Enabled: true, ToolName: "escalate_to_claude", TargetProvider: "claude"}
+	local := llmtest.New("local-qwen", llmtest.Response{
+		ToolCall: &llm.ToolCall{ID: "call-1", Name: "escalate_to_claude", Arguments: `{"reason":"hard"}`},
+	})
+	claude := llmtest.New("claude", llmtest.Response{Text: "the answer"})
+	r, err := New([]llm.Provider{local, claude}, escalation)
+	require.NoError(t, err)
+
+	var buf bytes.Buffer
+	r.SetTracer(llmtrace.New(&buf))
+
+	ch, err := r.Chat(context.Background(), llm.ChatRequest{
+		Messages: []llm.Message{{Role: llm.RoleUser, Content: "a hard question"}},
+	}, nil)
+	require.NoError(t, err)
+	require.Equal(t, "the answer", drainText(t, ch))
+
+	out := buf.String()
+	require.Contains(t, out, "provider=local-qwen")
+	require.Contains(t, out, "escalate_to_claude")
+	require.Contains(t, out, "provider=claude")
+	require.Contains(t, out, "text: the answer")
+}
+
+func TestRouter_NoTracerSetIsFine(t *testing.T) {
+	provider := llmtest.New("local", llmtest.Response{Text: "hi"})
+	r, err := New([]llm.Provider{provider}, noEscalation())
+	require.NoError(t, err)
+
+	ch, err := r.Chat(context.Background(), llm.ChatRequest{}, nil)
+	require.NoError(t, err)
+	require.Equal(t, "hi", drainText(t, ch))
 }
