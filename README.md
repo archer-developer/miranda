@@ -66,6 +66,17 @@ the file directly: each provider/server entry names an environment variable
 cp config/config.example.yaml config/config.yaml
 ```
 
+For local development, those environment variables don't need to be
+exported by hand every session: copy `.env.example` to `.env` and fill it
+in — Miranda loads it at startup (`internal/envfile`). A variable already
+set in the real environment always wins over `.env`, so this has no effect
+in production setups (systemd, etc.) that already set secrets some other
+way.
+
+```bash
+cp .env.example .env
+```
+
 Key sections: `llm.providers` (the fallback chain — one entry per model
 backend, `type: openai_compat` for any OpenAI Chat Completions compatible
 server — Ollama, vLLM, LM Studio, OpenRouter — or `type: anthropic` for
@@ -176,6 +187,8 @@ separate HA integrations — don't mix them up.
    ```bash
    export HA_MCP_TOKEN="<the long-lived access token>"
    ```
+   (or, for local development, add `HA_MCP_TOKEN=<token>` to `.env` instead —
+   see Configuration above.)
    ```yaml
    # config.yaml
    mcp:

@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/archer-developer/miranda/internal/config"
+	"github.com/archer-developer/miranda/internal/envfile"
 	"github.com/archer-developer/miranda/internal/ha"
 	"github.com/archer-developer/miranda/internal/history"
 	"github.com/archer-developer/miranda/internal/httpapi"
@@ -46,8 +47,19 @@ const sessionTTL = 30 * 24 * time.Hour
 // it's a single indexed SQLite query.
 const idleSweepInterval = time.Minute
 
+// dotEnvPath is a .env file in the project root, loaded for local-dev
+// convenience (see internal/envfile) so secrets like ANTHROPIC_API_KEY or
+// HA_MCP_TOKEN don't need to be exported by hand every session. Real
+// environment variables always win over it, so the same .env can sit
+// untouched in production where those are set some other way.
+const dotEnvPath = ".env"
+
 func main() {
 	logger := slog.New(slog.NewTextHandler(os.Stdout, nil))
+
+	if err := envfile.Load(dotEnvPath); err != nil {
+		logger.Warn("failed to load .env, continuing with the process environment as-is", "error", err)
+	}
 
 	configPath := "config/config.yaml"
 	if v := os.Getenv("MIRANDA_CONFIG"); v != "" {

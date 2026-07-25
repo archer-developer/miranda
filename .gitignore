@@ -5,6 +5,7 @@
 /data/memory/*.md
 !/data/memory/.gitkeep
 /config/config.yaml
+/.env
 .DS_Store
 .idea/
 *.log
