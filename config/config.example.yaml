@@ -46,6 +46,21 @@ memory:
   auto_summarize: true
   # Lets the model call remember_this mid-conversation to save a fact immediately.
   explicit_tool: true
+  # How long a conversation can sit idle before it's ended and summarized.
+  # The server owns session continuity (not any conversation_id a caller
+  # sends back), so this is what actually governs session boundaries.
+  session_idle_timeout_minutes: 25
+  # Lets the model call search_history when the user references an earlier
+  # conversation ("помнишь мы говорили о...").
+  search_history_tool: true
+  # Lets the model call end_conversation when the user asks to start a new
+  # conversation, ending the session immediately instead of waiting for the
+  # idle timeout.
+  end_conversation_tool: true
+  # Lets the model call forget_conversation when the user asks to erase the
+  # current conversation entirely ("забудь этот диалог"), deleting it from
+  # history with no summarization.
+  forget_conversation_tool: true
 
 mcp:
   servers:

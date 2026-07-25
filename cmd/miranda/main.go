@@ -39,6 +39,13 @@ const shutdownTimeout = 10 * time.Second
 // marginal security gain here.
 const sessionTTL = 30 * 24 * time.Hour
 
+// idleSweepInterval is how often the background memory sweeper checks for
+// conversations that have gone idle. It's independent of
+// config.MemoryConfig.SessionIdleTimeoutMinutes (that's the idle threshold
+// itself) — this is just the polling cadence, and cheap to run often since
+// it's a single indexed SQLite query.
+const idleSweepInterval = time.Minute
+
 func main() {
 	logger := slog.New(slog.NewTextHandler(os.Stdout, nil))
 
@@ -97,12 +104,12 @@ func run(configPath string, logger *slog.Logger) error {
 	defaultUserID := "debug"
 	orchestrator := httpapi.NewOrchestrator(
 		llmRouter, toolManager, historyStore, memoryStore, dispatcher, eventHub,
-		cfg.Memory, cfg.LLM.Escalation, cfg.TTS.YandexStation.ChunkMaxChars, defaultUserID,
+		cfg.Agent, cfg.Memory, cfg.LLM.Escalation, cfg.TTS.YandexStation.ChunkMaxChars, defaultUserID,
 	)
 
 	var webHandler http.Handler
 	if cfg.WebUI.Enabled {
-		wh, err := webui.New(historyStore, usersRegistry, sessions, cfg.WebUI.DefaultLanguage, cfg.Storage.AvatarsDir)
+		wh, err := webui.New(historyStore, memoryStore, usersRegistry, sessions, cfg.WebUI.DefaultLanguage, cfg.Storage.AvatarsDir)
 		if err != nil {
 			return err
 		}
@@ -112,13 +119,40 @@ func run(configPath string, logger *slog.Logger) error {
 	server := httpapi.NewServer(orchestrator, eventHub, cfg.Server.AuthToken, webHandler, logger, usersRegistry, sessions)
 	httpServer := &http.Server{Addr: cfg.Server.HTTPAddr, Handler: server}
 
-	return serveUntilInterrupted(httpServer, logger)
-}
-
-func serveUntilInterrupted(httpServer *http.Server, logger *slog.Logger) error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
+	go sweepIdleSessions(ctx, orchestrator, cfg.Memory, logger)
+
+	return serveUntilInterrupted(ctx, httpServer, logger)
+}
+
+// sweepIdleSessions periodically distills conversations that have sat idle
+// past cfg.SessionIdleTimeoutMinutes into their user's memory file and marks
+// them ended (see Orchestrator.SummarizeIdleSessions). It's a no-op ticker
+// when cfg.AutoSummarize is off, and exits once ctx is cancelled at shutdown.
+func sweepIdleSessions(ctx context.Context, o *httpapi.Orchestrator, cfg config.MemoryConfig, logger *slog.Logger) {
+	if !cfg.AutoSummarize {
+		return
+	}
+	idleFor := time.Duration(cfg.SessionIdleTimeoutMinutes) * time.Minute
+
+	ticker := time.NewTicker(idleSweepInterval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			if err := o.SummarizeIdleSessions(ctx, idleFor); err != nil {
+				logger.Error("memory sweep failed", "error", err)
+			}
+		}
+	}
+}
+
+func serveUntilInterrupted(ctx context.Context, httpServer *http.Server, logger *slog.Logger) error {
 	errCh := make(chan error, 1)
 	go func() {
 		logger.Info("listening", "addr", httpServer.Addr)

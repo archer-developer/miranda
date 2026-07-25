@@ -1,6 +1,7 @@
 package webui
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"net/http"
@@ -23,6 +24,9 @@ import (
 type fakeHistory struct {
 	conversations []history.Conversation
 	messages      []history.Message
+	// byID backs GetConversation for ownership checks; if nil, lookups by id
+	// fall back to scanning conversations for a matching ID.
+	byID map[string]*history.Conversation
 }
 
 func (f *fakeHistory) RecentConversations(ctx context.Context, userID string, limit int) ([]history.Conversation, error) {
@@ -31,6 +35,35 @@ func (f *fakeHistory) RecentConversations(ctx context.Context, userID string, li
 
 func (f *fakeHistory) ConversationMessages(ctx context.Context, conversationID string) ([]history.Message, error) {
 	return f.messages, nil
+}
+
+func (f *fakeHistory) GetConversation(ctx context.Context, conversationID string) (*history.Conversation, error) {
+	if c, ok := f.byID[conversationID]; ok {
+		return c, nil
+	}
+	for _, c := range f.conversations {
+		if c.ID == conversationID {
+			return &c, nil
+		}
+	}
+	return nil, nil
+}
+
+type fakeMemory struct {
+	content map[string]string
+}
+
+func newFakeMemory() *fakeMemory {
+	return &fakeMemory{content: map[string]string{}}
+}
+
+func (f *fakeMemory) Read(userID string) (string, error) {
+	return f.content[userID], nil
+}
+
+func (f *fakeMemory) Write(userID, content string) error {
+	f.content[userID] = content
+	return nil
 }
 
 func mustHash(t *testing.T, password string) string {
@@ -45,15 +78,22 @@ func mustHash(t *testing.T, password string) string {
 // directly without going through the login form.
 func newTestHandler(t *testing.T, fake *fakeHistory) (*Handler, *session.Store) {
 	t.Helper()
+	h, sessions, _ := newTestHandlerWithMemory(t, fake)
+	return h, sessions
+}
+
+func newTestHandlerWithMemory(t *testing.T, fake *fakeHistory) (*Handler, *session.Store, *fakeMemory) {
+	t.Helper()
 	registry, err := users.NewRegistry([]config.UserConfig{
 		{Username: "alex", PasswordHash: mustHash(t, "555"), FullName: "Alex"},
 	})
 	require.NoError(t, err)
 	sessions := session.NewStore(time.Hour)
+	mem := newFakeMemory()
 
-	h, err := New(fake, registry, sessions, "ru", "")
+	h, err := New(fake, mem, registry, sessions, "ru", "")
 	require.NoError(t, err)
-	return h, sessions
+	return h, sessions, mem
 }
 
 func authedRequest(t *testing.T, sessions *session.Store, method, target string) *http.Request {
@@ -185,7 +225,7 @@ func TestServesLocalAvatarFiles(t *testing.T) {
 	registry, err := users.NewRegistry([]config.UserConfig{{Username: "alex", PasswordHash: mustHash(t, "555")}})
 	require.NoError(t, err)
 	sessions := session.NewStore(time.Hour)
-	h, err := New(&fakeHistory{}, registry, sessions, "ru", dir)
+	h, err := New(&fakeHistory{}, newFakeMemory(), registry, sessions, "ru", dir)
 	require.NoError(t, err)
 
 	req := httptest.NewRequest(http.MethodGet, "/static/avatars/alex.png", nil)
@@ -206,23 +246,15 @@ func TestHandleDialogs_RequiresAuth(t *testing.T) {
 	require.Equal(t, http.StatusUnauthorized, rec.Code)
 }
 
-func TestHandleDialogs_RequiresUserID(t *testing.T) {
-	h, sessions := newTestHandler(t, &fakeHistory{})
-
-	req := authedRequest(t, sessions, http.MethodGet, "/api/dialogs")
-	rec := httptest.NewRecorder()
-	h.ServeHTTP(rec, req)
-
-	require.Equal(t, http.StatusBadRequest, rec.Code)
-}
-
-func TestHandleDialogs_ReturnsConversationsJSON(t *testing.T) {
+func TestHandleDialogs_IgnoresForeignUserIDAndUsesOwnUsername(t *testing.T) {
 	fake := &fakeHistory{conversations: []history.Conversation{
 		{ID: "conv-1", UserID: "alex", Source: "cli", StartedAt: time.Now()},
 	}}
 	h, sessions := newTestHandler(t, fake)
 
-	req := authedRequest(t, sessions, http.MethodGet, "/api/dialogs?user_id=alex")
+	// The logged-in user is always "alex" (see newTestHandler); a user_id for
+	// someone else must be ignored, not used to browse their history.
+	req := authedRequest(t, sessions, http.MethodGet, "/api/dialogs?user_id=someone-else")
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
 
@@ -234,9 +266,10 @@ func TestHandleDialogs_ReturnsConversationsJSON(t *testing.T) {
 }
 
 func TestHandleDialogMessages_ReturnsMessagesJSON(t *testing.T) {
-	fake := &fakeHistory{messages: []history.Message{
-		{ID: 1, Role: "user", Content: "привет"},
-	}}
+	fake := &fakeHistory{
+		conversations: []history.Conversation{{ID: "conv-1", UserID: "alex", Source: "cli", StartedAt: time.Now()}},
+		messages:      []history.Message{{ID: 1, Role: "user", Content: "привет"}},
+	}
 	h, sessions := newTestHandler(t, fake)
 
 	req := authedRequest(t, sessions, http.MethodGet, "/api/dialogs/conv-1")
@@ -248,4 +281,60 @@ func TestHandleDialogMessages_ReturnsMessagesJSON(t *testing.T) {
 	require.NoError(t, json.NewDecoder(rec.Body).Decode(&out))
 	require.Len(t, out, 1)
 	require.Equal(t, "привет", out[0].Content)
+}
+
+func TestHandleDialogMessages_RejectsAnotherUsersConversation(t *testing.T) {
+	fake := &fakeHistory{
+		conversations: []history.Conversation{{ID: "conv-1", UserID: "someone-else", Source: "cli", StartedAt: time.Now()}},
+		messages:      []history.Message{{ID: 1, Role: "user", Content: "секрет"}},
+	}
+	h, sessions := newTestHandler(t, fake)
+
+	req := authedRequest(t, sessions, http.MethodGet, "/api/dialogs/conv-1")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusNotFound, rec.Code)
+}
+
+func TestHandleMemory_RequiresAuth(t *testing.T) {
+	h, _ := newTestHandler(t, &fakeHistory{})
+
+	req := httptest.NewRequest(http.MethodGet, "/api/memory", nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusUnauthorized, rec.Code)
+}
+
+func TestHandleMemory_GetReturnsCurrentUsersContent(t *testing.T) {
+	h, sessions, mem := newTestHandlerWithMemory(t, &fakeHistory{})
+	mem.content["alex"] = "## Preferences\n- likes tea\n"
+
+	req := authedRequest(t, sessions, http.MethodGet, "/api/memory")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusOK, rec.Code)
+	var out memoryView
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&out))
+	require.Equal(t, "## Preferences\n- likes tea\n", out.Content)
+}
+
+func TestHandleMemory_PutOverwritesCurrentUsersContent(t *testing.T) {
+	h, sessions, mem := newTestHandlerWithMemory(t, &fakeHistory{})
+
+	body, err := json.Marshal(memoryView{Content: "edited by hand"})
+	require.NoError(t, err)
+
+	token, err := sessions.Create("alex")
+	require.NoError(t, err)
+	req := httptest.NewRequest(http.MethodPut, "/api/memory", bytes.NewReader(body))
+	req.AddCookie(&http.Cookie{Name: session.CookieName, Value: token})
+
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusOK, rec.Code)
+	require.Equal(t, "edited by hand", mem.content["alex"])
 }

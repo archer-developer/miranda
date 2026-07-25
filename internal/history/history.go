@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -33,6 +34,17 @@ type Conversation struct {
 	Source    string     `json:"source"`
 	StartedAt time.Time  `json:"started_at"`
 	EndedAt   *time.Time `json:"ended_at,omitempty"`
+	// Summary is a short recap of what was discussed, filled in when the
+	// conversation ends (idle timeout or an explicit end_conversation tool
+	// call) — see EndConversationWithSummary. Empty for a still-open
+	// conversation. Distinct from internal/memory's distilled "Preferences":
+	// this is per-conversation, that's cross-conversation.
+	Summary string `json:"summary,omitempty"`
+	// SystemPrompt is the system prompt used for this conversation's most
+	// recent turn (base persona + memory snapshot at the time), kept in sync
+	// on every turn via SetSystemPrompt. Never sent back to the model — it's
+	// stored purely so a conversation's context is fully inspectable later.
+	SystemPrompt string `json:"system_prompt,omitempty"`
 }
 
 // Store is a SQLite-backed dialog history database.
@@ -126,6 +138,47 @@ func (s *Store) migrate(ctx context.Context) error {
 			return fmt.Errorf("history: migrate: %w", err)
 		}
 	}
+
+	if err := s.ensureColumn(ctx, "conversations", "summary", "TEXT"); err != nil {
+		return err
+	}
+	if err := s.ensureColumn(ctx, "conversations", "system_prompt", "TEXT"); err != nil {
+		return err
+	}
+	return nil
+}
+
+// ensureColumn adds column to table if it isn't already there. SQLite's
+// CREATE TABLE IF NOT EXISTS above is a no-op on an already-migrated
+// database, so columns added after the initial release need this explicit
+// existence check instead — ALTER TABLE ADD COLUMN has no IF NOT EXISTS
+// form in the SQLite versions modernc.org/sqlite has historically tracked.
+func (s *Store) ensureColumn(ctx context.Context, table, column, sqlType string) error {
+	rows, err := s.db.QueryContext(ctx, fmt.Sprintf("PRAGMA table_info(%s)", table))
+	if err != nil {
+		return fmt.Errorf("history: inspect %s columns: %w", table, err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	for rows.Next() {
+		var cid int
+		var name, colType string
+		var notNull, pk int
+		var dflt sql.NullString
+		if err := rows.Scan(&cid, &name, &colType, &notNull, &dflt, &pk); err != nil {
+			return fmt.Errorf("history: scan %s column info: %w", table, err)
+		}
+		if name == column {
+			return nil
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("history: read %s column info: %w", table, err)
+	}
+
+	if _, err := s.db.ExecContext(ctx, fmt.Sprintf("ALTER TABLE %s ADD COLUMN %s %s", table, column, sqlType)); err != nil {
+		return fmt.Errorf("history: add column %s.%s: %w", table, column, err)
+	}
 	return nil
 }
 
@@ -145,7 +198,9 @@ func (s *Store) StartConversation(ctx context.Context, userID, source string) (s
 	return id, nil
 }
 
-// EndConversation marks conversationID as finished.
+// EndConversation marks conversationID as finished, with no summary (used
+// when there was nothing worth summarizing — see EndConversationWithSummary
+// for the normal case).
 func (s *Store) EndConversation(ctx context.Context, conversationID string) error {
 	_, err := s.db.ExecContext(ctx,
 		`UPDATE conversations SET ended_at = CURRENT_TIMESTAMP WHERE id = ?`, conversationID)
@@ -153,6 +208,150 @@ func (s *Store) EndConversation(ctx context.Context, conversationID string) erro
 		return fmt.Errorf("history: end conversation: %w", err)
 	}
 	return nil
+}
+
+// EndConversationWithSummary marks conversationID as finished and records
+// its recap, atomically — the summarization pass's normal write path.
+func (s *Store) EndConversationWithSummary(ctx context.Context, conversationID, summary string) error {
+	_, err := s.db.ExecContext(ctx,
+		`UPDATE conversations SET ended_at = CURRENT_TIMESTAMP, summary = ? WHERE id = ?`, summary, conversationID)
+	if err != nil {
+		return fmt.Errorf("history: end conversation with summary: %w", err)
+	}
+	return nil
+}
+
+// SetSystemPrompt records the system prompt used for conversationID's most
+// recent turn. Called once per turn so it always reflects the latest
+// base-persona + memory snapshot actually sent to the model.
+func (s *Store) SetSystemPrompt(ctx context.Context, conversationID, prompt string) error {
+	_, err := s.db.ExecContext(ctx,
+		`UPDATE conversations SET system_prompt = ? WHERE id = ?`, prompt, conversationID)
+	if err != nil {
+		return fmt.Errorf("history: set system prompt: %w", err)
+	}
+	return nil
+}
+
+// DeleteConversation permanently removes conversationID and everything
+// attached to it (messages, tool calls). This is the explicit
+// forget_conversation tool's write path: unlike ending a conversation, it
+// leaves nothing behind for summarization to ever pick up — the FTS index
+// is kept in sync automatically by the messages table's AFTER DELETE
+// trigger (see migrate).
+func (s *Store) DeleteConversation(ctx context.Context, conversationID string) error {
+	if _, err := s.db.ExecContext(ctx,
+		`DELETE FROM tool_calls WHERE message_id IN (SELECT id FROM messages WHERE conversation_id = ?)`,
+		conversationID); err != nil {
+		return fmt.Errorf("history: delete tool calls: %w", err)
+	}
+	if _, err := s.db.ExecContext(ctx,
+		`DELETE FROM messages WHERE conversation_id = ?`, conversationID); err != nil {
+		return fmt.Errorf("history: delete messages: %w", err)
+	}
+	if _, err := s.db.ExecContext(ctx,
+		`DELETE FROM conversations WHERE id = ?`, conversationID); err != nil {
+		return fmt.Errorf("history: delete conversation: %w", err)
+	}
+	return nil
+}
+
+// OpenConversation returns userID's currently open conversation (ended_at IS
+// NULL), or nil if they have none. This is the sole continuity mechanism for
+// a turn: the server — not whatever conversation_id a caller might echo
+// back — decides whether to continue an existing conversation or start a
+// new one, so the idle timeout and explicit end/forget tools actually
+// govern session boundaries.
+func (s *Store) OpenConversation(ctx context.Context, userID string) (*Conversation, error) {
+	row := s.db.QueryRowContext(ctx, `
+		SELECT id, user_id, source, started_at, ended_at, COALESCE(summary, ''), COALESCE(system_prompt, '')
+		FROM conversations
+		WHERE user_id = ? AND ended_at IS NULL
+		ORDER BY started_at DESC
+		LIMIT 1`, userID)
+
+	c, err := scanConversation(row)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("history: query open conversation: %w", err)
+	}
+	return c, nil
+}
+
+// GetConversation fetches a single conversation by id, or nil if it doesn't
+// exist (e.g. it was already deleted via DeleteConversation).
+func (s *Store) GetConversation(ctx context.Context, conversationID string) (*Conversation, error) {
+	row := s.db.QueryRowContext(ctx, `
+		SELECT id, user_id, source, started_at, ended_at, COALESCE(summary, ''), COALESCE(system_prompt, '')
+		FROM conversations WHERE id = ?`, conversationID)
+
+	c, err := scanConversation(row)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("history: get conversation: %w", err)
+	}
+	return c, nil
+}
+
+func scanConversation(row *sql.Row) (*Conversation, error) {
+	var c Conversation
+	var endedAt sql.NullTime
+	if err := row.Scan(&c.ID, &c.UserID, &c.Source, &c.StartedAt, &endedAt, &c.Summary, &c.SystemPrompt); err != nil {
+		return nil, err
+	}
+	if endedAt.Valid {
+		c.EndedAt = &endedAt.Time
+	}
+	return &c, nil
+}
+
+// IdleConversations returns still-open conversations (ended_at IS NULL)
+// whose most recent message is at least idleFor old, so the background
+// summarization sweeper (see cmd/miranda) can treat them as finished. The
+// cutoff is applied in Go rather than in SQL: SQLite's CURRENT_TIMESTAMP
+// writes "YYYY-MM-DD HH:MM:SS" while the driver formats a bound time.Time
+// parameter differently, and comparing the two as strings would silently
+// misorder results.
+func (s *Store) IdleConversations(ctx context.Context, idleFor time.Duration) ([]Conversation, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT c.id, c.user_id, c.source, c.started_at, c.ended_at, MAX(m.created_at)
+		FROM conversations c
+		JOIN messages m ON m.conversation_id = c.id
+		WHERE c.ended_at IS NULL
+		GROUP BY c.id`)
+	if err != nil {
+		return nil, fmt.Errorf("history: query idle conversations: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	var out []Conversation
+	for rows.Next() {
+		var c Conversation
+		var endedAt sql.NullTime
+		// MAX(m.created_at) has no declared column type, so the driver can't
+		// auto-convert it to time.Time the way it does for a plain DATETIME
+		// column — scan it as text and parse it in the same layout SQLite's
+		// CURRENT_TIMESTAMP writes ("YYYY-MM-DD HH:MM:SS", UTC, no fraction).
+		var lastMessageAtText string
+		if err := rows.Scan(&c.ID, &c.UserID, &c.Source, &c.StartedAt, &endedAt, &lastMessageAtText); err != nil {
+			return nil, fmt.Errorf("history: scan idle conversation: %w", err)
+		}
+		if endedAt.Valid {
+			c.EndedAt = &endedAt.Time
+		}
+		lastMessageAt, err := time.Parse("2006-01-02 15:04:05", lastMessageAtText)
+		if err != nil {
+			return nil, fmt.Errorf("history: parse last message time for conversation %s: %w", c.ID, err)
+		}
+		if time.Since(lastMessageAt) >= idleFor {
+			out = append(out, c)
+		}
+	}
+	return out, rows.Err()
 }
 
 // AppendMessage records one turn and returns its row id (used to attach
@@ -193,18 +392,47 @@ func (s *Store) ConversationMessages(ctx context.Context, conversationID string)
 // RecentConversations returns userID's most recent conversations, newest first.
 func (s *Store) RecentConversations(ctx context.Context, userID string, limit int) ([]Conversation, error) {
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT id, user_id, source, started_at, ended_at FROM conversations
-		 WHERE user_id = ? ORDER BY started_at DESC LIMIT ?`, userID, limit)
+		`SELECT id, user_id, source, started_at, ended_at, COALESCE(summary, ''), COALESCE(system_prompt, '')
+		 FROM conversations WHERE user_id = ? ORDER BY started_at DESC LIMIT ?`, userID, limit)
 	if err != nil {
 		return nil, fmt.Errorf("history: query conversations: %w", err)
 	}
 	defer func() { _ = rows.Close() }()
+	return scanConversations(rows)
+}
 
+// SearchConversations full-text searches userID's finished conversations for
+// query and returns distinct matches, most recently started first, each
+// with its stored Summary — this is what the search_history tool surfaces,
+// so recalling an earlier dialog injects its recap rather than a dump of
+// raw messages. Only ended conversations are searched: the current open
+// conversation is already in the model's context for this turn. query is
+// free text, not FTS5 syntax (see ftsQuery).
+func (s *Store) SearchConversations(ctx context.Context, userID, query string, limit int) ([]Conversation, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT c.id, c.user_id, c.source, c.started_at, c.ended_at, COALESCE(c.summary, ''), COALESCE(c.system_prompt, '')
+		FROM conversations c
+		WHERE c.ended_at IS NOT NULL AND c.user_id = ? AND c.id IN (
+			SELECT m.conversation_id
+			FROM messages_fts
+			JOIN messages m ON m.id = messages_fts.rowid
+			WHERE messages_fts MATCH ?
+		)
+		ORDER BY c.started_at DESC
+		LIMIT ?`, userID, ftsQuery(query), limit)
+	if err != nil {
+		return nil, fmt.Errorf("history: search conversations: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+	return scanConversations(rows)
+}
+
+func scanConversations(rows *sql.Rows) ([]Conversation, error) {
 	var out []Conversation
 	for rows.Next() {
 		var c Conversation
 		var endedAt sql.NullTime
-		if err := rows.Scan(&c.ID, &c.UserID, &c.Source, &c.StartedAt, &endedAt); err != nil {
+		if err := rows.Scan(&c.ID, &c.UserID, &c.Source, &c.StartedAt, &endedAt, &c.Summary, &c.SystemPrompt); err != nil {
 			return nil, fmt.Errorf("history: scan conversation: %w", err)
 		}
 		if endedAt.Valid {
@@ -215,8 +443,11 @@ func (s *Store) RecentConversations(ctx context.Context, userID string, limit in
 	return out, rows.Err()
 }
 
-// SearchMessages full-text searches userID's message history for query
-// (FTS5 query syntax) and returns matches, most recent first.
+// SearchMessages full-text searches userID's message history for query and
+// returns matches, most recent first. query is treated as free text, not
+// FTS5 query syntax, so arbitrary punctuation (this is called with
+// model-generated input, via the search_history tool) can't be
+// misinterpreted as an FTS5 operator and error out the search.
 func (s *Store) SearchMessages(ctx context.Context, userID, query string, limit int) ([]Message, error) {
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT m.id, m.conversation_id, m.role, m.content, m.created_at
@@ -225,12 +456,25 @@ func (s *Store) SearchMessages(ctx context.Context, userID, query string, limit 
 		JOIN conversations c ON c.id = m.conversation_id
 		WHERE messages_fts MATCH ? AND c.user_id = ?
 		ORDER BY m.created_at DESC
-		LIMIT ?`, query, userID, limit)
+		LIMIT ?`, ftsQuery(query), userID, limit)
 	if err != nil {
 		return nil, fmt.Errorf("history: search messages: %w", err)
 	}
 	defer func() { _ = rows.Close() }()
 	return scanMessages(rows)
+}
+
+// ftsQuery turns free text into a safe FTS5 MATCH expression: each word is
+// wrapped as a quoted phrase, with embedded quotes escaped by doubling (the
+// FTS5 convention), so punctuation in the input can't be parsed as FTS5
+// query syntax.
+func ftsQuery(text string) string {
+	fields := strings.Fields(text)
+	quoted := make([]string, len(fields))
+	for i, f := range fields {
+		quoted[i] = `"` + strings.ReplaceAll(f, `"`, `""`) + `"`
+	}
+	return strings.Join(quoted, " ")
 }
 
 func scanMessages(rows *sql.Rows) ([]Message, error) {

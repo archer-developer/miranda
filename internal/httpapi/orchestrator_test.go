@@ -35,7 +35,11 @@ func newTestOrchestrator(t *testing.T, provider *llmtest.FakeProvider, mcpClient
 
 	o := NewOrchestrator(
 		r, toolManager, h, mem, nil, hub.New(100),
-		config.MemoryConfig{ExplicitTool: true, AutoSummarize: false},
+		config.AgentConfig{},
+		config.MemoryConfig{
+			ExplicitTool: true, AutoSummarize: false, SearchHistoryTool: true,
+			EndConversationTool: true, ForgetConversationTool: true,
+		},
 		config.EscalationConfig{Enabled: true, ToolName: "escalate_to_claude", TargetProvider: provider.Name()},
 		100, "debug",
 	)
@@ -115,6 +119,7 @@ func TestOrchestrator_EscalationIsTransparentToOrchestrator(t *testing.T) {
 	require.NoError(t, err)
 
 	o := NewOrchestrator(r, mcp.NewManager(), h, mem, nil, hub.New(100),
+		config.AgentConfig{},
 		config.MemoryConfig{ExplicitTool: true},
 		config.EscalationConfig{Enabled: true, ToolName: "escalate_to_claude", TargetProvider: "claude"},
 		100, "debug")
@@ -123,6 +128,51 @@ func TestOrchestrator_EscalationIsTransparentToOrchestrator(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, "Развёрнутый ответ от Клода.", resp.Reply)
 	require.Equal(t, "claude", resp.ProviderUsed)
+}
+
+func TestOrchestrator_SearchHistoryToolFindsPastConversation(t *testing.T) {
+	provider := llmtest.New("local",
+		llmtest.Response{Text: "Записал."},
+		llmtest.Response{Text: "## Summary\nUser is planning a trip to Italy.\n## Preferences\n"},
+		llmtest.Response{ToolCall: &llm.ToolCall{ID: "call-1", Name: "search_history", Arguments: `{"query":"Италию"}`}},
+		llmtest.Response{Text: "Да, ты говорил про отпуск в Италии."},
+	)
+	o, _, _ := newTestOrchestrator(t, provider)
+	ctx := context.Background()
+
+	_, err := o.Handle(ctx, InputRequest{Source: "cli", UserID: "alex", Text: "я собираюсь в отпуск в Италию"})
+	require.NoError(t, err)
+
+	// Server-owned session continuity means this first conversation would
+	// otherwise still be open (and thus already in context) when the second
+	// turn arrives — end it now to simulate it having closed via the idle
+	// timeout, so the second turn genuinely has to search a past, closed
+	// conversation rather than seeing it already in its own context.
+	require.NoError(t, o.SummarizeIdleSessions(ctx, 0))
+
+	resp, err := o.Handle(ctx, InputRequest{Source: "cli", UserID: "alex", Text: "помнишь, куда я собирался?"})
+	require.NoError(t, err)
+	require.Equal(t, "Да, ты говорил про отпуск в Италии.", resp.Reply)
+
+	// The tool result fed back to the model must contain the earlier
+	// conversation's summary.
+	lastReqMessages := provider.Requests[len(provider.Requests)-1].Messages
+	require.Contains(t, lastReqMessages[len(lastReqMessages)-1].Content, "trip to Italy")
+}
+
+func TestOrchestrator_SearchHistoryToolReportsNoMatches(t *testing.T) {
+	provider := llmtest.New("local",
+		llmtest.Response{ToolCall: &llm.ToolCall{ID: "call-1", Name: "search_history", Arguments: `{"query":"динозавры"}`}},
+		llmtest.Response{Text: "Не припомню такого разговора."},
+	)
+	o, _, _ := newTestOrchestrator(t, provider)
+
+	resp, err := o.Handle(context.Background(), InputRequest{Source: "cli", UserID: "alex", Text: "мы говорили о динозаврах?"})
+	require.NoError(t, err)
+	require.Equal(t, "Не припомню такого разговора.", resp.Reply)
+
+	lastReqMessages := provider.Requests[len(provider.Requests)-1].Messages
+	require.Contains(t, lastReqMessages[len(lastReqMessages)-1].Content, "no matching")
 }
 
 func TestOrchestrator_ContinuesExistingConversationWithPriorContext(t *testing.T) {
@@ -135,9 +185,10 @@ func TestOrchestrator_ContinuesExistingConversationWithPriorContext(t *testing.T
 	first, err := o.Handle(context.Background(), InputRequest{Source: "cli", UserID: "alex", Text: "первое сообщение"})
 	require.NoError(t, err)
 
-	second, err := o.Handle(context.Background(), InputRequest{
-		Source: "cli", UserID: "alex", Text: "второе сообщение", ConversationID: first.ConversationID,
-	})
+	// No conversation_id is passed here — session continuity is server-owned
+	// and keyed only on userID, so this must still continue the same open
+	// conversation automatically.
+	second, err := o.Handle(context.Background(), InputRequest{Source: "cli", UserID: "alex", Text: "второе сообщение"})
 	require.NoError(t, err)
 	require.Equal(t, first.ConversationID, second.ConversationID)
 
@@ -150,4 +201,61 @@ func TestOrchestrator_ContinuesExistingConversationWithPriorContext(t *testing.T
 		}
 	}
 	require.True(t, sawFirstUserMessage)
+}
+
+func TestOrchestrator_EndConversationToolEndsSessionAndSummarizesImmediately(t *testing.T) {
+	provider := llmtest.New("local",
+		llmtest.Response{ToolCall: &llm.ToolCall{ID: "call-1", Name: "end_conversation", Arguments: `{}`}},
+		llmtest.Response{Text: "Хорошо, начинаем сначала."},
+		llmtest.Response{Text: "## Summary\nUser asked to start a new conversation.\n## Preferences\n"},
+		llmtest.Response{Text: "Привет!"},
+	)
+	o, h, _ := newTestOrchestrator(t, provider)
+	ctx := context.Background()
+
+	resp, err := o.Handle(ctx, InputRequest{Source: "cli", UserID: "alex", Text: "давай начнём новую беседу"})
+	require.NoError(t, err)
+	require.Equal(t, "Хорошо, начинаем сначала.", resp.Reply)
+
+	ended, err := h.GetConversation(ctx, resp.ConversationID)
+	require.NoError(t, err)
+	require.NotNil(t, ended.EndedAt)
+	require.Contains(t, ended.Summary, "start a new conversation")
+
+	// The next turn for the same user must open a brand-new conversation,
+	// not resume the one just ended.
+	next, err := o.Handle(ctx, InputRequest{Source: "cli", UserID: "alex", Text: "привет"})
+	require.NoError(t, err)
+	require.NotEqual(t, resp.ConversationID, next.ConversationID)
+}
+
+func TestOrchestrator_ForgetConversationToolDeletesConversationEntirely(t *testing.T) {
+	provider := llmtest.New("local",
+		llmtest.Response{Text: "Записал."},
+		llmtest.Response{ToolCall: &llm.ToolCall{ID: "call-1", Name: "forget_conversation", Arguments: `{}`}},
+		llmtest.Response{Text: "Хорошо, забыл."},
+	)
+	o, h, mem := newTestOrchestrator(t, provider)
+	ctx := context.Background()
+
+	first, err := o.Handle(ctx, InputRequest{Source: "cli", UserID: "alex", Text: "секретная информация"})
+	require.NoError(t, err)
+
+	resp, err := o.Handle(ctx, InputRequest{Source: "cli", UserID: "alex", Text: "забудь этот диалог"})
+	require.NoError(t, err)
+	require.Equal(t, "Хорошо, забыл.", resp.Reply)
+	require.Equal(t, first.ConversationID, resp.ConversationID)
+
+	gone, err := h.GetConversation(ctx, resp.ConversationID)
+	require.NoError(t, err)
+	require.Nil(t, gone)
+
+	msgs, err := h.ConversationMessages(ctx, resp.ConversationID)
+	require.NoError(t, err)
+	require.Empty(t, msgs)
+
+	// A forgotten conversation must never write anything to memory.
+	content, err := mem.Read("alex")
+	require.NoError(t, err)
+	require.Empty(t, content)
 }

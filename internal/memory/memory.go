@@ -68,6 +68,18 @@ func (s *Store) Remember(userID, fact string) error {
 	return s.writeLocked(userID, updated)
 }
 
+// Write overwrites userID's entire memory file verbatim with content. This
+// is the web UI editor's write path: unlike Remember/ReplaceSection, which
+// each only ever touch one section so the model's automated writes can't
+// clobber each other, a human editing their own memory in the UI is
+// expected to see and control the whole document at once.
+func (s *Store) Write(userID, content string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	return s.writeLocked(userID, content)
+}
+
 // ReplaceSection overwrites the content of a named "## <section>" with body,
 // leaving every other section untouched. This is the summarization pass's
 // write path: it re-derives one section (e.g. "## Preferences") from the

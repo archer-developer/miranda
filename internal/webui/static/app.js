@@ -81,13 +81,13 @@
   });
 
   document.getElementById("dialogs-load").addEventListener("click", async () => {
-    const userID = document.getElementById("dialogs-user").value.trim();
     const listEl = document.getElementById("dialogs-list");
-    if (!userID) return;
 
     listEl.textContent = t("loading_ellipsis", "Loading…");
     try {
-      const res = await fetch(`/api/dialogs?user_id=${encodeURIComponent(userID)}`);
+      // No user_id sent: the server always scopes this to the logged-in
+      // user's own conversations (see internal/webui.handleDialogs).
+      const res = await fetch("/api/dialogs");
       const conversations = await res.json();
       listEl.innerHTML = "";
       if (!conversations || conversations.length === 0) {
@@ -97,7 +97,7 @@
       for (const c of conversations) {
         const item = document.createElement("div");
         item.className = "cursor-pointer rounded-md border border-slate-800 p-2 hover:bg-slate-800";
-        item.textContent = `${c.started_at} — ${c.source}`;
+        item.textContent = c.summary ? `${c.started_at} — ${c.summary}` : `${c.started_at} — ${c.source}`;
         item.addEventListener("click", () => loadConversation(c.id, item));
         listEl.appendChild(item);
       }
@@ -119,5 +119,36 @@
     container.appendChild(detail);
   }
 
+  const memoryText = document.getElementById("memory-text");
+  const memoryStatus = document.getElementById("memory-status");
+
+  async function loadMemory() {
+    try {
+      const res = await fetch("/api/memory");
+      if (!res.ok) return;
+      const data = await res.json();
+      memoryText.value = data.content || "";
+    } catch {
+      memoryStatus.textContent = t("failed_to_load", "Failed to load:");
+    }
+  }
+
+  document.getElementById("memory-save").addEventListener("click", async () => {
+    memoryStatus.textContent = t("memory_saving_ellipsis", "Saving…");
+    try {
+      const res = await fetch("/api/memory", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ content: memoryText.value }),
+      });
+      memoryStatus.textContent = res.ok
+        ? t("memory_saved", "Saved")
+        : `${t("request_failed", "Request failed:")} ${res.status}`;
+    } catch (err) {
+      memoryStatus.textContent = `${t("request_failed", "Request failed:")} ${err}`;
+    }
+  });
+
+  loadMemory();
   connectLogs();
 })();

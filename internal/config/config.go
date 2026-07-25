@@ -17,6 +17,7 @@ type Config struct {
 	Server  ServerConfig  `yaml:"server"`
 	Storage StorageConfig `yaml:"storage"`
 	LLM     LLMConfig     `yaml:"llm"`
+	Agent   AgentConfig   `yaml:"agent"`
 	Memory  MemoryConfig  `yaml:"memory"`
 	MCP     MCPConfig     `yaml:"mcp"`
 	TTS     TTSConfig     `yaml:"tts"`
@@ -87,10 +88,36 @@ type LLMConfig struct {
 	Escalation      EscalationConfig `yaml:"escalation"`
 }
 
-// MemoryConfig controls how per-user markdown memory gets updated.
+// MemoryConfig controls how per-user markdown memory gets updated and how
+// conversation sessions begin and end.
 type MemoryConfig struct {
 	AutoSummarize bool `yaml:"auto_summarize"`
 	ExplicitTool  bool `yaml:"explicit_tool"`
+	// SessionIdleTimeoutMinutes is how long a conversation must sit with no
+	// new messages before the background sweeper (cmd/miranda) treats it as
+	// over, distills it into memory, and marks it ended. Only consulted when
+	// AutoSummarize is true. The server — not any conversation_id a caller
+	// echoes back — is what decides session continuity (see
+	// history.Store.OpenConversation), so this timeout is what actually
+	// governs when a session boundary happens.
+	SessionIdleTimeoutMinutes int `yaml:"session_idle_timeout_minutes"`
+	// SearchHistoryTool exposes a search_history tool the model can call when
+	// the user references an earlier conversation ("помнишь мы говорили о
+	// ...") — a full-text lookup over past (ended) conversations in
+	// internal/history, returning each match's stored summary rather than
+	// raw messages, distinct from the distilled facts in the per-user memory
+	// file.
+	SearchHistoryTool bool `yaml:"search_history_tool"`
+	// EndConversationTool exposes an end_conversation tool the model can call
+	// when the user explicitly asks to start a new conversation ("давай
+	// начнём новую беседу") — ends the current session immediately instead
+	// of waiting for the idle timeout.
+	EndConversationTool bool `yaml:"end_conversation_tool"`
+	// ForgetConversationTool exposes a forget_conversation tool the model can
+	// call when the user asks to erase the current conversation entirely
+	// ("забудь этот диалог", "давай с начала") — deletes it from history with
+	// no summarization, unlike a normal session end.
+	ForgetConversationTool bool `yaml:"forget_conversation_tool"`
 }
 
 // MCPServer is one MCP server the agent connects to as a tool source.
@@ -138,6 +165,15 @@ type WebUIConfig struct {
 	DefaultLanguage string `yaml:"default_language"`
 }
 
+// AgentConfig controls high-level agent behaviour that is separate from
+// the model-provider choice (LLMConfig) or memory mechanics (MemoryConfig).
+type AgentConfig struct {
+	// SystemPrompt is injected as the system message at the start of every
+	// LLM conversation. Override this in config.yaml to change the assistant
+	// persona, add standing instructions, or restrict topic scope.
+	SystemPrompt string `yaml:"system_prompt"`
+}
+
 // Default returns the built-in configuration used when config.yaml is absent
 // or only overrides a subset of fields.
 func Default() Config {
@@ -161,8 +197,12 @@ func Default() Config {
 			},
 		},
 		Memory: MemoryConfig{
-			AutoSummarize: true,
-			ExplicitTool:  true,
+			AutoSummarize:             true,
+			ExplicitTool:              true,
+			SessionIdleTimeoutMinutes: 25,
+			SearchHistoryTool:         true,
+			EndConversationTool:       true,
+			ForgetConversationTool:    true,
 		},
 		MCP: MCPConfig{
 			Servers: nil,
@@ -178,6 +218,9 @@ func Default() Config {
 			HATTS: HATTSConfig{
 				Enabled: false,
 			},
+		},
+		Agent: AgentConfig{
+			SystemPrompt: "You are Miranda, a home voice assistant. Be concise — your replies are often spoken aloud.",
 		},
 		WebUI: WebUIConfig{
 			Enabled:         true,

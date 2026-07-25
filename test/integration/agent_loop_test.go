@@ -56,7 +56,11 @@ func newHarness(t *testing.T, provider *llmtest.FakeProvider, mcpClients ...mcp.
 
 	orchestrator := httpapi.NewOrchestrator(
 		r, toolManager, historyStore, memoryStore, nil, eventHub,
-		config.MemoryConfig{ExplicitTool: true, AutoSummarize: false},
+		config.AgentConfig{},
+		config.MemoryConfig{
+			ExplicitTool: true, AutoSummarize: false,
+			EndConversationTool: true, ForgetConversationTool: true,
+		},
 		escalation, 100, "debug",
 	)
 
@@ -135,6 +139,58 @@ func TestAgentLoop_RememberThisUpdatesMemoryFile(t *testing.T) {
 	content, err := h.memory.Read("alex")
 	require.NoError(t, err)
 	require.Contains(t, content, "allergic to cats")
+}
+
+func TestAgentLoop_ContinuesSameConversationAcrossSeparateRequestsForSameUser(t *testing.T) {
+	provider := llmtest.New("local",
+		llmtest.Response{Text: "Первый ответ."},
+		llmtest.Response{Text: "Второй ответ."},
+	)
+	h := newHarness(t, provider)
+
+	first := h.post(t, httpapi.InputRequest{Source: "cli", UserID: "alex", Text: "первое сообщение"})
+	// No conversation_id sent — session continuity is server-owned per user.
+	second := h.post(t, httpapi.InputRequest{Source: "cli", UserID: "alex", Text: "второе сообщение"})
+
+	require.Equal(t, first.ConversationID, second.ConversationID)
+}
+
+func TestAgentLoop_EndConversationToolClosesSessionThroughRealHTTPPath(t *testing.T) {
+	provider := llmtest.New("local",
+		llmtest.Response{ToolCall: &llm.ToolCall{ID: "call-1", Name: "end_conversation", Arguments: `{}`}},
+		llmtest.Response{Text: "Начинаем сначала."},
+		llmtest.Response{Text: "## Summary\nUser wanted a fresh start.\n## Preferences\n"},
+		llmtest.Response{Text: "Привет!"},
+	)
+	h := newHarness(t, provider)
+
+	first := h.post(t, httpapi.InputRequest{Source: "cli", UserID: "alex", Text: "давай начнём новую беседу"})
+	require.Equal(t, "Начинаем сначала.", first.Reply)
+
+	convos, err := h.history.RecentConversations(t.Context(), "alex", 10)
+	require.NoError(t, err)
+	require.Len(t, convos, 1)
+	require.NotNil(t, convos[0].EndedAt)
+
+	second := h.post(t, httpapi.InputRequest{Source: "cli", UserID: "alex", Text: "привет"})
+	require.NotEqual(t, first.ConversationID, second.ConversationID)
+}
+
+func TestAgentLoop_ForgetConversationToolDeletesConversationThroughRealHTTPPath(t *testing.T) {
+	provider := llmtest.New("local",
+		llmtest.Response{Text: "Записал."},
+		llmtest.Response{ToolCall: &llm.ToolCall{ID: "call-1", Name: "forget_conversation", Arguments: `{}`}},
+		llmtest.Response{Text: "Забыл."},
+	)
+	h := newHarness(t, provider)
+
+	first := h.post(t, httpapi.InputRequest{Source: "cli", UserID: "alex", Text: "секрет"})
+	second := h.post(t, httpapi.InputRequest{Source: "cli", UserID: "alex", Text: "забудь этот диалог"})
+	require.Equal(t, first.ConversationID, second.ConversationID)
+
+	msgs, err := h.history.ConversationMessages(t.Context(), second.ConversationID)
+	require.NoError(t, err)
+	require.Empty(t, msgs)
 }
 
 func TestAgentLoop_RejectsRequestMissingText(t *testing.T) {

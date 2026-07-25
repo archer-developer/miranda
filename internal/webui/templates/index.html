@@ -64,16 +64,27 @@
         </section>
 
         <section class="flex min-h-0 flex-1 flex-col rounded-lg border border-slate-800 bg-slate-900/50 p-4">
-          <h2 class="mb-3 text-sm font-medium text-slate-300">{{.Strings.dialog_history_title}}</h2>
-          <div class="mb-2 flex gap-2">
-            <input id="dialogs-user" type="text" placeholder="{{.Strings.user_id_placeholder}}" value="{{.User.Username}}"
-                   class="flex-1 rounded-md border border-slate-700 bg-slate-950 px-3 py-2 text-sm placeholder:text-slate-500 focus:border-slate-500 focus:outline-none" />
+          <div class="mb-3 flex items-center justify-between">
+            <h2 class="text-sm font-medium text-slate-300">{{.Strings.dialog_history_title}}</h2>
             <button id="dialogs-load"
-                    class="rounded-md border border-slate-700 px-3 py-2 text-sm text-slate-200 hover:bg-slate-800">
+                    class="rounded-md border border-slate-700 px-3 py-1 text-xs text-slate-200 hover:bg-slate-800">
               {{.Strings.load_button}}
             </button>
           </div>
           <div id="dialogs-list" class="flex-1 space-y-2 overflow-y-auto text-sm text-slate-300"></div>
+        </section>
+
+        <section class="flex min-h-0 flex-col rounded-lg border border-slate-800 bg-slate-900/50 p-4">
+          <div class="mb-3 flex items-center justify-between">
+            <h2 class="text-sm font-medium text-slate-300">{{.Strings.memory_title}}</h2>
+            <span id="memory-status" class="text-xs text-slate-500"></span>
+          </div>
+          <textarea id="memory-text" rows="8" placeholder="{{.Strings.memory_placeholder}}"
+                    class="w-full flex-1 resize-none rounded-md border border-slate-700 bg-slate-950 px-3 py-2 font-mono text-xs placeholder:text-slate-500 focus:border-slate-500 focus:outline-none"></textarea>
+          <button id="memory-save"
+                  class="mt-2 rounded-md bg-indigo-500 px-3 py-2 text-sm font-medium text-white hover:bg-indigo-400 active:bg-indigo-600">
+            {{.Strings.memory_save_button}}
+          </button>
         </section>
       </aside>
     </main>

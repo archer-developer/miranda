@@ -4,6 +4,7 @@ import (
 	"context"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 )
@@ -64,6 +65,56 @@ func TestSearchMessages_FullTextSearchScopedToUser(t *testing.T) {
 	require.Contains(t, results[0].Content, "завтра")
 }
 
+func TestIdleConversations_FiltersByCutoffAndOpenStatus(t *testing.T) {
+	ctx := context.Background()
+	s := openTestStore(t)
+
+	openConv, err := s.StartConversation(ctx, "alex", "cli")
+	require.NoError(t, err)
+	_, err = s.AppendMessage(ctx, openConv, "user", "привет")
+	require.NoError(t, err)
+
+	closedConv, err := s.StartConversation(ctx, "alex", "cli")
+	require.NoError(t, err)
+	_, err = s.AppendMessage(ctx, closedConv, "user", "и это тоже")
+	require.NoError(t, err)
+	require.NoError(t, s.EndConversation(ctx, closedConv))
+
+	// Under a generous cutoff, nothing just created counts as idle yet.
+	idle, err := s.IdleConversations(ctx, time.Hour)
+	require.NoError(t, err)
+	require.Empty(t, idle)
+
+	// Under a zero cutoff, the still-open conversation is immediately idle;
+	// the already-ended one must never come back regardless of cutoff.
+	idle, err = s.IdleConversations(ctx, 0)
+	require.NoError(t, err)
+	require.Len(t, idle, 1)
+	require.Equal(t, openConv, idle[0].ID)
+}
+
+func TestSearchMessages_TreatsQueryAsFreeTextNotFTSSyntax(t *testing.T) {
+	ctx := context.Background()
+	s := openTestStore(t)
+
+	conv, err := s.StartConversation(ctx, "alex", "cli")
+	require.NoError(t, err)
+	_, err = s.AppendMessage(ctx, conv, "user", "мы говорили про отпуск в Италии")
+	require.NoError(t, err)
+
+	// Characters meaningful to FTS5 query syntax (unmatched quotes, boolean
+	// operators, unbalanced parens) must not cause a query syntax error —
+	// this is model-generated input via the search_history tool, not a
+	// hand-written FTS5 query.
+	_, err = s.SearchMessages(ctx, "alex", `отпуск" AND (Италии OR test`, 10)
+	require.NoError(t, err)
+
+	// A plain keyword still finds the match.
+	results, err := s.SearchMessages(ctx, "alex", "отпуск", 10)
+	require.NoError(t, err)
+	require.Len(t, results, 1)
+}
+
 func TestRecentConversations_RespectsLimit(t *testing.T) {
 	ctx := context.Background()
 	s := openTestStore(t)
@@ -76,4 +127,147 @@ func TestRecentConversations_RespectsLimit(t *testing.T) {
 	convos, err := s.RecentConversations(ctx, "alex", 3)
 	require.NoError(t, err)
 	require.Len(t, convos, 3)
+}
+
+func TestOpenConversation_ReturnsOpenOnlyOrNil(t *testing.T) {
+	ctx := context.Background()
+	s := openTestStore(t)
+
+	none, err := s.OpenConversation(ctx, "alex")
+	require.NoError(t, err)
+	require.Nil(t, none)
+
+	convID, err := s.StartConversation(ctx, "alex", "cli")
+	require.NoError(t, err)
+
+	open, err := s.OpenConversation(ctx, "alex")
+	require.NoError(t, err)
+	require.NotNil(t, open)
+	require.Equal(t, convID, open.ID)
+
+	require.NoError(t, s.EndConversationWithSummary(ctx, convID, "discussed nothing much"))
+
+	none, err = s.OpenConversation(ctx, "alex")
+	require.NoError(t, err)
+	require.Nil(t, none)
+}
+
+func TestGetConversation_ReturnsNilForMissing(t *testing.T) {
+	ctx := context.Background()
+	s := openTestStore(t)
+
+	missing, err := s.GetConversation(ctx, "does-not-exist")
+	require.NoError(t, err)
+	require.Nil(t, missing)
+
+	convID, err := s.StartConversation(ctx, "alex", "cli")
+	require.NoError(t, err)
+
+	got, err := s.GetConversation(ctx, convID)
+	require.NoError(t, err)
+	require.NotNil(t, got)
+	require.Equal(t, "alex", got.UserID)
+}
+
+func TestEndConversationWithSummary_StoresSummary(t *testing.T) {
+	ctx := context.Background()
+	s := openTestStore(t)
+
+	convID, err := s.StartConversation(ctx, "alex", "cli")
+	require.NoError(t, err)
+	require.NoError(t, s.EndConversationWithSummary(ctx, convID, "talked about a trip to Italy"))
+
+	got, err := s.GetConversation(ctx, convID)
+	require.NoError(t, err)
+	require.NotNil(t, got.EndedAt)
+	require.Equal(t, "talked about a trip to Italy", got.Summary)
+}
+
+func TestSetSystemPrompt_PersistsPrompt(t *testing.T) {
+	ctx := context.Background()
+	s := openTestStore(t)
+
+	convID, err := s.StartConversation(ctx, "alex", "cli")
+	require.NoError(t, err)
+	require.NoError(t, s.SetSystemPrompt(ctx, convID, "You are Miranda."))
+
+	got, err := s.GetConversation(ctx, convID)
+	require.NoError(t, err)
+	require.Equal(t, "You are Miranda.", got.SystemPrompt)
+}
+
+func TestDeleteConversation_RemovesMessagesToolCallsAndFTSEntries(t *testing.T) {
+	ctx := context.Background()
+	s := openTestStore(t)
+
+	convID, err := s.StartConversation(ctx, "alex", "cli")
+	require.NoError(t, err)
+	msgID, err := s.AppendMessage(ctx, convID, "user", "мы говорили про отпуск в Италии")
+	require.NoError(t, err)
+	require.NoError(t, s.AppendToolCall(ctx, msgID, "search_history", "", "{}", "ok"))
+
+	require.NoError(t, s.DeleteConversation(ctx, convID))
+
+	got, err := s.GetConversation(ctx, convID)
+	require.NoError(t, err)
+	require.Nil(t, got)
+
+	msgs, err := s.ConversationMessages(ctx, convID)
+	require.NoError(t, err)
+	require.Empty(t, msgs)
+
+	// The FTS index must not still reference the deleted message.
+	results, err := s.SearchMessages(ctx, "alex", "Италии", 10)
+	require.NoError(t, err)
+	require.Empty(t, results)
+}
+
+func TestSearchConversations_OnlyMatchesEndedConversationsForThatUser(t *testing.T) {
+	ctx := context.Background()
+	s := openTestStore(t)
+
+	closedConv, err := s.StartConversation(ctx, "alex", "cli")
+	require.NoError(t, err)
+	_, err = s.AppendMessage(ctx, closedConv, "user", "я собираюсь в отпуск в Италию")
+	require.NoError(t, err)
+	require.NoError(t, s.EndConversationWithSummary(ctx, closedConv, "trip to Italy planned"))
+
+	openConv, err := s.StartConversation(ctx, "alex", "cli")
+	require.NoError(t, err)
+	_, err = s.AppendMessage(ctx, openConv, "user", "ещё про Италию, но это открытый диалог")
+	require.NoError(t, err)
+
+	otherUserConv, err := s.StartConversation(ctx, "anna", "cli")
+	require.NoError(t, err)
+	_, err = s.AppendMessage(ctx, otherUserConv, "user", "я тоже еду в Италию")
+	require.NoError(t, err)
+	require.NoError(t, s.EndConversationWithSummary(ctx, otherUserConv, "anna's trip"))
+
+	results, err := s.SearchConversations(ctx, "alex", "Италию", 10)
+	require.NoError(t, err)
+	require.Len(t, results, 1)
+	require.Equal(t, closedConv, results[0].ID)
+	require.Equal(t, "trip to Italy planned", results[0].Summary)
+}
+
+func TestMigrate_IsIdempotentAcrossReopens(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "miranda.db")
+
+	s1, err := Open(path)
+	require.NoError(t, err)
+	convID, err := s1.StartConversation(ctx, "alex", "cli")
+	require.NoError(t, err)
+	require.NoError(t, s1.EndConversationWithSummary(ctx, convID, "hello"))
+	require.NoError(t, s1.Close())
+
+	// Reopening an already-migrated database must not fail even though the
+	// summary/system_prompt columns already exist (ensureColumn's job).
+	s2, err := Open(path)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = s2.Close() })
+
+	got, err := s2.GetConversation(ctx, convID)
+	require.NoError(t, err)
+	require.Equal(t, "hello", got.Summary)
 }

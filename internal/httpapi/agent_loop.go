@@ -4,21 +4,41 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 
 	"github.com/archer-developer/miranda/internal/hub"
 	"github.com/archer-developer/miranda/internal/llm"
 	"github.com/archer-developer/miranda/internal/tts"
 )
 
-// resolveConversation either continues an existing conversation (loading its
-// prior turns so the model has context) or starts a new one.
-//
-// Prior turns are reconstructed as plain user/assistant text messages —
-// tool-call structure isn't replayed from history, which is an accepted v1
-// simplification: it only affects continuing a conversation across separate
-// HTTP requests, not the in-flight agent loop within a single request.
-func (o *Orchestrator) resolveConversation(ctx context.Context, userID, source, conversationID string) (string, []llm.Message, error) {
-	if conversationID == "" {
+// searchHistoryLimit bounds how many past conversations the search_history
+// tool feeds back to the model in one call, so a broad query doesn't blow up
+// the prompt.
+const searchHistoryLimit = 8
+
+// turnControl lets a tool call executed mid-agent-loop (end_conversation,
+// forget_conversation) signal Handle to close or delete the conversation
+// once the turn finishes, instead of doing it immediately: the destructive
+// action must wait until after the final assistant reply is recorded (and,
+// via TTS, spoken), or that write would be orphaned/lost.
+type turnControl struct {
+	endRequested    bool
+	forgetRequested bool
+}
+
+// resolveConversation either continues the user's currently open
+// conversation (loading its prior turns so the model has context) or starts
+// a new one. Continuity is server-owned and keyed only on userID — not on
+// any conversation_id a caller might send — so the idle timeout and the
+// explicit end_conversation/forget_conversation tools are what actually
+// govern session boundaries, regardless of which channel (HA, web UI,
+// future Telegram/mobile) a turn arrives on.
+func (o *Orchestrator) resolveConversation(ctx context.Context, userID, source string) (string, []llm.Message, error) {
+	open, err := o.history.OpenConversation(ctx, userID)
+	if err != nil {
+		return "", nil, fmt.Errorf("orchestrator: query open conversation: %w", err)
+	}
+	if open == nil {
 		convID, err := o.history.StartConversation(ctx, userID, source)
 		if err != nil {
 			return "", nil, fmt.Errorf("orchestrator: start conversation: %w", err)
@@ -26,20 +46,31 @@ func (o *Orchestrator) resolveConversation(ctx context.Context, userID, source, 
 		return convID, nil, nil
 	}
 
-	stored, err := o.history.ConversationMessages(ctx, conversationID)
+	stored, err := o.history.ConversationMessages(ctx, open.ID)
 	if err != nil {
-		return "", nil, fmt.Errorf("orchestrator: load conversation %s: %w", conversationID, err)
+		return "", nil, fmt.Errorf("orchestrator: load conversation %s: %w", open.ID, err)
 	}
 
+	// Prior turns are reconstructed as plain user/assistant text messages;
+	// tool-call/tool-result rows are dropped rather than replayed — their
+	// structure doesn't survive a fresh HTTP request anyway (an accepted v1
+	// simplification), and mislabeling a tool result as if the user said it
+	// would actively confuse the model on every later turn of a long-lived
+	// session.
 	messages := make([]llm.Message, 0, len(stored))
 	for _, m := range stored {
-		role := llm.RoleUser
-		if m.Role == "assistant" {
+		var role llm.Role
+		switch m.Role {
+		case "user":
+			role = llm.RoleUser
+		case "assistant":
 			role = llm.RoleAssistant
+		default:
+			continue
 		}
 		messages = append(messages, llm.Message{Role: role, Content: m.Content})
 	}
-	return conversationID, messages, nil
+	return open.ID, messages, nil
 }
 
 // buildSystemPrompt combines the base persona prompt with the user's
@@ -76,6 +107,44 @@ func (o *Orchestrator) availableTools(ctx context.Context) ([]llm.ToolDef, error
 		})
 	}
 
+	if o.memoryCfg.SearchHistoryTool {
+		tools = append(tools, llm.ToolDef{
+			Name: searchHistoryToolName,
+			Description: "Search this user's past conversations for something they said earlier — use it when " +
+				"they reference an earlier conversation (e.g. \"помнишь мы говорили о...\", \"remember when we talked about...\").",
+			Parameters: map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"query": map[string]any{
+						"type":        "string",
+						"description": "keywords to search for, in the same language the user used",
+					},
+				},
+				"required": []string{"query"},
+			},
+		})
+	}
+
+	if o.memoryCfg.EndConversationTool {
+		tools = append(tools, llm.ToolDef{
+			Name: endConversationToolName,
+			Description: "End the current conversation right now — use when the user explicitly asks to start a " +
+				"new conversation (e.g. \"давай начнём новую беседу\", \"let's start a new conversation\"), " +
+				"instead of waiting for the idle timeout to close it.",
+			Parameters: map[string]any{"type": "object", "properties": map[string]any{}},
+		})
+	}
+
+	if o.memoryCfg.ForgetConversationTool {
+		tools = append(tools, llm.ToolDef{
+			Name: forgetConversationToolName,
+			Description: "Delete this entire conversation with no memory of it — use when the user explicitly asks " +
+				"to forget this conversation or start completely from scratch (e.g. \"забудь этот диалог\", " +
+				"\"давай с начала\").",
+			Parameters: map[string]any{"type": "object", "properties": map[string]any{}},
+		})
+	}
+
 	if o.escalationCfg.Enabled {
 		tools = append(tools, llm.ToolDef{
 			Name:        o.escalationCfg.ToolName,
@@ -93,7 +162,7 @@ func (o *Orchestrator) availableTools(ctx context.Context) ([]llm.ToolDef, error
 // runAgentLoop drives the model until it produces a final text-only reply:
 // each iteration streams a response, executes any requested tool calls, and
 // feeds their results back in for the next iteration.
-func (o *Orchestrator) runAgentLoop(ctx context.Context, userID, conversationID string, messages []llm.Message, tools []llm.ToolDef) (string, string, error) {
+func (o *Orchestrator) runAgentLoop(ctx context.Context, userID, conversationID string, messages []llm.Message, tools []llm.ToolDef, control *turnControl) (string, string, error) {
 	var providerUsed string
 
 	for i := 0; i < maxToolIterations; i++ {
@@ -108,7 +177,7 @@ func (o *Orchestrator) runAgentLoop(ctx context.Context, userID, conversationID 
 
 		messages = append(messages, llm.Message{Role: llm.RoleAssistant, Content: text, ToolCalls: toolCalls})
 		for _, tc := range toolCalls {
-			result := o.executeTool(ctx, userID, tc)
+			result := o.executeTool(ctx, userID, tc, control)
 			o.recordToolCall(ctx, conversationID, tc, result)
 			messages = append(messages, llm.Message{Role: llm.RoleTool, ToolCallID: tc.ID, Content: result})
 		}
@@ -162,11 +231,12 @@ func (o *Orchestrator) speakChunks(ctx context.Context, chunks []string) {
 	}
 }
 
-// executeTool runs one tool call, either locally (remember_this) or via the
-// MCP tool manager. Errors are turned into a result string rather than
-// aborting the turn, so the model can see what went wrong and react
-// (apologize, retry differently) instead of the whole request failing.
-func (o *Orchestrator) executeTool(ctx context.Context, userID string, tc llm.ToolCall) string {
+// executeTool runs one tool call, either locally (remember_this,
+// search_history, end_conversation, forget_conversation) or via the MCP tool
+// manager. Errors are turned into a result string rather than aborting the
+// turn, so the model can see what went wrong and react (apologize, retry
+// differently) instead of the whole request failing.
+func (o *Orchestrator) executeTool(ctx context.Context, userID string, tc llm.ToolCall, control *turnControl) string {
 	if tc.Name == rememberToolName {
 		var args struct {
 			Fact string `json:"fact"`
@@ -178,6 +248,37 @@ func (o *Orchestrator) executeTool(ctx context.Context, userID string, tc llm.To
 			return fmt.Sprintf("error: %v", err)
 		}
 		return "remembered"
+	}
+
+	if tc.Name == searchHistoryToolName {
+		var args struct {
+			Query string `json:"query"`
+		}
+		if err := json.Unmarshal([]byte(tc.Arguments), &args); err != nil {
+			return fmt.Sprintf("error: invalid arguments: %v", err)
+		}
+		results, err := o.history.SearchConversations(ctx, userID, args.Query, searchHistoryLimit)
+		if err != nil {
+			return fmt.Sprintf("error: %v", err)
+		}
+		if len(results) == 0 {
+			return "no matching past conversations found"
+		}
+		var b strings.Builder
+		for _, c := range results {
+			fmt.Fprintf(&b, "[%s] %s\n", c.StartedAt.Format("2006-01-02"), c.Summary)
+		}
+		return b.String()
+	}
+
+	if tc.Name == endConversationToolName {
+		control.endRequested = true
+		return "conversation ended"
+	}
+
+	if tc.Name == forgetConversationToolName {
+		control.forgetRequested = true
+		return "conversation forgotten"
 	}
 
 	result, err := o.tools.Call(ctx, tc.Name, tc.Arguments)
