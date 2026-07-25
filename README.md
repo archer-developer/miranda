@@ -247,9 +247,14 @@ your HA host, e.g. `http://192.168.1.50:8787`.
    before saving.
 4. **Settings → Voice Assistants**, open (or create) a pipeline, and set
    **Conversation agent** to **Miranda**. Voice input transcribed by that
-   pipeline's STT step is now forwarded to Miranda; its reply is spoken back
-   through that pipeline's TTS step (a separate output path from Miranda's
-   own Yandex Station channel — both can be active at once).
+   pipeline's STT step is now forwarded to Miranda (`source: ha_assist`);
+   its reply is spoken back through that pipeline's TTS step *and*
+   dispatched to Miranda's own Yandex Station channel — `ha_assist` is the
+   only source that gets the direct TTS dispatch, since it's the only
+   channel with a physical speaker to answer through. Every other channel
+   (the web UI, a future Telegram bot/mobile app) only ever gets its reply
+   back over its own connection (the HTTP response) — it never triggers the
+   shared Yandex Station.
 5. The integration ships with English, Russian, and Belarusian translations
    for its config flow; Home Assistant picks the one matching your user
    profile's language automatically.

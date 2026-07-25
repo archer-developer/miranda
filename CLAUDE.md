@@ -80,7 +80,9 @@ sequenceDiagram
     loop until final text (max 5 tool iterations)
         O->>R: Chat(messages, tools)
         R-->>O: text delta / tool call
-        O-->>Caller: TTS chunks (best-effort, as text streams in)
+        opt source == ha_assist
+            O-->>Caller: TTS chunks to Yandex Station (best-effort, as text streams in)
+        end
         opt model requested a tool
             O->>T: executeTool(name, args, turnControl)
             T-->>O: result
@@ -101,6 +103,22 @@ run *after* the assistant's reply is recorded — a tool call executed
 mid-loop just sets a flag on a `turnControl` struct threaded through
 `runAgentLoop`/`executeTool`, so a request never loses the reply it already
 generated (and, via TTS, already spoke).
+
+### Response routing
+
+The reply always goes back over the HTTP response to whoever called
+`POST /api/v1/input` — that's the only output path for the web UI, and for
+any future channel (Telegram bot, mobile app). `req.Source` is threaded
+through `Handle` → `runAgentLoop` → `streamOneTurn` → `speakChunks`
+(`agent_loop.go`) purely to gate one *additional* output: `speakChunks`
+only calls `o.tts.Speak` when `source == users.SourceHAAssist`
+("`ha_assist`", the HA thin conversation client's fixed source value — see
+`internal/users`). That's deliberate, not incidental: `ha_assist` is the
+one channel with a physical speaker to answer through, and HA's own Assist
+pipeline may *also* speak the same reply via its own TTS step — both firing
+for `ha_assist` is expected (see README). Every other source must never
+trigger the shared Yandex Station, or testing via the web UI's debug box
+would make it talk unprompted.
 
 ### Session lifecycle
 

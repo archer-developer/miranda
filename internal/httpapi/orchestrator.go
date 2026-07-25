@@ -139,7 +139,7 @@ func (o *Orchestrator) Handle(ctx context.Context, req InputRequest) (InputRespo
 	}
 
 	control := &turnControl{}
-	finalText, providerUsed, err := o.runAgentLoop(ctx, userID, convID, messages, tools, control)
+	finalText, providerUsed, err := o.runAgentLoop(ctx, userID, convID, req.Source, messages, tools, control)
 	if err != nil {
 		return InputResponse{}, err
 	}

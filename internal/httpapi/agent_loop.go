@@ -9,6 +9,7 @@ import (
 	"github.com/archer-developer/miranda/internal/hub"
 	"github.com/archer-developer/miranda/internal/llm"
 	"github.com/archer-developer/miranda/internal/tts"
+	"github.com/archer-developer/miranda/internal/users"
 )
 
 // searchHistoryLimit bounds how many past conversations the search_history
@@ -162,11 +163,11 @@ func (o *Orchestrator) availableTools(ctx context.Context) ([]llm.ToolDef, error
 // runAgentLoop drives the model until it produces a final text-only reply:
 // each iteration streams a response, executes any requested tool calls, and
 // feeds their results back in for the next iteration.
-func (o *Orchestrator) runAgentLoop(ctx context.Context, userID, conversationID string, messages []llm.Message, tools []llm.ToolDef, control *turnControl) (string, string, error) {
+func (o *Orchestrator) runAgentLoop(ctx context.Context, userID, conversationID, source string, messages []llm.Message, tools []llm.ToolDef, control *turnControl) (string, string, error) {
 	var providerUsed string
 
 	for i := 0; i < maxToolIterations; i++ {
-		text, toolCalls, err := o.streamOneTurn(ctx, messages, tools, &providerUsed)
+		text, toolCalls, err := o.streamOneTurn(ctx, source, messages, tools, &providerUsed)
 		if err != nil {
 			return "", "", err
 		}
@@ -189,7 +190,7 @@ func (o *Orchestrator) runAgentLoop(ctx context.Context, userID, conversationID 
 // streamOneTurn consumes one router.Chat stream: text deltas are pushed
 // through a tts.Accumulator so complete sentences get spoken as soon as
 // they're available, and tool calls are collected for the caller to execute.
-func (o *Orchestrator) streamOneTurn(ctx context.Context, messages []llm.Message, tools []llm.ToolDef, providerUsed *string) (string, []llm.ToolCall, error) {
+func (o *Orchestrator) streamOneTurn(ctx context.Context, source string, messages []llm.Message, tools []llm.ToolDef, providerUsed *string) (string, []llm.ToolCall, error) {
 	stream, err := o.router.Chat(ctx, llm.ChatRequest{Messages: messages, Tools: tools}, func(name string) { *providerUsed = name })
 	if err != nil {
 		return "", nil, fmt.Errorf("orchestrator: chat: %w", err)
@@ -205,24 +206,31 @@ func (o *Orchestrator) streamOneTurn(ctx context.Context, messages []llm.Message
 		}
 		if chunk.TextDelta != "" {
 			fullText += chunk.TextDelta
-			o.speakChunks(ctx, acc.Push(chunk.TextDelta))
+			o.speakChunks(ctx, source, acc.Push(chunk.TextDelta))
 		}
 		if chunk.ToolCall != nil {
 			toolCalls = append(toolCalls, *chunk.ToolCall)
 		}
 	}
-	o.speakChunks(ctx, acc.Flush())
+	o.speakChunks(ctx, source, acc.Flush())
 
 	return fullText, toolCalls, nil
 }
 
-// speakChunks dispatches each ready chunk to TTS. TTS is best-effort: a
-// dispatch failure is logged to the hub but never fails the turn — a broken
-// speaker shouldn't stop the assistant from answering.
-func (o *Orchestrator) speakChunks(ctx context.Context, chunks []string) {
+// speakChunks dispatches each ready chunk to TTS, but only for turns that
+// arrived via Home Assistant's voice pipeline (source == ha_assist): that's
+// the one channel where the reply also needs to come out of a physical
+// speaker, separate from (and in addition to) the text reply HA's pipeline
+// itself may speak (see README). Every other channel — web UI, a future
+// Telegram bot or mobile app — already has its own output surface (the HTTP
+// response), so dispatching to the shared Yandex Station there would just
+// make it talk at you unprompted. TTS itself is best-effort: a dispatch
+// failure is logged to the hub but never fails the turn — a broken speaker
+// shouldn't stop the assistant from answering.
+func (o *Orchestrator) speakChunks(ctx context.Context, source string, chunks []string) {
 	for _, chunk := range chunks {
 		o.hub.Publish(hub.Event{Source: "assistant", Message: chunk})
-		if o.tts == nil {
+		if o.tts == nil || source != users.SourceHAAssist {
 			continue
 		}
 		if err := o.tts.Speak(ctx, chunk); err != nil {
