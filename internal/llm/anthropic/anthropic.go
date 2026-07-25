@@ -97,6 +97,11 @@ func pump(stream *ssestream.Stream[anthropic.MessageStreamEventUnion], out chan<
 // top-level system prompt and turn-by-turn message list. Tool results are
 // represented as user-role messages containing a tool_result block, per the
 // Anthropic Messages API convention (there is no dedicated "tool" role).
+//
+// A cache_control breakpoint is placed on the last system block so that the
+// system prompt (persona + per-user memory) is reused from Anthropic's prompt
+// cache on subsequent turns of the same conversation, reducing both latency
+// and input-token cost.
 func toAnthropicMessages(msgs []llm.Message) ([]anthropic.TextBlockParam, []anthropic.MessageParam) {
 	var system []anthropic.TextBlockParam
 	var out []anthropic.MessageParam
@@ -130,6 +135,14 @@ func toAnthropicMessages(msgs []llm.Message) ([]anthropic.TextBlockParam, []anth
 		}
 	}
 
+	// Mark the last system block as a cache breakpoint. Anthropic renders the
+	// prompt in the order tools → system → messages, so this checkpoint covers
+	// the entire stable prefix (system prompt + per-user memory) and prevents
+	// it from being re-priced on every subsequent turn.
+	if len(system) > 0 {
+		system[len(system)-1].CacheControl = anthropic.NewCacheControlEphemeralParam()
+	}
+
 	return system, out
 }
 
@@ -150,6 +163,13 @@ func toAnthropicTools(tools []llm.ToolDef) []anthropic.ToolUnionParam {
 			},
 		})
 	}
+
+	// Anthropic's render order is tools → system → messages. A cache breakpoint
+	// on the last tool caches the entire tool list as a shared prefix, so
+	// repeated turns (which always send the same tool definitions) don't pay
+	// input-token cost for them again.
+	out[len(out)-1].OfTool.CacheControl = anthropic.NewCacheControlEphemeralParam()
+
 	return out
 }
 
