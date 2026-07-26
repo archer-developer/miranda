@@ -69,7 +69,7 @@ function selectTab(source, container) {
 export function mount(container) {
   container.innerHTML = `
     <div class="flex h-full flex-col">
-      <div class="mx-auto flex w-full max-w-5xl flex-1 flex-col px-4 py-6 sm:px-6 sm:py-8">
+      <div class="mx-auto flex min-h-0 w-full max-w-5xl flex-1 flex-col px-4 py-6 sm:px-6 sm:py-8">
         <div class="flex items-center justify-between gap-3">
           <h1 class="text-2xl font-semibold tracking-tight text-(--color-text)">${t("nav_logs", "Logs")}</h1>
           <span class="flex items-center gap-1.5 text-xs font-medium text-(--color-success-text)">
