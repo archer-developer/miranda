@@ -48,8 +48,8 @@ Two independent stores back everything conversation- and memory-related:
 Session continuity is **server-owned, keyed only on user identity** — not on
 any `conversation_id` a caller sends. `InputRequest.ConversationID` is
 accepted for backward-compatible request shape but is never read: the same
-user talking through Home Assistant, the web UI, or any future channel
-(Telegram, mobile) always continues the same open conversation, because
+user talking through Home Assistant, the web UI, Telegram, or any future
+channel (mobile app) always continues the same open conversation, because
 `resolveConversation` looks it up via `history.OpenConversation(userID)`
 rather than trusting the caller. This is what makes the idle timeout
 (`Memory.SessionIdleTimeoutMinutes`, default 25) and the explicit
@@ -107,9 +107,13 @@ generated (and, via TTS, already spoke).
 ### Response routing
 
 The reply always goes back over the HTTP response to whoever called
-`POST /api/v1/input` — that's the only output path for the web UI, and for
-any future channel (Telegram bot, mobile app). `req.Source` and the current
-turn's `turnControl` are threaded through `Handle` → `runAgentLoop` →
+`POST /api/v1/input` — that's the only output path for the web UI and any
+future channel (mobile app) that calls it directly. Telegram is the one
+exception: its webhook handler (`internal/httpapi/telegram.go`) calls
+`Orchestrator.Handle` in-process rather than over HTTP, and delivers the
+reply back out through the Telegram Bot API instead — see "Telegram
+channel" below. `req.Source` and the current turn's `turnControl` are
+threaded through `Handle` → `runAgentLoop` →
 `streamOneTurn` → `speakChunks` (`agent_loop.go`) purely to gate one
 *additional* output: `speakChunks` only calls `o.tts.Speak` (always
 `tts.primary` — Yandex Station, see `internal/tts`) when
@@ -123,6 +127,35 @@ README). Every other source stays silent unless the model explicitly calls
 `speak_reply` because the user asked to hear the answer — otherwise it must
 never trigger the shared Yandex Station, or testing via the web UI's debug
 box would make it talk unprompted.
+
+### Telegram channel
+
+Optional (`config.TelegramConfig.Enabled`, default false — see
+`internal/telegram` and `internal/httpapi/telegram.go`). Shape of the whole
+path: Telegram POSTs an update to `webhook_path` → `handleTelegramWebhook`
+checks the `X-Telegram-Bot-Api-Secret-Token` header against a secret
+generated fresh at every process startup (`telegram.RandomSecret`, then
+re-registered with Telegram via `setWebhook` — nothing to configure or
+rotate by hand) → the sender's `@username` is resolved to a configured
+`Username` via `users.Registry.ResolveByTelegramName`. **An unmatched
+account is logged as a warning and dropped before `Orchestrator.Handle` is
+ever called** — there's no history/memory identity for an unrecognized
+Telegram account to act as. A match's chat id is saved into
+`telegram.ChatStore` (a small JSON file, `Storage.TelegramChatsPath`) on
+every message, since the Bot API gives no way to learn a user's chat id
+except from a message they sent — this is also what makes the
+`send_telegram` tool's proactive sends work later. The reply is delivered
+via `telegram.Client.SendMessage` (the Bot API), not this handler's HTTP
+response body, which Telegram never reads.
+
+The `send_telegram` tool (`Orchestrator.SetTelegram`,
+`config.TelegramConfig.SendMessageTool`) is the *outbound* half: it lets the
+model push a message to any household member's Telegram — the current user
+by default, or another one resolved by `users.Registry.ResolveByDisplayName`
+matching what the user said (e.g. "Аня") against that user's `FullName`/
+`Username`. It fails with a clear error (relayed back to the model, not the
+caller) if the target has never messaged the bot, since that's the only way
+`ChatStore` ever learns a chat id.
 
 ### Session lifecycle
 
@@ -186,6 +219,7 @@ Config flags below live on `config.MemoryConfig` unless otherwise noted.
 | `end_conversation` | `EndConversationTool` | Close the current session right now (idle timeout would eventually do this anyway) — triggered by an explicit "start a new conversation" request. |
 | `forget_conversation` | `ForgetConversationTool` | Delete the current conversation entirely, no memory write — triggered by an explicit "forget this / start from scratch" request. |
 | `speak_reply` | `config.TTSConfig.SpeakReplyTool` | Dispatch this turn's reply to `tts.primary` even on a source other than `ha_assist` — triggered by an explicit "read/say that aloud" request (see Response routing above). |
+| `send_telegram` | `config.TelegramConfig.SendMessageTool` | Proactively push a message to a household member's Telegram (current user by default, or a named one) — see Telegram channel above. |
 | `escalate_to_claude` (name configurable) | `config.EscalationConfig.Enabled` | Hand a hard turn to a stronger provider; intercepted at the router level, transparent to the Orchestrator. |
 | MCP tools (e.g. `ha_*`) | `config.MCPConfig.Servers[].Enabled` | Home Assistant and other MCP-exposed device/service actions. |
 

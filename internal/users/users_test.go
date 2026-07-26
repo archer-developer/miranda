@@ -69,6 +69,46 @@ func TestResolveUserID_UnmatchedOrNonHASourcePassesThrough(t *testing.T) {
 	require.Equal(t, "ha-uuid-alex", r.ResolveUserID("cli", "ha-uuid-alex"))
 }
 
+func TestResolveByTelegramName_MatchesRegardlessOfAtPrefixOrCase(t *testing.T) {
+	r, err := NewRegistry([]config.UserConfig{
+		{Username: "alex", PasswordHash: mustHash(t, "555"), TelegramName: "@AlexTG"},
+	})
+	require.NoError(t, err)
+
+	u, ok := r.ResolveByTelegramName("alextg")
+	require.True(t, ok)
+	require.Equal(t, "alex", u.Username)
+
+	u, ok = r.ResolveByTelegramName("@AlexTG")
+	require.True(t, ok)
+	require.Equal(t, "alex", u.Username)
+
+	_, ok = r.ResolveByTelegramName("someone_else")
+	require.False(t, ok)
+
+	_, ok = r.ResolveByTelegramName("")
+	require.False(t, ok)
+}
+
+func TestResolveByDisplayName_MatchesUsernameOrFullName(t *testing.T) {
+	r, err := NewRegistry([]config.UserConfig{
+		{Username: "alex", PasswordHash: mustHash(t, "555"), FullName: "Alex Smith"},
+		{Username: "anna", PasswordHash: mustHash(t, "555"), FullName: "Аня"},
+	})
+	require.NoError(t, err)
+
+	u, ok := r.ResolveByDisplayName("аня")
+	require.True(t, ok)
+	require.Equal(t, "anna", u.Username)
+
+	u, ok = r.ResolveByDisplayName("ALEX")
+	require.True(t, ok)
+	require.Equal(t, "alex", u.Username)
+
+	_, ok = r.ResolveByDisplayName("nobody")
+	require.False(t, ok)
+}
+
 func TestDisplayName_FallsBackToUsername(t *testing.T) {
 	require.Equal(t, "alex", User{Username: "alex"}.DisplayName())
 	require.Equal(t, "Alex Smith", User{Username: "alex", FullName: "Alex Smith"}.DisplayName())

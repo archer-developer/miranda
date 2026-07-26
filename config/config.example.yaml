@@ -119,6 +119,25 @@ webauthn:
   rp_display_name: "Miranda"
   rp_origins: [] # full origins the browser may reach Miranda through, e.g. ["https://miranda.example.com"]
 
+telegram:
+  # Optional Telegram bot channel — off by default, same reasoning as
+  # webauthn above: there's no safe auto-detected public_base_url. Needs
+  # HTTPS too; front Miranda with a reverse proxy and point public_base_url
+  # at *that* hostname. Also needs TELEGRAM_BOT_TOKEN (from @BotFather) set
+  # in the environment — see .env / README — and each household member who
+  # should be recognized needs their `telegram_name` set below. The
+  # webhook's auth secret is generated fresh at every startup and
+  # re-registered with Telegram automatically; there's nothing to configure
+  # for that part.
+  enabled: true
+  webhook_path: "/telegram/webhook"
+  public_base_url: "https://miranda.phoenixfw.net" # e.g. "https://miranda.example.com"
+  # Lets the model call send_telegram to proactively message a household
+  # member's Telegram (e.g. "отправь мне на телефон ...", "отправь Ане на
+  # телефон ..."). Only works for someone who has messaged the bot at least
+  # once — Telegram gives bots no way to message a user who hasn't.
+  send_message_tool: true
+
 # Web UI login is mandatory — with no users listed here, the dashboard is
 # unreachable (fails closed by design, not a bug). Generate a password hash
 # with `go run ./cmd/hashpw <password>`; plaintext passwords are never
@@ -129,9 +148,11 @@ webauthn:
 # speaker-recognition user id to this same username, so a person's memory is
 # shared whether they talk to Miranda via HA voice or via a logged-in web UI
 # session — find it under that HA user's profile, or log the raw value
-# Miranda receives from HA and copy it here. The example hashes below are
-# both for the password "555" — change them before exposing this to
-# anything but your own LAN.
+# Miranda receives from HA and copy it here. telegram_name (only relevant
+# when telegram.enabled) does the same job for the Telegram channel: it's
+# this person's Telegram @username, with or without the leading "@". The
+# example hashes below are both for the password "555" — change them before
+# exposing this to anything but your own LAN.
 users:
   - username: alex
     password_hash: "$2a$10$6MwP/mihjsXkugdv4NtBOezKCw0fHnOgepn9LJOPQyWkEr0WA8w2e" # "555"

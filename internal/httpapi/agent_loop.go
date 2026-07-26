@@ -185,6 +185,30 @@ func (o *Orchestrator) availableTools(ctx context.Context) ([]llm.ToolDef, error
 		})
 	}
 
+	if o.telegram != nil && o.telegramCfg.SendMessageTool {
+		tools = append(tools, llm.ToolDef{
+			Name: sendTelegramToolName,
+			Description: "Send a text message to a household member's Telegram — use when the user explicitly asks " +
+				"to send something to a phone (e.g. \"отправь мне на телефон ...\", \"send that to my phone\", " +
+				"\"отправь Ане на телефон ...\"). Only works for someone who has messaged the bot at least once.",
+			Parameters: map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"text": map[string]any{
+						"type":        "string",
+						"description": "the message to send",
+					},
+					"recipient": map[string]any{
+						"type": "string",
+						"description": "the household member's name, exactly as the user said it (e.g. \"Аня\") — " +
+							"omit this to send to whoever is currently talking to you",
+					},
+				},
+				"required": []string{"text"},
+			},
+		})
+	}
+
 	if o.escalationCfg.Enabled {
 		tools = append(tools, llm.ToolDef{
 			Name:        o.escalationCfg.ToolName,
@@ -334,6 +358,33 @@ func (o *Orchestrator) executeTool(ctx context.Context, userID string, tc llm.To
 	if tc.Name == speakReplyToolName {
 		control.speakRequested = true
 		return "will speak the reply aloud"
+	}
+
+	if tc.Name == sendTelegramToolName {
+		var args struct {
+			Text      string `json:"text"`
+			Recipient string `json:"recipient"`
+		}
+		if err := json.Unmarshal([]byte(tc.Arguments), &args); err != nil {
+			return fmt.Sprintf("error: invalid arguments: %v", err)
+		}
+
+		targetUsername := userID
+		if args.Recipient != "" {
+			if o.users == nil {
+				return fmt.Sprintf("error: no household member matches %q", args.Recipient)
+			}
+			target, ok := o.users.ResolveByDisplayName(args.Recipient)
+			if !ok {
+				return fmt.Sprintf("error: no household member matches %q", args.Recipient)
+			}
+			targetUsername = target.Username
+		}
+
+		if err := o.telegram.SendToUser(ctx, targetUsername, args.Text); err != nil {
+			return fmt.Sprintf("error: %v", err)
+		}
+		return "sent"
 	}
 
 	result, err := o.tools.Call(ctx, tc.Name, tc.Arguments)

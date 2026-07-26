@@ -12,6 +12,7 @@ import (
 	"github.com/archer-developer/miranda/internal/llmtrace"
 	"github.com/archer-developer/miranda/internal/mcp"
 	"github.com/archer-developer/miranda/internal/memory"
+	"github.com/archer-developer/miranda/internal/telegram"
 	"github.com/archer-developer/miranda/internal/tts"
 	"github.com/archer-developer/miranda/internal/users"
 )
@@ -30,6 +31,8 @@ const endConversationToolName = "end_conversation"
 const forgetConversationToolName = "forget_conversation"
 
 const speakReplyToolName = "speak_reply"
+
+const sendTelegramToolName = "send_telegram"
 
 // InputRequest is the body of POST /api/v1/input — the single entry point
 // for both Home Assistant's thin conversation agent and manual curl/web UI
@@ -74,6 +77,18 @@ type Orchestrator struct {
 	chunkMaxChars    int
 	defaultUserID    string
 	baseSystemPrompt string
+	telegram         *telegram.Sender // set via SetTelegram; nil means the send_telegram tool is never offered
+	telegramCfg      config.TelegramConfig
+}
+
+// SetTelegram wires the optional send_telegram tool in, mirroring
+// router.SetTracer's post-construction style for an optional dependency —
+// call it once from cmd/miranda after building a telegram.Sender, only
+// when config.TelegramConfig.Enabled. Leaving it uncalled (the default)
+// means availableTools never offers send_telegram at all.
+func (o *Orchestrator) SetTelegram(sender *telegram.Sender, cfg config.TelegramConfig) {
+	o.telegram = sender
+	o.telegramCfg = cfg
 }
 
 // NewOrchestrator wires the agent loop's dependencies together.

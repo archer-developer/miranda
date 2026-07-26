@@ -264,7 +264,7 @@ your HA host, e.g. `http://192.168.1.50:8787`.
    dispatched to Miranda's own Yandex Station channel — `ha_assist` is the
    only source that gets the direct TTS dispatch automatically, since it's
    the only channel with a physical speaker to answer through. Every other
-   channel (the web UI, a future Telegram bot/mobile app) only gets its
+   channel (the web UI, the Telegram bot, a future mobile app) only gets its
    reply back over its own connection (the HTTP response) unless the user
    explicitly asks to hear it, via the model's `speak_reply` tool.
 5. The integration ships with English, Russian, and Belarusian translations
@@ -298,6 +298,69 @@ several tools in one turn).
 
 ---
 
+## Telegram bot
+
+An optional channel: household members can talk to Miranda from a Telegram
+chat, exactly like the web UI or HA voice — same agent loop, same
+history/memory, keyed by the same canonical `username`. Off by default
+(`telegram.enabled: false`); needs HTTPS, so it's only usable once Miranda
+is behind a reverse proxy (the same one `webauthn` needs).
+
+1. **Create the bot**: message [@BotFather](https://t.me/BotFather) on
+   Telegram, `/newbot`, follow the prompts. It gives you a bot token —
+   treat it like a password.
+2. **Set the token** via an environment variable (never in `config.yaml`):
+   ```bash
+   export TELEGRAM_BOT_TOKEN="<the token from BotFather>"
+   ```
+   (or add `TELEGRAM_BOT_TOKEN=<token>` to `.env` for local development —
+   see Configuration above.)
+3. **Configure `config.yaml`**:
+   ```yaml
+   telegram:
+     enabled: true
+     webhook_path: "/telegram/webhook"
+     public_base_url: "https://miranda.example.com" # your reverse proxy's HTTPS hostname
+     send_message_tool: true
+   ```
+   Make sure your reverse proxy forwards `public_base_url + webhook_path`
+   to Miranda's `server.http_addr` — Telegram POSTs updates there directly;
+   Miranda does not terminate TLS itself.
+4. **Map household members**: set `telegram_name` on each user in
+   `users:` to their Telegram `@username` (with or without the leading
+   `@`):
+   ```yaml
+   users:
+     - username: alex
+       telegram_name: "@alex_tg"
+       # ...
+   ```
+   A message from a Telegram account whose `@username` doesn't match any
+   configured `telegram_name` is logged as a warning and dropped — it never
+   reaches the agent loop, so an unrecognized account can't rack up LLM
+   calls or create a history/memory entry under a raw Telegram username.
+5. **Restart Miranda.** On startup it generates a fresh webhook
+   authentication secret and registers `public_base_url + webhook_path`
+   with Telegram automatically — there's no manual `setWebhook` call to
+   make, and nothing else to rotate by hand. Check the logs for `telegram:
+   webhook registered` (or an error if Telegram couldn't be reached, which
+   is retried on the next restart, not fatal).
+6. **Say something to the bot.** The first message from a mapped user is
+   what teaches Miranda that account's chat id (Telegram gives bots no way
+   to look this up otherwise) — this is also what makes proactive sends
+   possible afterward.
+
+### The `send_telegram` tool
+
+With `telegram.send_message_tool: true`, the model can proactively push a
+message to a household member's Telegram — e.g. "отправь мне на телефон
+список покупок" (send to whoever is talking right now) or "отправь Ане на
+телефон купи молока" (send to a named household member, matched against
+that user's `full_name` or `username`). This only works for a user who has
+messaged the bot at least once, for the reason in step 6 above.
+
+---
+
 ## Project layout
 
 ```
@@ -314,6 +377,7 @@ internal/history/        SQLite (pure-Go, no cgo) dialog log with FTS5 search
 internal/memory/         per-user markdown long-term memory
 internal/tts/            sentence-boundary chunking + Yandex Station dispatch
 internal/ha/             minimal Home Assistant REST client (for TTS dispatch)
+internal/telegram/       Telegram Bot API client, webhook types, chat-id store
 internal/webui/          Tailwind v4 dashboard, embedded via go:embed
 test/integration/        black-box agent-loop test (fake LLM + fake MCP, real everything else)
 ha-integration/miranda/  the HA thin conversation client custom_component

@@ -35,6 +35,7 @@ type Server struct {
 	users        *users.Registry
 	sessions     *session.Store
 	logger       *slog.Logger
+	telegram     *TelegramWebhook // set via SetTelegramWebhook; nil means the channel is disabled
 }
 
 // NewServer builds a Server. webUI, if non-nil, is mounted at "/" (see

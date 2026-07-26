@@ -7,6 +7,7 @@ package users
 
 import (
 	"fmt"
+	"strings"
 
 	"golang.org/x/crypto/bcrypt"
 
@@ -18,6 +19,10 @@ import (
 // (a Home Assistant user id from speaker recognition) gets resolved via
 // HAUserID — every other source is trusted to already carry the right id.
 const SourceHAAssist = "ha_assist"
+
+// SourceTelegram is the InputRequest.Source value the Telegram webhook
+// handler (internal/httpapi) uses for turns that arrive via the bot.
+const SourceTelegram = "telegram"
 
 // User is one configured account, with config-file secrets already
 // unwrapped (PasswordHash stays hashed; it's never handled in plaintext
@@ -43,8 +48,9 @@ func (u User) DisplayName() string {
 
 // Registry resolves login credentials and canonical user identity.
 type Registry struct {
-	byUsername map[string]User
-	byHAUserID map[string]User
+	byUsername     map[string]User
+	byHAUserID     map[string]User
+	byTelegramName map[string]User // keyed by normalizeTelegramName(TelegramName)
 }
 
 // NewRegistry builds a Registry from configured users. Usernames must be
@@ -52,8 +58,9 @@ type Registry struct {
 // silently shadowing an account.
 func NewRegistry(configs []config.UserConfig) (*Registry, error) {
 	r := &Registry{
-		byUsername: make(map[string]User, len(configs)),
-		byHAUserID: make(map[string]User),
+		byUsername:     make(map[string]User, len(configs)),
+		byHAUserID:     make(map[string]User),
+		byTelegramName: make(map[string]User),
 	}
 	for _, c := range configs {
 		if c.Username == "" {
@@ -75,8 +82,19 @@ func NewRegistry(configs []config.UserConfig) (*Registry, error) {
 		if c.HAUserID != "" {
 			r.byHAUserID[c.HAUserID] = u
 		}
+		if c.TelegramName != "" {
+			r.byTelegramName[normalizeTelegramName(c.TelegramName)] = u
+		}
 	}
 	return r, nil
+}
+
+// normalizeTelegramName strips an optional leading "@" and lowercases, so
+// config.yaml's telegram_name and the @username Telegram sends on every
+// webhook update compare equal regardless of how either was written —
+// Telegram usernames are themselves case-insensitive.
+func normalizeTelegramName(name string) string {
+	return strings.ToLower(strings.TrimPrefix(strings.TrimSpace(name), "@"))
 }
 
 // Empty reports whether no users are configured — the web UI is
@@ -119,6 +137,41 @@ func (r *Registry) ResolveUserID(source, rawUserID string) string {
 		}
 	}
 	return rawUserID
+}
+
+// ResolveByTelegramName looks up the configured user whose TelegramName
+// matches telegramUsername (the @username Telegram sends as
+// message.from.username on every webhook update), ignoring a leading "@"
+// and case. Used by the webhook handler (internal/httpapi) to map an
+// incoming message to a Miranda account before it ever reaches the agent
+// loop — an unmatched name must not be forwarded (see that handler's doc
+// comment for why: an unrecognized Telegram account has no memory/history
+// identity to act as).
+func (r *Registry) ResolveByTelegramName(telegramUsername string) (User, bool) {
+	if telegramUsername == "" {
+		return User{}, false
+	}
+	u, ok := r.byTelegramName[normalizeTelegramName(telegramUsername)]
+	return u, ok
+}
+
+// ResolveByDisplayName finds the configured user whose Username or
+// FullName case-insensitively matches name — used by the send_telegram
+// tool to resolve a spoken/typed recipient (e.g. "Аня") to an account. The
+// household's member names are already known to the model via the system
+// prompt, so this only needs to match what the model is told, not do fuzzy
+// natural-language matching.
+func (r *Registry) ResolveByDisplayName(name string) (User, bool) {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return User{}, false
+	}
+	for _, u := range r.byUsername {
+		if strings.EqualFold(u.Username, name) || strings.EqualFold(u.FullName, name) {
+			return u, true
+		}
+	}
+	return User{}, false
 }
 
 // HashPassword bcrypt-hashes password for storage in config.yaml's

@@ -2,6 +2,9 @@ package httpapi
 
 import (
 	"context"
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"path/filepath"
 	"testing"
 
@@ -16,6 +19,7 @@ import (
 	"github.com/archer-developer/miranda/internal/mcp"
 	"github.com/archer-developer/miranda/internal/mcp/mcptest"
 	"github.com/archer-developer/miranda/internal/memory"
+	"github.com/archer-developer/miranda/internal/telegram"
 	"github.com/archer-developer/miranda/internal/tts"
 	"github.com/archer-developer/miranda/internal/users"
 )
@@ -364,5 +368,141 @@ func TestOrchestrator_DoesNotSpeakViaTTSForNonHASources(t *testing.T) {
 			// response) — it must never also make the shared Yandex Station talk.
 			require.Empty(t, ha.calls)
 		})
+	}
+}
+
+// newTestOrchestratorWithTelegram is like newTestOrchestrator but also wires
+// up a users.Registry and a telegram.Sender backed by a fake Bot API server,
+// so tests can exercise the send_telegram tool end to end. sentTo records
+// every SendMessage call's (chat id, text) as they happen.
+func newTestOrchestratorWithTelegram(t *testing.T, provider *llmtest.FakeProvider, configs []config.UserConfig) (*Orchestrator, *[]sentTelegramMessage) {
+	t.Helper()
+
+	var sent []sentTelegramMessage
+	fakeAPI := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body map[string]any
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		sent = append(sent, sentTelegramMessage{ChatID: body["chat_id"].(float64), Text: body["text"].(string)})
+		_ = json.NewEncoder(w).Encode(map[string]any{"ok": true})
+	}))
+	t.Cleanup(fakeAPI.Close)
+
+	registry, err := users.NewRegistry(configs)
+	require.NoError(t, err)
+
+	chats, err := telegram.OpenChatStore(filepath.Join(t.TempDir(), "chats.json"))
+	require.NoError(t, err)
+	sender := telegram.NewSender(telegram.NewWithAPIBase("test-token", fakeAPI.URL), chats)
+
+	r, err := router.New([]llm.Provider{provider}, config.EscalationConfig{Enabled: true, ToolName: "escalate_to_claude", TargetProvider: provider.Name()})
+	require.NoError(t, err)
+
+	h, err := history.Open(filepath.Join(t.TempDir(), "miranda.db"))
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = h.Close() })
+
+	mem, err := memory.New(t.TempDir())
+	require.NoError(t, err)
+
+	o := NewOrchestrator(
+		r, mcp.NewManager(), h, mem, nil, hub.New(100), registry,
+		config.AgentConfig{},
+		config.MemoryConfig{},
+		config.TTSConfig{},
+		config.EscalationConfig{Enabled: true, ToolName: "escalate_to_claude", TargetProvider: provider.Name()},
+		100, "debug",
+	)
+	o.SetTelegram(sender, config.TelegramConfig{SendMessageTool: true})
+
+	// Pre-populate the chat store as if every configured user had already
+	// messaged the bot once, chat id == their index+1 — tests that need a
+	// user with *no* known chat should use a username not in configs.
+	for i, c := range configs {
+		require.NoError(t, chats.Save(c.Username, int64(i+1)))
+	}
+
+	return o, &sent
+}
+
+type sentTelegramMessage struct {
+	ChatID float64
+	Text   string
+}
+
+func TestOrchestrator_SendTelegramTool_DefaultsToCurrentUser(t *testing.T) {
+	provider := llmtest.New("local",
+		llmtest.Response{ToolCall: &llm.ToolCall{ID: "call-1", Name: "send_telegram", Arguments: `{"text":"напоминание"}`}},
+		llmtest.Response{Text: "Отправила."},
+	)
+	o, sent := newTestOrchestratorWithTelegram(t, provider, []config.UserConfig{
+		{Username: "alex", PasswordHash: "x", FullName: "Alex"},
+	})
+
+	resp, err := o.Handle(context.Background(), InputRequest{Source: "cli", UserID: "alex", Text: "отправь мне на телефон напоминание"})
+	require.NoError(t, err)
+	require.Equal(t, "Отправила.", resp.Reply)
+
+	require.Len(t, *sent, 1)
+	require.Equal(t, float64(1), (*sent)[0].ChatID) // alex's seeded chat id
+	require.Equal(t, "напоминание", (*sent)[0].Text)
+}
+
+func TestOrchestrator_SendTelegramTool_ResolvesNamedRecipient(t *testing.T) {
+	provider := llmtest.New("local",
+		llmtest.Response{ToolCall: &llm.ToolCall{ID: "call-1", Name: "send_telegram", Arguments: `{"text":"купи молока","recipient":"Аня"}`}},
+		llmtest.Response{Text: "Отправила Ане."},
+	)
+	o, sent := newTestOrchestratorWithTelegram(t, provider, []config.UserConfig{
+		{Username: "alex", PasswordHash: "x", FullName: "Alex"},
+		{Username: "anna", PasswordHash: "x", FullName: "Аня"},
+	})
+
+	resp, err := o.Handle(context.Background(), InputRequest{Source: "cli", UserID: "alex", Text: "отправь Ане на телефон купи молока"})
+	require.NoError(t, err)
+	require.Equal(t, "Отправила Ане.", resp.Reply)
+
+	require.Len(t, *sent, 1)
+	require.Equal(t, float64(2), (*sent)[0].ChatID) // anna's seeded chat id
+	require.Equal(t, "купи молока", (*sent)[0].Text)
+}
+
+func TestOrchestrator_SendTelegramTool_UnknownRecipientReturnsErrorToModel(t *testing.T) {
+	provider := llmtest.New("local",
+		llmtest.Response{ToolCall: &llm.ToolCall{ID: "call-1", Name: "send_telegram", Arguments: `{"text":"привет","recipient":"Незнакомец"}`}},
+		llmtest.Response{Text: "Не нашла такого человека."},
+	)
+	o, sent := newTestOrchestratorWithTelegram(t, provider, []config.UserConfig{
+		{Username: "alex", PasswordHash: "x", FullName: "Alex"},
+	})
+
+	resp, err := o.Handle(context.Background(), InputRequest{Source: "cli", UserID: "alex", Text: "отправь Незнакомцу на телефон привет"})
+	require.NoError(t, err)
+	require.Equal(t, "Не нашла такого человека.", resp.Reply)
+	require.Empty(t, *sent)
+}
+
+func TestOrchestrator_SendTelegramTool_UserWithNoKnownChatReturnsErrorToModel(t *testing.T) {
+	provider := llmtest.New("local",
+		llmtest.Response{ToolCall: &llm.ToolCall{ID: "call-1", Name: "send_telegram", Arguments: `{"text":"привет"}`}},
+		llmtest.Response{Text: "У меня нет твоего телеграма."},
+	)
+	o, sent := newTestOrchestratorWithTelegram(t, provider, nil) // no users seeded => no known chat for "alex"
+
+	resp, err := o.Handle(context.Background(), InputRequest{Source: "cli", UserID: "alex", Text: "отправь мне на телефон привет"})
+	require.NoError(t, err)
+	require.Equal(t, "У меня нет твоего телеграма.", resp.Reply)
+	require.Empty(t, *sent)
+}
+
+func TestOrchestrator_SendTelegramTool_NotOfferedWhenTelegramNotConfigured(t *testing.T) {
+	provider := llmtest.New("local", llmtest.Response{Text: "Привет!"})
+	o, _, _ := newTestOrchestrator(t, provider) // SetTelegram never called
+
+	_, err := o.Handle(context.Background(), InputRequest{Source: "cli", UserID: "alex", Text: "привет"})
+	require.NoError(t, err)
+
+	require.Len(t, provider.Requests, 1)
+	for _, tool := range provider.Requests[0].Tools {
+		require.NotEqual(t, "send_telegram", tool.Name)
 	}
 }

@@ -13,6 +13,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"time"
 
@@ -32,6 +33,7 @@ import (
 	"github.com/archer-developer/miranda/internal/mcp"
 	"github.com/archer-developer/miranda/internal/memory"
 	"github.com/archer-developer/miranda/internal/session"
+	"github.com/archer-developer/miranda/internal/telegram"
 	"github.com/archer-developer/miranda/internal/tts"
 	"github.com/archer-developer/miranda/internal/users"
 	"github.com/archer-developer/miranda/internal/webauthn"
@@ -202,11 +204,19 @@ func run(cfg config.Config, logger *slog.Logger, eventHub *hub.Hub) error {
 		webauthnSvc = svc
 	}
 
+	tgClient, tgChats, tgSecret, err := setupTelegram(cfg.Telegram, cfg.Storage, logger)
+	if err != nil {
+		return err
+	}
+
 	defaultUserID := "debug"
 	orchestrator := httpapi.NewOrchestrator(
 		llmRouter, toolManager, historyStore, memoryStore, dispatcher, eventHub, usersRegistry,
 		cfg.Agent, cfg.Memory, cfg.TTS, cfg.LLM.Escalation, cfg.TTS.YandexStation.ChunkMaxChars, defaultUserID,
 	)
+	if cfg.Telegram.Enabled {
+		orchestrator.SetTelegram(telegram.NewSender(tgClient, tgChats), cfg.Telegram)
+	}
 
 	var webHandler http.Handler
 	if cfg.WebUI.Enabled {
@@ -218,6 +228,14 @@ func run(cfg config.Config, logger *slog.Logger, eventHub *hub.Hub) error {
 	}
 
 	server := httpapi.NewServer(orchestrator, eventHub, cfg.Server.AuthToken, webHandler, logger, usersRegistry, sessions)
+	if cfg.Telegram.Enabled {
+		server.SetTelegramWebhook(&httpapi.TelegramWebhook{
+			Path:   cfg.Telegram.WebhookPath,
+			Secret: tgSecret,
+			Client: tgClient,
+			Chats:  tgChats,
+		})
+	}
 	httpServer := &http.Server{Addr: cfg.Server.HTTPAddr, Handler: server}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -320,6 +338,52 @@ func connectMCP(servers []config.MCPServer, logger *slog.Logger) *mcp.Manager {
 		clients = append(clients, client)
 	}
 	return mcp.NewManager(clients...)
+}
+
+// setupTelegram validates config and wires the optional Telegram bot
+// channel: it opens the persisted chat-id store, builds a Bot API client,
+// generates a fresh webhook secret (see telegram.RandomSecret's doc
+// comment for why this isn't a configured value), and registers
+// PublicBaseURL+WebhookPath as the bot's webhook. Returns a nil Client when
+// cfg.Enabled is false — callers gate all other Telegram wiring on that
+// same flag rather than a nil check, so the two can never drift apart.
+//
+// A failure to reach Telegram's API at startup is logged, not fatal — the
+// same "don't block startup on a flaky external dependency" choice
+// connectMCP makes, since registration just needs to succeed on some future
+// restart, not this exact one.
+func setupTelegram(cfg config.TelegramConfig, storageCfg config.StorageConfig, logger *slog.Logger) (*telegram.Client, *telegram.ChatStore, string, error) {
+	if !cfg.Enabled {
+		return nil, nil, "", nil
+	}
+	token := os.Getenv("TELEGRAM_BOT_TOKEN")
+	if token == "" {
+		return nil, nil, "", fmt.Errorf("main: telegram.enabled is true but TELEGRAM_BOT_TOKEN is not set")
+	}
+	if cfg.PublicBaseURL == "" || cfg.WebhookPath == "" {
+		return nil, nil, "", fmt.Errorf("main: telegram.enabled is true but public_base_url/webhook_path are not configured")
+	}
+
+	chats, err := telegram.OpenChatStore(storageCfg.TelegramChatsPath)
+	if err != nil {
+		return nil, nil, "", err
+	}
+
+	secret, err := telegram.RandomSecret()
+	if err != nil {
+		return nil, nil, "", err
+	}
+
+	client := telegram.New(token)
+	webhookURL := strings.TrimRight(cfg.PublicBaseURL, "/") + cfg.WebhookPath
+	if err := client.SetWebhook(context.Background(), webhookURL, secret); err != nil {
+		logger.Error("telegram: failed to register webhook — the bot will not receive messages until this succeeds on a later restart",
+			"error", err, "url", webhookURL)
+	} else {
+		logger.Info("telegram: webhook registered", "url", webhookURL)
+	}
+
+	return client, chats, secret, nil
 }
 
 // buildTTSDispatcher wires up the Home Assistant REST client TTS needs, if

@@ -24,6 +24,7 @@ type Config struct {
 	TTS      TTSConfig      `yaml:"tts"`
 	WebUI    WebUIConfig    `yaml:"web_ui"`
 	WebAuthn WebAuthnConfig `yaml:"webauthn"`
+	Telegram TelegramConfig `yaml:"telegram"`
 	Users    []UserConfig   `yaml:"users"`
 }
 
@@ -40,8 +41,12 @@ type UserConfig struct {
 	FullName     string `yaml:"full_name,omitempty"`
 	// Avatar is either an http(s) URL, or a bare filename that must exist in
 	// StorageConfig.AvatarsDir (served at /static/avatars/<filename>).
-	Avatar       string `yaml:"avatar,omitempty"`
-	HAUserID     string `yaml:"ha_user_id,omitempty"`
+	Avatar   string `yaml:"avatar,omitempty"`
+	HAUserID string `yaml:"ha_user_id,omitempty"`
+	// TelegramName is this user's Telegram @username (with or without the
+	// leading "@" — normalized on load), used to map incoming webhook
+	// messages to a Username the same way HAUserID maps HA speaker-
+	// recognition ids. Only relevant when TelegramConfig.Enabled is true.
 	TelegramName string `yaml:"telegram_name,omitempty"`
 	// Language is the web UI's default locale for this user after login
 	// ("ru", "be", or "en"); the header switcher can still override it per
@@ -67,6 +72,13 @@ type StorageConfig struct {
 	// changing/wiping the dialog history never touches registered passkeys
 	// (and vice versa). Only used when WebAuthnConfig.Enabled is true.
 	WebAuthnSQLitePath string `yaml:"webauthn_sqlite_path"`
+	// TelegramChatsPath is a small JSON file mapping each Miranda username to
+	// the Telegram chat id learned the first time they message the bot (see
+	// internal/telegram.ChatStore) — the Bot API gives no way to look up or
+	// message a user who has never started a chat with the bot, so this has
+	// to be learned and persisted rather than derived from config. Only used
+	// when TelegramConfig.Enabled is true.
+	TelegramChatsPath string `yaml:"telegram_chats_path"`
 }
 
 // WebAuthnConfig controls optional FIDO2/passkey ("biometric") login,
@@ -93,6 +105,45 @@ type WebAuthnConfig struct {
 	// legitimately reach Miranda through, e.g. ["https://miranda.example.com"].
 	// Must be non-empty for WebAuthn to work at all if Enabled.
 	RPOrigins []string `yaml:"rp_origins"`
+}
+
+// TelegramConfig controls the optional Telegram bot channel (see
+// internal/telegram and internal/httpapi's webhook handler). Incoming
+// messages arrive via a webhook Miranda registers with Telegram at startup,
+// get mapped to a configured user via UserConfig.TelegramName, and are
+// forwarded to the same agent loop every other channel uses; replies go
+// back through the Bot API (Telegram never reads the webhook's HTTP
+// response body), not the HTTP response. Opt-in (Enabled defaults false)
+// for the same reason as WebAuthnConfig: PublicBaseURL is deployment-
+// specific and there's no safe default to guess.
+//
+// Telegram requires an HTTPS webhook URL — Miranda does not terminate TLS
+// itself, so front it with a reverse proxy (the same one WebAuthnConfig
+// needs) and point PublicBaseURL at that proxy's hostname.
+//
+// The bot token (from @BotFather) is read from the TELEGRAM_BOT_TOKEN
+// environment variable, never config.yaml — same convention as
+// HA_MCP_TOKEN/HA_TOKEN. The webhook's authentication secret is generated
+// fresh in memory on every startup (see internal/telegram.RandomSecret) and
+// re-registered with Telegram each time, so there's nothing extra to
+// configure or rotate by hand.
+type TelegramConfig struct {
+	Enabled bool `yaml:"enabled"`
+	// WebhookPath is the path Telegram POSTs updates to, e.g.
+	// "/telegram/webhook". Must match whatever your reverse proxy forwards
+	// to Miranda's http_addr.
+	WebhookPath string `yaml:"webhook_path"`
+	// PublicBaseURL is the public HTTPS origin Telegram can reach Miranda
+	// through (e.g. "https://miranda.example.com") — combined with
+	// WebhookPath and registered with Telegram via setWebhook once at
+	// startup. Must be non-empty (and HTTPS) for Enabled to work.
+	PublicBaseURL string `yaml:"public_base_url"`
+	// SendMessageTool controls whether the send_telegram tool (see
+	// internal/httpapi) is offered to the model, letting it proactively push
+	// a message to a household member's Telegram — e.g. "отправь мне на
+	// телефон ...", "отправь Ане на телефон ...". Only works for a user who
+	// has messaged the bot at least once (see StorageConfig.TelegramChatsPath).
+	SendMessageTool bool `yaml:"send_message_tool"`
 }
 
 // LoggingConfig controls file logging: the general application log (a
@@ -240,6 +291,7 @@ func Default() Config {
 			MemoryDir:          "./data/memory",
 			AvatarsDir:         "./data/avatars",
 			WebAuthnSQLitePath: "./data/webauthn.db",
+			TelegramChatsPath:  "./data/telegram_chats.json",
 		},
 		Logging: LoggingConfig{
 			Dir:        "./logs",
@@ -330,6 +382,13 @@ func Default() Config {
 		// there's no safe auto-detected RPID/RPOrigins.
 		WebAuthn: WebAuthnConfig{
 			Enabled: false,
+		},
+		// Disabled by default — see TelegramConfig's doc comment for why
+		// there's no safe auto-detected PublicBaseURL.
+		Telegram: TelegramConfig{
+			Enabled:         false,
+			WebhookPath:     "/telegram/webhook",
+			SendMessageTool: true,
 		},
 		// No default Users: web UI login is mandatory and fails closed until
 		// config.yaml lists at least one account (see internal/users).
