@@ -1,4 +1,4 @@
-.PHONY: build run fmt lint test check css tools
+.PHONY: build run fmt lint test check css tools deploy
 
 build:
 	CGO_ENABLED=0 go build -o miranda ./cmd/miranda
@@ -25,3 +25,6 @@ tools:
 	./scripts/download-tailwindcli.sh
 	go install golang.org/x/tools/cmd/goimports@latest
 	go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@latest
+
+deploy:
+	./scripts/deploy.sh

@@ -54,6 +54,18 @@ make check        # fmt + lint + test — run this before committing
 `make lint`/`make check` need `golangci-lint` and `goimports` on `PATH` —
 `make tools` installs both (plus the Tailwind CLI, see below).
 
+## Deploying
+
+```bash
+./scripts/deploy.sh
+```
+
+Cross-compiles for `linux/amd64`, ships the binary to the production server
+over SSH, and restarts the `systemd --user` service that runs it —
+`config.yaml`, `data/`, `logs/`, and `.env` on the server are never touched.
+See `.claude/skills/deploy/SKILL.md` for the full breakdown and the
+one-time server setup (`loginctl enable-linger`) it depends on.
+
 ## Configuration
 
 Copy `config/config.example.yaml` to `config/config.yaml` and edit it — every
