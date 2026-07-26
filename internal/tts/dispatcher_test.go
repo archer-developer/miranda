@@ -142,10 +142,10 @@ func TestDispatcher_WaitsForPlaybackToStartBeforePollingForIdle(t *testing.T) {
 	require.Equal(t, 4, ha.callsAtStateCount[1])
 }
 
-// stuckPlayingHA simulates a real, observed Yandex Station/AlexxIT
-// integration failure mode: the entity correctly leaves "idle" once
-// play_media is called, but then never reports "idle" again for the rest of
-// the test, no matter how long we wait.
+// stuckPlayingHA reports "playing" no matter how long it's polled —
+// standing in for a station that never resolves waitIdle's second phase, so
+// tests can drive that wait for as long as needed (bounded by a ctx
+// timeout) without depending on real device timing.
 type stuckPlayingHA struct {
 	mu    sync.Mutex
 	calls []string
@@ -162,42 +162,13 @@ func (f *stuckPlayingHA) State(ctx context.Context, entityID string) (string, er
 	return "playing", nil
 }
 
-// TestDispatcher_ProceedsAfterEstimatedSpeechDurationWhenEntityNeverReportsIdleAgain
-// guards against a real production hang: direct observation of a live
-// Yandex Station showed its media_player entity get stuck reporting
-// "playing" indefinitely after a media_content_type: text announcement,
-// never returning to "idle" at all. Before waitIdle's second phase had a
-// fallback timeout, this hung Speak (and the whole HTTP request) forever —
-// only the first chunk ever got spoken.
-func TestDispatcher_ProceedsAfterEstimatedSpeechDurationWhenEntityNeverReportsIdleAgain(t *testing.T) {
-	ha := &stuckPlayingHA{}
-	cfg := config.TTSConfig{
-		Primary: "yandex_station",
-		YandexStation: config.YandexStationConfig{
-			Entities:               []string{"media_player.kitchen"},
-			ChunkMaxChars:          100,
-			IdlePollIntervalMS:     1,
-			PlaybackStartTimeoutMS: 1,
-			SpeechCharsPerSecond:   1000, // keep the test fast
-			SpeechMarginMS:         5,
-		},
-	}
-	d := NewDispatcher(cfg, ha, nil)
-
-	err := d.Speak(context.Background(), "Первое предложение. Второе предложение.")
-	require.NoError(t, err)
-
-	// Both chunks must have gone out, in order — the dispatcher must not
-	// have hung waiting for "idle" after the first one.
-	require.Equal(t, []string{"Первое предложение.", "Второе предложение."}, ha.calls)
-}
-
 // TestDispatcher_LogsStatusHeartbeatWhileWaiting proves waitIdle's
 // once-a-second status heartbeat actually logs — a plain, fixed-cadence
 // timeline of what the entity reports, independent of the functional
-// (change-triggered) polling logged elsewhere, requested specifically to
-// make a real device's behavior unambiguous when a wait doesn't resolve the
-// way we expect.
+// (change-triggered) polling logged elsewhere. Uses stuckPlayingHA and a
+// short ctx timeout (rather than the entity ever reporting idle) just to
+// give the wait something bounded to run against; the heartbeat log is what
+// this test is actually checking.
 func TestDispatcher_LogsStatusHeartbeatWhileWaiting(t *testing.T) {
 	ha := &stuckPlayingHA{}
 	var buf bytes.Buffer
@@ -209,15 +180,16 @@ func TestDispatcher_LogsStatusHeartbeatWhileWaiting(t *testing.T) {
 			ChunkMaxChars:          100,
 			IdlePollIntervalMS:     1,
 			PlaybackStartTimeoutMS: 1,
-			SpeechCharsPerSecond:   100000, // keep the estimated-speech-duration wait short
-			SpeechMarginMS:         50,
 		},
 	}
 	d := NewDispatcher(cfg, ha, logger)
 	d.statusLogInterval = 5 * time.Millisecond // real 1s cadence would make this test slow
 
-	err := d.Speak(context.Background(), "привет")
-	require.NoError(t, err)
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+
+	err := d.Speak(ctx, "привет")
+	require.ErrorIs(t, err, context.DeadlineExceeded)
 
 	require.Contains(t, buf.String(), "tts: status check")
 	require.Contains(t, buf.String(), "state=playing")
