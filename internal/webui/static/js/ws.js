@@ -42,16 +42,41 @@ function setStatus(connected) {
   wsDot.title = wsStatus.textContent;
 }
 
+// Logged at every open/close/error so intermittent drops show up in the
+// browser console with enough detail (close code + reason + how long the
+// connection lasted) to tell a server-side restart apart from a network
+// blip or a proxy/idle timeout — all three look identical from setStatus()
+// alone.
+const RECONNECT_DELAY_MS = 2000;
+let connectedAt = null;
+
 export function connect() {
   const proto = location.protocol === "https:" ? "wss:" : "ws:";
   const ws = new WebSocket(`${proto}//${location.host}/ws/logs`);
 
-  ws.onopen = () => setStatus(true);
-  ws.onclose = () => {
-    setStatus(false);
-    setTimeout(connect, 2000);
+  ws.onopen = () => {
+    connectedAt = Date.now();
+    console.info("[ws] connected");
+    setStatus(true);
   };
-  ws.onerror = () => ws.close();
+  ws.onclose = (event) => {
+    const upSecs = connectedAt ? ((Date.now() - connectedAt) / 1000).toFixed(1) : "?";
+    connectedAt = null;
+    console.warn(
+      `[ws] closed after ${upSecs}s (code=${event.code} reason=${JSON.stringify(event.reason)} wasClean=${event.wasClean}) — reconnecting in ${RECONNECT_DELAY_MS}ms`,
+    );
+    setStatus(false);
+    setTimeout(connect, RECONNECT_DELAY_MS);
+  };
+  // onerror fires alongside (just before) onclose on a failed/dropped
+  // connection, but carries no useful detail of its own (the Event object
+  // has no code/reason) — the close handler above is where the actual
+  // diagnostics are logged. This just forces the close so reconnect isn't
+  // delayed waiting on the socket to notice on its own.
+  ws.onerror = () => {
+    console.warn("[ws] error — closing socket");
+    ws.close();
+  };
   ws.onmessage = (event) => {
     try {
       dispatch(JSON.parse(event.data));
