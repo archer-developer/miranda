@@ -5,11 +5,13 @@
 package httpapi
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
+	"time"
 
 	"github.com/coder/websocket"
 	"github.com/coder/websocket/wsjson"
@@ -24,6 +26,28 @@ import (
 // sent — a browser can't be allowed to claim source: "ha_assist" and ride
 // the HA user-id-mapping path, or spoof another user_id.
 const webUISource = "web_ui"
+
+// turnTimeout bounds one full agent turn: LLM generation, tool calls, and
+// any synchronous TTS dispatch (speakChunks blocks for the physical
+// speaker's actual playback duration — see internal/tts.Dispatcher.waitIdle
+// — which for a multi-sentence reply can legitimately take well past what a
+// browser tab, VPN link, or reverse proxy will hold a connection open for).
+// detachedTurnContext below is what makes this the thing that bounds a
+// turn instead of the caller's connection: once a reply may already have
+// been spoken aloud or sent to Telegram, it must still get recorded to
+// history even if the original HTTP/webhook connection drops first.
+const turnTimeout = 5 * time.Minute
+
+// detachedTurnContext derives a context for one orchestrator.Handle call
+// that keeps parent values (deadlines aside) but is immune to the parent
+// being cancelled by the inbound connection closing — see turnTimeout.
+// Without this, a dropped client connection cancels ctx mid-turn, and
+// everything downstream that still needs to run (finishing TTS chunks
+// already audible on a physical speaker, persisting the assistant's
+// reply to history so the next turn sees it) fails with context.Canceled.
+func detachedTurnContext(parent context.Context) (context.Context, context.CancelFunc) {
+	return context.WithTimeout(context.WithoutCancel(parent), turnTimeout)
+}
 
 // Server is Miranda's HTTP server: the unified command interface, the
 // WebSocket log stream, and (if provided) the embedded web UI.
@@ -123,7 +147,10 @@ func (s *Server) handleInput(w http.ResponseWriter, r *http.Request) {
 
 	s.hub.Publish(hub.Event{Source: req.Source, Message: fmt.Sprintf("%s: %s", req.UserID, req.Text)})
 
-	resp, err := s.orchestrator.Handle(r.Context(), req)
+	turnCtx, cancel := detachedTurnContext(r.Context())
+	defer cancel()
+
+	resp, err := s.orchestrator.Handle(turnCtx, req)
 	if err != nil {
 		s.logger.Error("orchestrator.Handle failed", "error", err, "source", req.Source, "user_id", req.UserID)
 		s.hub.Publish(hub.Event{Source: "error", Message: err.Error()})

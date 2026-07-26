@@ -93,7 +93,15 @@ func (s *Server) handleTelegramWebhook(w http.ResponseWriter, r *http.Request) {
 
 	s.hub.Publish(hub.Event{Source: users.SourceTelegram, Message: fmt.Sprintf("%s: %s", user.Username, msg.Text)})
 
-	resp, err := s.orchestrator.Handle(r.Context(), InputRequest{
+	// Detached from r.Context(): Telegram's own webhook connection isn't
+	// held open for the reply (see the ack below), and speak_reply/ha_assist
+	// TTS dispatch inside Handle can run well past however long the
+	// connection Telegram used to deliver this update stays around — see
+	// turnTimeout.
+	turnCtx, cancel := detachedTurnContext(r.Context())
+	defer cancel()
+
+	resp, err := s.orchestrator.Handle(turnCtx, InputRequest{
 		Source: users.SourceTelegram,
 		UserID: user.Username,
 		Text:   msg.Text,
@@ -106,11 +114,11 @@ func (s *Server) handleTelegramWebhook(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		s.logger.Error("telegram: orchestrator.Handle failed", "error", err, "user", user.Username)
 		s.hub.Publish(hub.Event{Source: "error", Message: err.Error()})
-		_ = s.telegram.Client.SendMessage(r.Context(), msg.Chat.ID, "Произошла ошибка, попробуйте ещё раз.")
+		_ = s.telegram.Client.SendMessage(turnCtx, msg.Chat.ID, "Произошла ошибка, попробуйте ещё раз.")
 		return
 	}
 
-	if err := s.telegram.Client.SendMessage(r.Context(), msg.Chat.ID, resp.Reply); err != nil {
+	if err := s.telegram.Client.SendMessage(turnCtx, msg.Chat.ID, resp.Reply); err != nil {
 		s.logger.Error("telegram: send reply failed", "error", err, "user", user.Username)
 	}
 }
