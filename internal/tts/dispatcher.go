@@ -25,19 +25,42 @@ type HAClient interface {
 type Dispatcher struct {
 	cfg config.TTSConfig
 	ha  HAClient
+	// sem is a size-1 semaphore serializing Speak calls to the shared
+	// speaker(s) — see Speak.
+	sem chan struct{}
 }
 
 // NewDispatcher builds a Dispatcher from the agent's TTS config.
 func NewDispatcher(cfg config.TTSConfig, haClient HAClient) *Dispatcher {
-	return &Dispatcher{cfg: cfg, ha: haClient}
+	return &Dispatcher{cfg: cfg, ha: haClient, sem: make(chan struct{}, 1)}
 }
 
 // Speak sends a complete piece of text to the primary channel (Yandex
 // Station, chunked to its character limit).
+//
+// Concurrent Speak calls are queued, not interleaved: two agent turns can
+// legitimately run at once (e.g. a household member retries a request that
+// was still in flight, or two people talk to Miranda around the same time),
+// and each one's caller now runs on a context detached from its own inbound
+// connection (see internal/httpapi's turnTimeout) specifically so a slow
+// turn keeps completing even if its caller gave up — which makes overlap
+// with a fresh retry more likely, not less. Without this lock, two Speak
+// calls interleaving their play_media/wait-idle sequences on the same
+// entity would each observe state transitions caused by the *other* call,
+// which can hang either one's waitIdle indefinitely (the entity update
+// either poller is waiting for never cleanly arrives) or reproduce the
+// original chunk-cutoff bug between two different replies.
 func (d *Dispatcher) Speak(ctx context.Context, text string) error {
 	if d.cfg.Primary != "yandex_station" || len(d.cfg.YandexStation.Entities) == 0 {
 		return fmt.Errorf("tts: no usable channel configured (primary=%s)", d.cfg.Primary)
 	}
+	select {
+	case d.sem <- struct{}{}:
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+	defer func() { <-d.sem }()
+
 	return d.speakYandexStation(ctx, text)
 }
 

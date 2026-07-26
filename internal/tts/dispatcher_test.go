@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 
@@ -137,6 +138,67 @@ func TestDispatcher_WaitsForPlaybackToStartBeforePollingForIdle(t *testing.T) {
 	// (index 3) -- i.e. after all 4 scripted states were consumed, not
 	// after the single stale "idle" reading at index 0.
 	require.Equal(t, 4, ha.callsAtStateCount[1])
+}
+
+// gatedHA lets a test hold the first CallService call open (simulating a
+// slow/in-flight turn) while a second Speak call is started concurrently,
+// to prove the two don't interleave their play_media calls on the shared
+// entity.
+type gatedHA struct {
+	mu      sync.Mutex
+	calls   []string // media_content_id in the order CallService actually ran
+	gate    chan struct{}
+	entered chan struct{}
+	once    sync.Once
+}
+
+func (f *gatedHA) CallService(ctx context.Context, domain, service string, data map[string]any) error {
+	f.once.Do(func() {
+		close(f.entered)
+		<-f.gate
+	})
+	f.mu.Lock()
+	f.calls = append(f.calls, data["media_content_id"].(string))
+	f.mu.Unlock()
+	return nil
+}
+
+func (f *gatedHA) State(ctx context.Context, entityID string) (string, error) { return "idle", nil }
+
+// TestDispatcher_SerializesConcurrentSpeakCalls guards against the failure
+// mode two overlapping turns hit in production: nothing prevented two Speak
+// calls (e.g. an in-flight turn and a retry of the same request) from
+// interleaving their play_media/wait-idle sequences on the same shared
+// Yandex Station entity, which made each dispatcher's waitIdle observe state
+// transitions caused by the *other* call — hanging one or both indefinitely.
+func TestDispatcher_SerializesConcurrentSpeakCalls(t *testing.T) {
+	ha := &gatedHA{gate: make(chan struct{}), entered: make(chan struct{})}
+	d := NewDispatcher(yandexConfig("media_player.kitchen"), ha)
+
+	firstDone := make(chan struct{})
+	go func() {
+		require.NoError(t, d.Speak(context.Background(), "первый"))
+		close(firstDone)
+	}()
+	<-ha.entered // first call now holds the shared-speaker semaphore
+
+	secondDone := make(chan struct{})
+	go func() {
+		require.NoError(t, d.Speak(context.Background(), "второй"))
+		close(secondDone)
+	}()
+
+	select {
+	case <-secondDone:
+		t.Fatal("second Speak call returned before the first released the shared speaker")
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	close(ha.gate)
+	<-firstDone
+	<-secondDone
+
+	require.Equal(t, []string{"первый", "второй"}, ha.calls)
 }
 
 func TestDispatcher_ErrorsWhenNoChannelConfigured(t *testing.T) {
