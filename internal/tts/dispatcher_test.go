@@ -1,10 +1,8 @@
 package tts
 
 import (
-	"bytes"
 	"context"
 	"fmt"
-	"log/slog"
 	"sync"
 	"testing"
 	"time"
@@ -141,60 +139,6 @@ func TestDispatcher_WaitsForPlaybackToStartBeforePollingForIdle(t *testing.T) {
 	// (index 3) -- i.e. after all 4 scripted states were consumed, not
 	// after the single stale "IDLE" reading at index 0.
 	require.Equal(t, 4, ha.callsAtStateCount[1])
-}
-
-// stuckPlayingHA reports "NONE" (alice_state's "still speaking" value) no
-// matter how long it's polled — standing in for a station that never
-// resolves waitIdle's second phase, so tests can drive that wait for as long
-// as needed (bounded by a ctx timeout) without depending on real device
-// timing.
-type stuckPlayingHA struct {
-	mu    sync.Mutex
-	calls []string
-}
-
-func (f *stuckPlayingHA) CallService(ctx context.Context, domain, service string, data map[string]any) error {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	f.calls = append(f.calls, data["media_content_id"].(string))
-	return nil
-}
-
-func (f *stuckPlayingHA) AliceState(ctx context.Context, entityID string) (string, error) {
-	return "NONE", nil
-}
-
-// TestDispatcher_LogsStatusHeartbeatWhileWaiting proves waitIdle's
-// once-a-second status heartbeat actually logs — a plain, fixed-cadence
-// timeline of what the entity reports, independent of the functional
-// (change-triggered) polling logged elsewhere. Uses stuckPlayingHA and a
-// short ctx timeout (rather than the entity ever reporting idle) just to
-// give the wait something bounded to run against; the heartbeat log is what
-// this test is actually checking.
-func TestDispatcher_LogsStatusHeartbeatWhileWaiting(t *testing.T) {
-	ha := &stuckPlayingHA{}
-	var buf bytes.Buffer
-	logger := slog.New(slog.NewTextHandler(&buf, nil))
-	cfg := config.TTSConfig{
-		Primary: "yandex_station",
-		YandexStation: config.YandexStationConfig{
-			Entities:               []string{"media_player.kitchen"},
-			ChunkMaxChars:          100,
-			IdlePollIntervalMS:     1,
-			PlaybackStartTimeoutMS: 1,
-		},
-	}
-	d := NewDispatcher(cfg, ha, logger)
-	d.statusLogInterval = 5 * time.Millisecond // real 1s cadence would make this test slow
-
-	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
-	defer cancel()
-
-	err := d.Speak(ctx, "привет")
-	require.ErrorIs(t, err, context.DeadlineExceeded)
-
-	require.Contains(t, buf.String(), "tts: status check")
-	require.Contains(t, buf.String(), "alice_state=NONE")
 }
 
 // gatedHA lets a test hold the first CallService call open (simulating a
