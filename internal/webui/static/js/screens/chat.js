@@ -29,7 +29,7 @@ function bubble(role, text, timeIso) {
 
   if (timeIso) {
     const time = document.createElement("span");
-    time.className = "mt-1 px-1 text-xs text-slate-600";
+    time.className = "mt-1 px-1 text-xs text-slate-300";
     time.textContent = formatTime(timeIso);
     wrap.appendChild(time);
   }
@@ -121,7 +121,13 @@ async function loadHistory() {
 
     const msgsRes = await fetch(`/api/dialogs/${encodeURIComponent(conversations[0].id)}`);
     const messages = await msgsRes.json();
-    const chatMessages = messages.filter((m) => m.role === "user" || m.role === "assistant");
+    // History interleaves plain chat turns with tool activity: role "tool"
+    // holds a tool's result, and an assistant row that only requested a
+    // tool call (no reply text yet) is stored with empty content — both
+    // are recorded for history/logs (see internal/httpapi's
+    // recordAssistantToolCallMessage/recordToolCall) but aren't part of
+    // the conversation a person reads, so they must not render as bubbles.
+    const chatMessages = messages.filter((m) => (m.role === "user" || m.role === "assistant") && m.content?.trim());
 
     clearMessages();
     if (chatMessages.length === 0) {
