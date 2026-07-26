@@ -14,9 +14,9 @@ import (
 	"github.com/archer-developer/miranda/internal/config"
 )
 
-// fakeHA is an in-memory HAClient: play_media calls are recorded and State
-// immediately reports "idle" so tests run without waiting on real timers
-// beyond the dispatcher's configured (tiny, in tests) poll interval.
+// fakeHA is an in-memory HAClient: play_media calls are recorded and
+// AliceState immediately reports "IDLE" so tests run without waiting on real
+// timers beyond the dispatcher's configured (tiny, in tests) poll interval.
 type fakeHA struct {
 	mu         sync.Mutex
 	calls      []call
@@ -38,8 +38,8 @@ func (f *fakeHA) CallService(ctx context.Context, domain, service string, data m
 	return nil
 }
 
-func (f *fakeHA) State(ctx context.Context, entityID string) (string, error) {
-	return "idle", nil
+func (f *fakeHA) AliceState(ctx context.Context, entityID string) (string, error) {
+	return "IDLE", nil
 }
 
 func yandexConfig(entities ...string) config.TTSConfig {
@@ -49,8 +49,9 @@ func yandexConfig(entities ...string) config.TTSConfig {
 			Entities:           entities,
 			ChunkMaxChars:      100,
 			IdlePollIntervalMS: 1, // keep tests fast
-			// fakeHA.State always reports "idle", so the "wait for it to
-			// leave idle" phase always times out; keep that timeout tiny too.
+			// fakeHA.AliceState always reports "IDLE", so the "wait for it
+			// to leave idle" phase always times out; keep that timeout tiny
+			// too.
 			PlaybackStartTimeoutMS: 1,
 		},
 	}
@@ -78,14 +79,14 @@ func TestDispatcher_ReturnsErrorWhenYandexFails(t *testing.T) {
 	require.Error(t, err)
 }
 
-// scriptedHA lets a test script exactly which state media_player.State
-// returns on each successive poll, and records how many State polls had
-// happened by the time each play_media call fired — the tool for proving
-// waitIdle's two-phase ordering without depending on real-time flakiness.
+// scriptedHA lets a test script exactly which value AliceState returns on
+// each successive poll, and records how many AliceState polls had happened
+// by the time each play_media call fired — the tool for proving waitIdle's
+// two-phase ordering without depending on real-time flakiness.
 type scriptedHA struct {
 	mu     sync.Mutex
 	calls  []call
-	states []string // consumed one per State() call; last element repeats forever
+	states []string // consumed one per AliceState() call; last element repeats forever
 
 	stateCalls        int
 	callsAtStateCount []int
@@ -99,7 +100,7 @@ func (f *scriptedHA) CallService(ctx context.Context, domain, service string, da
 	return nil
 }
 
-func (f *scriptedHA) State(ctx context.Context, entityID string) (string, error) {
+func (f *scriptedHA) AliceState(ctx context.Context, entityID string) (string, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	i := f.stateCalls
@@ -112,13 +113,13 @@ func (f *scriptedHA) State(ctx context.Context, entityID string) (string, error)
 
 // TestDispatcher_WaitsForPlaybackToStartBeforePollingForIdle guards against
 // the regression this file's waitIdle comment describes: right after
-// play_media, the entity briefly still reports the *previous* "idle" state
-// before the station actually starts playing. If the dispatcher polled for
-// "idle" without first confirming playback started, it would see that stale
-// "idle" and immediately fire the next chunk mid-utterance, cutting the
-// current one off.
+// play_media, the entity briefly still reports the *previous* "IDLE"
+// alice_state before the station actually starts speaking. If the
+// dispatcher polled for "IDLE" without first confirming playback started,
+// it would see that stale "IDLE" and immediately fire the next chunk
+// mid-utterance, cutting the current one off.
 func TestDispatcher_WaitsForPlaybackToStartBeforePollingForIdle(t *testing.T) {
-	ha := &scriptedHA{states: []string{"idle", "playing", "playing", "idle"}}
+	ha := &scriptedHA{states: []string{"IDLE", "NONE", "NONE", "IDLE"}}
 	cfg := config.TTSConfig{
 		Primary: "yandex_station",
 		YandexStation: config.YandexStationConfig{
@@ -136,16 +137,17 @@ func TestDispatcher_WaitsForPlaybackToStartBeforePollingForIdle(t *testing.T) {
 	require.Len(t, ha.calls, 2)
 	require.Equal(t, 0, ha.callsAtStateCount[0])
 	// The second chunk must only be sent after the dispatcher observed the
-	// entity leave "idle" (index 1: "playing") and return to "idle" again
+	// entity leave "IDLE" (index 1: "NONE") and return to "IDLE" again
 	// (index 3) -- i.e. after all 4 scripted states were consumed, not
-	// after the single stale "idle" reading at index 0.
+	// after the single stale "IDLE" reading at index 0.
 	require.Equal(t, 4, ha.callsAtStateCount[1])
 }
 
-// stuckPlayingHA reports "playing" no matter how long it's polled —
-// standing in for a station that never resolves waitIdle's second phase, so
-// tests can drive that wait for as long as needed (bounded by a ctx
-// timeout) without depending on real device timing.
+// stuckPlayingHA reports "NONE" (alice_state's "still speaking" value) no
+// matter how long it's polled — standing in for a station that never
+// resolves waitIdle's second phase, so tests can drive that wait for as long
+// as needed (bounded by a ctx timeout) without depending on real device
+// timing.
 type stuckPlayingHA struct {
 	mu    sync.Mutex
 	calls []string
@@ -158,8 +160,8 @@ func (f *stuckPlayingHA) CallService(ctx context.Context, domain, service string
 	return nil
 }
 
-func (f *stuckPlayingHA) State(ctx context.Context, entityID string) (string, error) {
-	return "playing", nil
+func (f *stuckPlayingHA) AliceState(ctx context.Context, entityID string) (string, error) {
+	return "NONE", nil
 }
 
 // TestDispatcher_LogsStatusHeartbeatWhileWaiting proves waitIdle's
@@ -192,7 +194,7 @@ func TestDispatcher_LogsStatusHeartbeatWhileWaiting(t *testing.T) {
 	require.ErrorIs(t, err, context.DeadlineExceeded)
 
 	require.Contains(t, buf.String(), "tts: status check")
-	require.Contains(t, buf.String(), "state=playing")
+	require.Contains(t, buf.String(), "alice_state=NONE")
 }
 
 // gatedHA lets a test hold the first CallService call open (simulating a
@@ -218,7 +220,7 @@ func (f *gatedHA) CallService(ctx context.Context, domain, service string, data 
 	return nil
 }
 
-func (f *gatedHA) State(ctx context.Context, entityID string) (string, error) { return "idle", nil }
+func (f *gatedHA) AliceState(ctx context.Context, entityID string) (string, error) { return "IDLE", nil }
 
 // TestDispatcher_SerializesConcurrentSpeakCalls guards against the failure
 // mode two overlapping turns hit in production: nothing prevented two Speak

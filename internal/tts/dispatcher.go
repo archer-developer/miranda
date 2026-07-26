@@ -19,7 +19,12 @@ var errPollTimeout = errors.New("tts: poll timed out")
 // so tests can substitute a fake instead of a real Home Assistant instance.
 type HAClient interface {
 	CallService(ctx context.Context, domain, service string, data map[string]any) error
-	State(ctx context.Context, entityID string) (string, error)
+	// AliceState returns entityID's alice_state attribute ("IDLE" while not
+	// speaking, "NONE" while an announcement plays — note the uppercase).
+	// See internal/ha.Client.AliceState for why waitIdle needs this
+	// specific attribute rather than the entity's top-level media_player
+	// state.
+	AliceState(ctx context.Context, entityID string) (string, error)
 }
 
 // Dispatcher sends assistant replies to the configured TTS channel(s).
@@ -98,26 +103,23 @@ func (d *Dispatcher) speakYandexStation(ctx context.Context, text string) error 
 
 // waitIdle waits for entity to finish playing the chunk just sent to it, so
 // the next play_media call isn't fired while the station is still speaking
-// this one.
+// this one. It polls entity's alice_state attribute, not its top-level
+// media_player state — see internal/ha.Client.AliceState for why: the
+// top-level state tracks whatever the underlying media session (e.g.
+// background music) is doing and doesn't reliably reflect a TTS
+// announcement at all, while alice_state cleanly tracks it regardless.
 //
 // This is a two-phase wait, not a single poll-for-idle loop: right after
 // play_media returns, the entity typically still reports the *previous*
-// "idle" state for a beat, because synthesis and the station's own wake-up
-// take real time. A single poll-for-idle loop can land in that window,
-// wrongly conclude playback of the chunk we just sent is already done, and
-// fire the next chunk's play_media immediately — which interrupts the
-// station mid-utterance. That's exactly what produced the originally
+// "IDLE" alice_state for a beat, because synthesis and the station's own
+// wake-up take real time. A single poll-for-idle loop can land in that
+// window, wrongly conclude playback of the chunk we just sent is already
+// done, and fire the next chunk's play_media immediately — which interrupts
+// the station mid-utterance. That's exactly what produced the originally
 // reported bug: long replies got cut mid-sentence, with the tail end only
 // surfacing once the *next* chunk started playing. So we first wait for the
-// entity to actually leave "idle" (proof this chunk started), then wait for
-// it to return to "idle" (proof it finished).
-//
-// (This previously also had a fallback timeout on the second phase, added
-// when a misconfigured HA server was running the station in cloud mode and
-// its media_player entity's state was `assumed_state` — optimistic, with no
-// real feedback, so it never reported "idle" again. Fixed at the network
-// level (station now runs in local mode with accurate state), so that
-// workaround was removed — see git history if this resurfaces.)
+// entity to actually leave "IDLE" (proof this chunk started), then wait for
+// it to return to "IDLE" (proof it finished).
 func (d *Dispatcher) waitIdle(ctx context.Context, entity string) error {
 	// Unconditional once-a-second heartbeat, independent of the functional
 	// poll interval below (which may be much faster, or may only log on
@@ -153,7 +155,7 @@ func (d *Dispatcher) waitIdle(ctx context.Context, entity string) error {
 	// idle, or playback may have failed silently upstream. Either way, fall
 	// through to the idle-wait below, which is a harmless no-op if the
 	// chunk already finished (or never started).
-	err := d.pollUntil(ctx, entity, "leave idle", interval, startTimeout, func(s string) bool { return s != "idle" })
+	err := d.pollUntil(ctx, entity, "leave idle", interval, startTimeout, func(s string) bool { return s != "IDLE" })
 	if err != nil && !errors.Is(err, errPollTimeout) {
 		return err
 	}
@@ -161,10 +163,10 @@ func (d *Dispatcher) waitIdle(ctx context.Context, entity string) error {
 		d.logger.Warn("tts: entity never left idle within playback_start_timeout_ms, proceeding anyway", "entity", entity, "timeout", startTimeout)
 	}
 
-	return d.pollUntil(ctx, entity, "return to idle", interval, 0, func(s string) bool { return s == "idle" })
+	return d.pollUntil(ctx, entity, "return to idle", interval, 0, func(s string) bool { return s == "IDLE" })
 }
 
-// logStatusHeartbeat logs entity's current state once every
+// logStatusHeartbeat logs entity's current alice_state once every
 // d.statusLogInterval, unconditionally (whether or not it changed), until
 // stop is closed or ctx is done — a plain "yes, still checking, here's what
 // it says right now" timeline running alongside waitIdle's own
@@ -176,13 +178,13 @@ func (d *Dispatcher) logStatusHeartbeat(ctx context.Context, entity string, stop
 	for {
 		select {
 		case <-ticker.C:
-			state, err := d.ha.State(ctx, entity)
+			state, err := d.ha.AliceState(ctx, entity)
 			elapsed := time.Since(start).Round(time.Second)
 			if err != nil {
 				d.logger.Warn("tts: status check failed", "entity", entity, "elapsed", elapsed, "error", err)
 				continue
 			}
-			d.logger.Info("tts: status check", "entity", entity, "elapsed", elapsed, "state", state)
+			d.logger.Info("tts: status check", "entity", entity, "elapsed", elapsed, "alice_state", state)
 		case <-stop:
 			return
 		case <-ctx.Done():
@@ -191,9 +193,9 @@ func (d *Dispatcher) logStatusHeartbeat(ctx context.Context, entity string, stop
 	}
 }
 
-// pollUntil polls entity's state every interval until match(state) is true,
-// ctx is cancelled, or (if timeout > 0) timeout elapses without a match —
-// in which case it returns errPollTimeout. label identifies which of
+// pollUntil polls entity's alice_state every interval until match(state) is
+// true, ctx is cancelled, or (if timeout > 0) timeout elapses without a
+// match — in which case it returns errPollTimeout. label identifies which of
 // waitIdle's two phases this is, purely for the state-transition log lines
 // below — the tool for seeing exactly what a real device reported when a
 // wait doesn't resolve the way we expect.
@@ -209,12 +211,12 @@ func (d *Dispatcher) pollUntil(ctx context.Context, entity, label string, interv
 	defer ticker.Stop()
 	lastState := ""
 	for {
-		state, err := d.ha.State(ctx, entity)
+		state, err := d.ha.AliceState(ctx, entity)
 		if err != nil {
 			return fmt.Errorf("tts: poll state of %s: %w", entity, err)
 		}
 		if state != lastState {
-			d.logger.Info("tts: entity state", "entity", entity, "waiting_for", label, "state", state)
+			d.logger.Info("tts: entity alice_state", "entity", entity, "waiting_for", label, "alice_state", state)
 			lastState = state
 		}
 		if match(state) {

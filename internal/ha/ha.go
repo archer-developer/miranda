@@ -64,11 +64,23 @@ func (c *Client) CallService(ctx context.Context, domain, service string, data m
 }
 
 type stateResponse struct {
-	State string `json:"state"`
+	State      string `json:"state"`
+	Attributes struct {
+		AliceState string `json:"alice_state"`
+	} `json:"attributes"`
 }
 
-// State returns entityID's current state string (e.g. "idle", "playing").
-func (c *Client) State(ctx context.Context, entityID string) (string, error) {
+// AliceState returns entityID's alice_state attribute (e.g. "IDLE", "NONE"
+// while speaking — note the uppercase, unlike the entity's own top-level
+// state) rather than the entity's top-level media_player state. The
+// top-level state tracks whatever the underlying media session is doing
+// (music playing/paused/idle) and is not a reliable signal for whether a
+// TTS announcement is still being spoken — confirmed by direct observation:
+// a Yandex Station left playing background music reports its top-level
+// state as "paused" throughout a TTS announcement, never "idle", while
+// alice_state cleanly transitions IDLE -> NONE -> IDLE around the
+// announcement regardless of what the underlying media session is doing.
+func (c *Client) AliceState(ctx context.Context, entityID string) (string, error) {
 	url := fmt.Sprintf("%s/api/states/%s", c.baseURL, entityID)
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
@@ -91,5 +103,5 @@ func (c *Client) State(ctx context.Context, entityID string) (string, error) {
 	if err := json.NewDecoder(resp.Body).Decode(&sr); err != nil {
 		return "", fmt.Errorf("ha: decode state response for %s: %w", entityID, err)
 	}
-	return sr.State, nil
+	return sr.Attributes.AliceState, nil
 }

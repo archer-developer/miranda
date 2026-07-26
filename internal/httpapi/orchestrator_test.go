@@ -25,8 +25,8 @@ import (
 )
 
 // fakeHAClient is an in-memory tts.HAClient: play_media calls are recorded,
-// and State always reports "idle" so the dispatcher's wait-for-idle poll
-// never blocks the test.
+// and AliceState always reports "IDLE" so the dispatcher's wait-for-idle
+// poll never blocks the test.
 type fakeHAClient struct {
 	calls []string // recorded media_content_id values
 }
@@ -38,8 +38,8 @@ func (f *fakeHAClient) CallService(ctx context.Context, domain, service string, 
 	return nil
 }
 
-func (f *fakeHAClient) State(ctx context.Context, entityID string) (string, error) {
-	return "idle", nil
+func (f *fakeHAClient) AliceState(ctx context.Context, entityID string) (string, error) {
+	return "IDLE", nil
 }
 
 // newTestOrchestratorWithTTS is like newTestOrchestrator but wires up a real

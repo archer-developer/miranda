@@ -45,15 +45,18 @@ func TestCallService_NonSuccessStatusReturnsError(t *testing.T) {
 	require.Contains(t, err.Error(), "invalid entity")
 }
 
-func TestState_ReturnsEntityState(t *testing.T) {
+func TestAliceState_ReturnsAliceStateAttribute(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		require.Equal(t, "/api/states/media_player.kitchen", r.URL.Path)
-		_ = json.NewEncoder(w).Encode(map[string]any{"state": "idle"})
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"state":      "paused", // the top-level media_player state -- must be ignored
+			"attributes": map[string]any{"alice_state": "NONE"},
+		})
 	}))
 	defer server.Close()
 
 	c := New(server.URL, "token")
-	state, err := c.State(context.Background(), "media_player.kitchen")
+	state, err := c.AliceState(context.Background(), "media_player.kitchen")
 	require.NoError(t, err)
-	require.Equal(t, "idle", state)
+	require.Equal(t, "NONE", state)
 }
