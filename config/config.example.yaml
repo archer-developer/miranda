@@ -100,6 +100,19 @@ tts:
     # this two-phase wait, the dispatcher could mistake that stale "idle"
     # for "already finished" and fire the next chunk mid-utterance.
     playback_start_timeout_ms: 3000
+    # Fallback ceiling on how long to wait for a chunk to finish playing,
+    # estimated from its length (chunk_len / speech_chars_per_second +
+    # speech_margin_ms). Some real Yandex Station setups never report the
+    # entity back to "idle" after a media_content_type: text announcement —
+    # confirmed by direct observation, the entity got stuck reporting
+    # "playing" forever — so waiting for "idle" unconditionally can hang the
+    # whole reply forever. If the entity does report idle sooner, the
+    # dispatcher still moves on immediately; this is only the fallback.
+    # Keep the rate conservative (slow) — underestimating reproduces the
+    # original chunk-cutoff bug, overestimating only costs a bit of extra
+    # silence between chunks.
+    speech_chars_per_second: 12
+    speech_margin_ms: 2000
   # Lets the model call speak_reply to dispatch this turn's reply to
   # tts.primary even when the request didn't arrive via ha_assist, when the
   # user explicitly asks to hear the answer read aloud.

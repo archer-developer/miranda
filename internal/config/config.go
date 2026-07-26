@@ -247,6 +247,18 @@ type YandexStationConfig struct {
 	// up and moving on to waiting for it to return to idle. See waitIdle in
 	// internal/tts/dispatcher.go for why this two-phase wait exists.
 	PlaybackStartTimeoutMS int `yaml:"playback_start_timeout_ms"`
+	// SpeechCharsPerSecond estimates the station's spoken reading speed, and
+	// SpeechMarginMS is a fixed cushion added on top (synthesis/network
+	// latency before audio actually starts). Together they bound how long
+	// waitIdle will wait for a chunk to finish playing: some real Yandex
+	// Station setups never report the entity back to "idle" after a
+	// media_content_type: text announcement (confirmed by direct
+	// observation — the entity got stuck reporting "playing" indefinitely),
+	// so polling for that indefinitely can hang forever. If the entity does
+	// report idle before this estimate elapses, waitIdle still returns as
+	// soon as that happens — this is only the fallback ceiling.
+	SpeechCharsPerSecond float64 `yaml:"speech_chars_per_second"`
+	SpeechMarginMS       int     `yaml:"speech_margin_ms"`
 }
 
 // TTSConfig selects and configures the TTS channel.
@@ -331,6 +343,8 @@ func Default() Config {
 				ChunkMaxChars:          100,
 				IdlePollIntervalMS:     300,
 				PlaybackStartTimeoutMS: 3000,
+				SpeechCharsPerSecond:   12, // conservative Russian TTS reading speed — err on the side of a longer wait, not a cut-off chunk
+				SpeechMarginMS:         2000,
 			},
 			SpeakReplyTool: true,
 		},

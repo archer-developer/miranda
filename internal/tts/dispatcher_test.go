@@ -140,6 +140,56 @@ func TestDispatcher_WaitsForPlaybackToStartBeforePollingForIdle(t *testing.T) {
 	require.Equal(t, 4, ha.callsAtStateCount[1])
 }
 
+// stuckPlayingHA simulates a real, observed Yandex Station/AlexxIT
+// integration failure mode: the entity correctly leaves "idle" once
+// play_media is called, but then never reports "idle" again for the rest of
+// the test, no matter how long we wait.
+type stuckPlayingHA struct {
+	mu    sync.Mutex
+	calls []string
+}
+
+func (f *stuckPlayingHA) CallService(ctx context.Context, domain, service string, data map[string]any) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.calls = append(f.calls, data["media_content_id"].(string))
+	return nil
+}
+
+func (f *stuckPlayingHA) State(ctx context.Context, entityID string) (string, error) {
+	return "playing", nil
+}
+
+// TestDispatcher_ProceedsAfterEstimatedSpeechDurationWhenEntityNeverReportsIdleAgain
+// guards against a real production hang: direct observation of a live
+// Yandex Station showed its media_player entity get stuck reporting
+// "playing" indefinitely after a media_content_type: text announcement,
+// never returning to "idle" at all. Before waitIdle's second phase had a
+// fallback timeout, this hung Speak (and the whole HTTP request) forever —
+// only the first chunk ever got spoken.
+func TestDispatcher_ProceedsAfterEstimatedSpeechDurationWhenEntityNeverReportsIdleAgain(t *testing.T) {
+	ha := &stuckPlayingHA{}
+	cfg := config.TTSConfig{
+		Primary: "yandex_station",
+		YandexStation: config.YandexStationConfig{
+			Entities:               []string{"media_player.kitchen"},
+			ChunkMaxChars:          100,
+			IdlePollIntervalMS:     1,
+			PlaybackStartTimeoutMS: 1,
+			SpeechCharsPerSecond:   1000, // keep the test fast
+			SpeechMarginMS:         5,
+		},
+	}
+	d := NewDispatcher(cfg, ha, nil)
+
+	err := d.Speak(context.Background(), "Первое предложение. Второе предложение.")
+	require.NoError(t, err)
+
+	// Both chunks must have gone out, in order — the dispatcher must not
+	// have hung waiting for "idle" after the first one.
+	require.Equal(t, []string{"Первое предложение.", "Второе предложение."}, ha.calls)
+}
+
 // gatedHA lets a test hold the first CallService call open (simulating a
 // slow/in-flight turn) while a second Speak call is started concurrently,
 // to prove the two don't interleave their play_media calls on the shared

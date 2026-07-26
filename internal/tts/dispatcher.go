@@ -71,8 +71,8 @@ func (d *Dispatcher) Speak(ctx context.Context, text string) error {
 }
 
 // speakYandexStation sends text, chunked to the station's character limit,
-// to every configured entity, waiting for playback to reach "idle" between
-// chunks so consecutive play_media calls don't interrupt each other.
+// to every configured entity, waiting between chunks so consecutive
+// play_media calls don't interrupt each other.
 func (d *Dispatcher) speakYandexStation(ctx context.Context, text string) error {
 	chunks := Chunk(text, d.cfg.YandexStation.ChunkMaxChars)
 	for _, entity := range d.cfg.YandexStation.Entities {
@@ -84,7 +84,7 @@ func (d *Dispatcher) speakYandexStation(ctx context.Context, text string) error 
 			}); err != nil {
 				return fmt.Errorf("tts: yandex station %s: %w", entity, err)
 			}
-			if err := d.waitIdle(ctx, entity); err != nil {
+			if err := d.waitIdle(ctx, entity, chunk); err != nil {
 				return err
 			}
 		}
@@ -92,22 +92,29 @@ func (d *Dispatcher) speakYandexStation(ctx context.Context, text string) error 
 	return nil
 }
 
-// waitIdle waits for entity to finish playing the chunk just sent to it, so
-// the next play_media call isn't fired while the station is still speaking
-// this one.
+// waitIdle waits for entity to (likely) finish playing chunk before the
+// caller sends the next one, so consecutive play_media calls don't
+// interrupt each other.
 //
-// This is a two-phase wait, not a single poll-for-idle loop: right after
-// play_media returns, the entity typically still reports the *previous*
-// "idle" state for a beat, because synthesis and the station's own wake-up
-// take real time. A single poll-for-idle loop can land in that window,
-// wrongly conclude playback of the chunk we just sent is already done, and
-// fire the next chunk's play_media immediately — which interrupts the
-// station mid-utterance. That's exactly what produced the reported bug:
-// long replies got cut mid-sentence, with the tail end only surfacing once
-// the *next* chunk started playing. So we first wait for the entity to
-// actually leave "idle" (proof this chunk started), then wait for it to
-// return to "idle" (proof it finished).
-func (d *Dispatcher) waitIdle(ctx context.Context, entity string) error {
+// This is a two-phase wait. Phase 1 waits for the entity to actually leave
+// "idle" (proof this chunk started playing) rather than trusting it
+// immediately: right after play_media returns, the entity typically still
+// reports the *previous* "idle" state for a beat, because synthesis and the
+// station's own wake-up take real time, and polling for "idle" without this
+// phase can land in that window and wrongly conclude the chunk we just sent
+// is already done — firing the next chunk's play_media mid-utterance and
+// cutting the current one off.
+//
+// Phase 2 is bounded by an estimated speech duration for chunk
+// (SpeechCharsPerSecond/SpeechMarginMS), not an unconditional wait for
+// "idle": direct observation on a real Yandex Station/AlexxIT integration
+// setup showed the entity can get stuck reporting "playing" indefinitely
+// after a media_content_type: text announcement and never go back to
+// "idle" at all — polling for that would hang forever. If the entity does
+// report idle before the estimate elapses, this still returns immediately;
+// the estimate is only a fallback ceiling for setups where that signal
+// never arrives.
+func (d *Dispatcher) waitIdle(ctx context.Context, entity, chunk string) error {
 	interval := time.Duration(d.cfg.YandexStation.IdlePollIntervalMS) * time.Millisecond
 	if interval <= 0 {
 		interval = 300 * time.Millisecond
@@ -130,7 +137,32 @@ func (d *Dispatcher) waitIdle(ctx context.Context, entity string) error {
 		d.logger.Warn("tts: entity never left idle within playback_start_timeout_ms, proceeding anyway", "entity", entity, "timeout", startTimeout)
 	}
 
-	return d.pollUntil(ctx, entity, "return to idle", interval, 0, func(s string) bool { return s == "idle" })
+	speechTimeout := estimateSpeechDuration(len([]rune(chunk)), d.cfg.YandexStation)
+	err = d.pollUntil(ctx, entity, "return to idle", interval, speechTimeout, func(s string) bool { return s == "idle" })
+	if errors.Is(err, errPollTimeout) {
+		d.logger.Warn("tts: entity never returned to idle within the estimated speech duration, proceeding anyway",
+			"entity", entity, "timeout", speechTimeout, "chunk_len", len([]rune(chunk)))
+		return nil
+	}
+	return err
+}
+
+// estimateSpeechDuration estimates how long the station takes to speak
+// chunkLen characters of text, as a fallback ceiling for waitIdle's second
+// phase (see its doc comment) — deliberately conservative (a slow rate, plus
+// a fixed margin) since underestimating reproduces the original chunk-cutoff
+// bug, while overestimating only costs a bit of extra silence between
+// chunks.
+func estimateSpeechDuration(chunkLen int, cfg config.YandexStationConfig) time.Duration {
+	rate := cfg.SpeechCharsPerSecond
+	if rate <= 0 {
+		rate = 12
+	}
+	margin := time.Duration(cfg.SpeechMarginMS) * time.Millisecond
+	if margin <= 0 {
+		margin = 2 * time.Second
+	}
+	return time.Duration(float64(chunkLen)/rate*float64(time.Second)) + margin
 }
 
 // pollUntil polls entity's state every interval until match(state) is true,
