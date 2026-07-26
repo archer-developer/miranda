@@ -1,1 +1,191 @@
 @import "tailwindcss";
+
+/*
+ * Design tokens and hand-rolled primitives for Miranda's dashboard.
+ *
+ * The dashboard is dark-only by design (a household control surface, not a
+ * public site that needs to respect OS light/dark preference), so this file
+ * doesn't branch on prefers-color-scheme — it commits to one restrained
+ * slate + indigo palette (see the frontend-designer persona doc) and keeps
+ * every screen consistent with it rather than reaching for new hues.
+ *
+ * Font stack: intentionally system-native (no @font-face / Google Fonts
+ * <link>). Miranda runs on a home LAN and the dashboard should render
+ * correctly even with no internet route out — a webfont CDN dependency
+ * would be one more thing that can silently fail. ui-sans-serif resolves to
+ * San Francisco on Apple platforms, Segoe UI on Windows, Roboto on
+ * Android/Linux — all close cousins of the Inter/Geist/SF Pro family the
+ * persona doc asks for.
+ */
+@theme {
+  --font-sans:
+    ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+
+  /* Named motion tokens (Tailwind v4's CSS-first way to register
+     `animate-*` utilities). Durations follow the persona doc's guidance:
+     120-180ms for hover/click-scale feedback, 180-250ms for open/close,
+     250-350ms for larger surface entrances. */
+  --animate-fade-in: fade-in 160ms ease-out both;
+  --animate-scale-in: scale-in 150ms cubic-bezier(0.16, 1, 0.3, 1) both;
+  --animate-slide-up: slide-up 220ms cubic-bezier(0.16, 1, 0.3, 1) both;
+  --animate-slide-down: slide-down 220ms cubic-bezier(0.16, 1, 0.3, 1) both;
+  --animate-shimmer: shimmer 1.8s ease-in-out infinite;
+  --animate-pulse-soft: pulse-soft 2s ease-in-out infinite;
+}
+
+@keyframes fade-in {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+@keyframes scale-in {
+  from {
+    opacity: 0;
+    transform: scale(0.96);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+
+@keyframes slide-up {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes slide-down {
+  from {
+    opacity: 0;
+    transform: translateY(-6px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes shimmer {
+  0% {
+    background-position: 200% 0;
+  }
+  100% {
+    background-position: -200% 0;
+  }
+}
+
+@keyframes pulse-soft {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.4;
+  }
+}
+
+@layer base {
+  html {
+    color-scheme: dark;
+  }
+
+  /* A visible, on-brand focus ring everywhere — keyboard navigation must
+     never be harder to see than a mouse hover (WCAG 2.4.7). Scoped to
+     :focus-visible so mouse clicks don't show a ring, only keyboard/AT
+     navigation does. */
+  :focus-visible {
+    outline: 2px solid var(--color-indigo-400);
+    outline-offset: 2px;
+    border-radius: 4px;
+  }
+
+  ::selection {
+    background-color: color-mix(in oklab, var(--color-indigo-500) 40%, transparent);
+    color: white;
+  }
+
+  /* Firefox thin-scrollbar hint; the .scrollbar-thin utility below covers
+     the WebKit/Blink side. Applied globally since every scrollable pane in
+     this dashboard (chat, logs, history, memory textarea) wants the same
+     restrained scrollbar rather than the platform default. */
+  * {
+    scrollbar-width: thin;
+    scrollbar-color: var(--color-slate-700) transparent;
+  }
+}
+
+@layer utilities {
+  .scrollbar-thin::-webkit-scrollbar {
+    width: 8px;
+    height: 8px;
+  }
+  .scrollbar-thin::-webkit-scrollbar-track {
+    background: transparent;
+  }
+  .scrollbar-thin::-webkit-scrollbar-thumb {
+    background-color: var(--color-slate-700);
+    border-radius: 9999px;
+    border: 2px solid transparent;
+    background-clip: content-box;
+  }
+  .scrollbar-thin::-webkit-scrollbar-thumb:hover {
+    background-color: var(--color-slate-600);
+  }
+
+  /* Skeleton loading bars: a soft gradient sweep instead of Tailwind's
+     default opacity-pulse — reads as "content is arriving" rather than
+     "something is broken and blinking." */
+  .skeleton {
+    border-radius: 6px;
+    background-color: var(--color-slate-800);
+    background-image: linear-gradient(
+      90deg,
+      transparent 0%,
+      color-mix(in oklab, var(--color-slate-500) 35%, transparent) 50%,
+      transparent 100%
+    );
+    background-size: 200% 100%;
+  }
+
+  /* Collapsible mobile nav drawer: kept in the DOM at all times (so it can
+     transition) but taken out of layout/interaction when closed via
+     visibility + pointer-events, animating only opacity/transform per the
+     persona doc's motion guidance (never width/height/layout). */
+  .drawer-closed {
+    opacity: 0;
+    transform: translateY(-8px) scale(0.98);
+    visibility: hidden;
+    pointer-events: none;
+  }
+  .drawer-open {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+    visibility: visible;
+    pointer-events: auto;
+  }
+}
+
+/* Respect the user's OS-level motion preference: collapse every animation
+   and transition to effectively instant rather than skip states entirely,
+   so layout/visibility logic that depends on a transitionend-style flow
+   still behaves, it just doesn't move. */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  ::before,
+  ::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}

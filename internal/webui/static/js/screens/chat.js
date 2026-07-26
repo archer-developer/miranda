@@ -3,54 +3,160 @@
 // Miranda — same POST /api/v1/input the debug box always used, just
 // rendered as a proper message thread instead of a single reply box.
 import { t } from "../i18n.js";
+import { icon } from "../icons.js";
 
-let messagesEl, formEl, textEl;
+let messagesEl, scrollEl, formEl, textEl, sendBtn;
 
-function bubble(role, text) {
+function formatTime(iso) {
+  try {
+    return new Date(iso).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+  } catch {
+    return "";
+  }
+}
+
+function bubble(role, text, timeIso) {
   const wrap = document.createElement("div");
-  wrap.className = `flex ${role === "user" ? "justify-end" : "justify-start"}`;
+  wrap.className = `flex flex-col ${role === "user" ? "items-end" : "items-start"}`;
 
   const b = document.createElement("div");
   b.className =
     role === "user"
-      ? "max-w-[80%] rounded-2xl rounded-br-sm bg-indigo-500 px-4 py-2 text-sm text-white"
-      : "max-w-[80%] rounded-2xl rounded-bl-sm bg-slate-800 px-4 py-2 text-sm text-slate-100";
+      ? "max-w-[85%] whitespace-pre-wrap rounded-2xl rounded-br-md bg-indigo-500 px-4 py-2.5 text-sm leading-relaxed text-white sm:max-w-[75%]"
+      : "max-w-[85%] whitespace-pre-wrap rounded-2xl rounded-bl-md border border-slate-800 bg-slate-900/70 px-4 py-2.5 text-sm leading-relaxed text-slate-100 sm:max-w-[75%]";
   b.textContent = text;
-
   wrap.appendChild(b);
+
+  if (timeIso) {
+    const time = document.createElement("span");
+    time.className = "mt-1 px-1 text-xs text-slate-600";
+    time.textContent = formatTime(timeIso);
+    wrap.appendChild(time);
+  }
+
+  return wrap;
+}
+
+/** The three-dot "Miranda is thinking" indicator shown while a request is in flight. */
+function typingIndicator() {
+  const wrap = document.createElement("div");
+  wrap.className = "flex items-start";
+  wrap.innerHTML = `
+    <div class="flex items-center gap-1 rounded-2xl rounded-bl-md border border-slate-800 bg-slate-900/70 px-4 py-3">
+      <span class="h-1.5 w-1.5 animate-bounce rounded-full bg-slate-500 [animation-delay:-0.3s]"></span>
+      <span class="h-1.5 w-1.5 animate-bounce rounded-full bg-slate-500 [animation-delay:-0.15s]"></span>
+      <span class="h-1.5 w-1.5 animate-bounce rounded-full bg-slate-500"></span>
+    </div>`;
+  return wrap;
+}
+
+/** A visually distinct error bubble with an inline retry action — errors
+ * must never look like just another assistant message (persona doc: "be
+ * visually distinguishable" + "provide recovery action"). */
+function errorBubble(detail, onRetry) {
+  const wrap = document.createElement("div");
+  wrap.className = "flex flex-col items-start gap-2";
+  wrap.innerHTML = `
+    <div class="flex max-w-[85%] items-start gap-2 rounded-2xl rounded-bl-md border border-red-900/50 bg-red-950/30 px-4 py-2.5 text-sm text-red-300 sm:max-w-[75%]">
+      ${icon("alert-circle", "mt-0.5 h-4 w-4 shrink-0")}
+      <span class="detail-text"></span>
+    </div>`;
+  // `detail` wraps a caught exception's message or an HTTP status — set via
+  // textContent rather than interpolated into the innerHTML above, so it
+  // can never be interpreted as markup no matter what a failing request or
+  // an unusual Error object happens to stringify to.
+  wrap.querySelector(".detail-text").textContent = `${t("request_failed", "Request failed:")} ${detail}`;
+  const retry = document.createElement("button");
+  retry.type = "button";
+  retry.className =
+    "ml-1 rounded-md px-2 py-1 text-xs font-medium text-slate-400 underline decoration-slate-700 underline-offset-2 transition-colors hover:text-slate-200 focus-visible:outline-none";
+  retry.textContent = t("retry_button", "Try again");
+  retry.addEventListener("click", onRetry);
+  wrap.appendChild(retry);
+  return wrap;
+}
+
+function emptyState() {
+  const wrap = document.createElement("div");
+  wrap.dataset.emptyState = "true";
+  wrap.className = "flex flex-col items-center gap-3 px-6 py-20 text-center";
+  wrap.innerHTML = `
+    <span class="flex h-12 w-12 items-center justify-center rounded-full bg-slate-900 text-slate-600">${icon("chat", "h-5 w-5")}</span>
+    <div class="space-y-1">
+      <p class="text-sm font-medium text-slate-300">${t("chat_empty_title", "Start a conversation")}</p>
+      <p class="max-w-xs text-sm text-slate-500">${t("chat_empty_subtitle", "Ask Miranda anything — she remembers context across the conversation.")}</p>
+    </div>`;
+  return wrap;
+}
+
+function skeleton() {
+  const wrap = document.createElement("div");
+  wrap.className = "flex flex-col gap-4";
+  wrap.innerHTML = `
+    <div class="flex justify-start"><div class="skeleton animate-shimmer h-9 w-48 rounded-2xl"></div></div>
+    <div class="flex justify-end"><div class="skeleton animate-shimmer h-9 w-32 rounded-2xl"></div></div>
+    <div class="flex justify-start"><div class="skeleton animate-shimmer h-9 w-56 rounded-2xl"></div></div>`;
   return wrap;
 }
 
 function scrollToBottom() {
-  messagesEl.scrollTop = messagesEl.scrollHeight;
+  scrollEl.scrollTop = scrollEl.scrollHeight;
+}
+
+function clearMessages() {
+  messagesEl.innerHTML = "";
 }
 
 async function loadHistory() {
-  messagesEl.innerHTML = "";
+  clearMessages();
+  messagesEl.appendChild(skeleton());
   try {
     const res = await fetch("/api/dialogs?limit=1");
     const conversations = await res.json();
-    if (!conversations || conversations.length === 0 || conversations[0].ended_at) return;
+    if (!conversations || conversations.length === 0 || conversations[0].ended_at) {
+      clearMessages();
+      messagesEl.appendChild(emptyState());
+      return;
+    }
 
     const msgsRes = await fetch(`/api/dialogs/${encodeURIComponent(conversations[0].id)}`);
     const messages = await msgsRes.json();
-    for (const m of messages) {
-      if (m.role !== "user" && m.role !== "assistant") continue;
-      messagesEl.appendChild(bubble(m.role, m.content));
+    const chatMessages = messages.filter((m) => m.role === "user" || m.role === "assistant");
+
+    clearMessages();
+    if (chatMessages.length === 0) {
+      messagesEl.appendChild(emptyState());
+      return;
+    }
+    for (const m of chatMessages) {
+      messagesEl.appendChild(bubble(m.role, m.content, m.created_at));
     }
     scrollToBottom();
   } catch {
-    // Best-effort restore only — an empty pane just means starting fresh.
+    // Best-effort restore only — a failed background history fetch just
+    // means starting fresh, same as if there were no prior conversation.
+    clearMessages();
+    messagesEl.appendChild(emptyState());
   }
 }
 
+function setSending(sending) {
+  textEl.disabled = sending;
+  sendBtn.disabled = sending;
+  sendBtn.innerHTML = sending
+    ? '<span class="h-4 w-4 animate-spin rounded-full border-2 border-white/30 border-t-white"></span>'
+    : icon("send", "h-4 w-4");
+}
+
 async function send(text) {
+  messagesEl.querySelector("[data-empty-state]")?.remove();
   messagesEl.appendChild(bubble("user", text));
   scrollToBottom();
 
-  const thinking = bubble("assistant", t("chat_thinking_ellipsis", "…"));
+  const thinking = typingIndicator();
   messagesEl.appendChild(thinking);
   scrollToBottom();
+  setSending(true);
 
   try {
     const res = await fetch("/api/v1/input", {
@@ -60,16 +166,23 @@ async function send(text) {
     });
     thinking.remove();
     if (!res.ok) {
-      messagesEl.appendChild(bubble("assistant", `${t("request_failed", "Request failed:")} ${res.status}`));
+      messagesEl.appendChild(errorBubble(String(res.status), () => send(text)));
     } else {
       const data = await res.json();
-      messagesEl.appendChild(bubble("assistant", data.reply));
+      messagesEl.appendChild(bubble("assistant", data.reply, new Date().toISOString()));
     }
   } catch (err) {
     thinking.remove();
-    messagesEl.appendChild(bubble("assistant", `${t("request_failed", "Request failed:")} ${err}`));
+    messagesEl.appendChild(errorBubble(String(err), () => send(text)));
+  } finally {
+    setSending(false);
   }
   scrollToBottom();
+}
+
+function autoResize() {
+  textEl.style.height = "auto";
+  textEl.style.height = `${Math.min(textEl.scrollHeight, 160)}px`;
 }
 
 function onSubmit(e) {
@@ -77,6 +190,7 @@ function onSubmit(e) {
   const text = textEl.value.trim();
   if (!text) return;
   textEl.value = "";
+  autoResize();
   send(text);
 }
 
@@ -90,21 +204,35 @@ function onKeydown(e) {
 export function mount(container) {
   container.innerHTML = `
     <div class="flex h-full flex-col">
-      <div id="chat-messages" class="flex-1 space-y-2 overflow-y-auto p-4"></div>
-      <form id="chat-form" class="flex gap-2 border-t border-slate-800 p-3">
-        <textarea id="chat-text" rows="1" placeholder="${t("chat_placeholder", "Message Miranda…")}"
-          class="flex-1 resize-none rounded-md border border-slate-700 bg-slate-950 px-3 py-2 text-sm placeholder:text-slate-500 focus:border-slate-500 focus:outline-none"></textarea>
-        <button type="submit" class="rounded-md bg-indigo-500 px-4 py-2 text-sm font-medium text-white hover:bg-indigo-400 active:bg-indigo-600">
-          ${t("send_button", "Send")}
-        </button>
-      </form>
+      <h1 class="sr-only">${t("nav_chat", "Chat")}</h1>
+      <div id="chat-scroll" class="scrollbar-thin min-h-0 flex-1 overflow-y-auto">
+        <div class="mx-auto flex min-h-full max-w-3xl flex-col justify-end px-4 py-6 sm:px-6">
+          <div id="chat-messages" class="flex flex-col gap-4" aria-live="polite" aria-relevant="additions"></div>
+        </div>
+      </div>
+      <div class="border-t border-slate-800/70 bg-slate-950/70">
+        <form id="chat-form" class="mx-auto flex max-w-3xl items-end gap-2 px-4 py-3 sm:px-6">
+          <label for="chat-text" class="sr-only">${t("chat_placeholder", "Message Miranda…")}</label>
+          <textarea id="chat-text" rows="1" placeholder="${t("chat_placeholder", "Message Miranda…")}"
+            class="scrollbar-thin max-h-40 flex-1 resize-none rounded-xl border border-slate-700 bg-slate-900/60 px-4 py-2.5 text-sm text-slate-100 transition-colors placeholder:text-slate-500 hover:border-slate-600 focus:border-indigo-400 focus:outline-none focus-visible:outline-none"></textarea>
+          <button type="submit" id="chat-send" aria-label="${t("send_button", "Send")}"
+            class="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl bg-indigo-500 text-white transition-colors hover:bg-indigo-400 focus-visible:outline-none active:bg-indigo-600 disabled:cursor-not-allowed disabled:opacity-60">
+            ${icon("send", "h-4 w-4")}
+          </button>
+        </form>
+        <p class="mx-auto hidden max-w-3xl px-4 pb-3 text-xs text-slate-600 sm:block sm:px-6">${t("chat_hint", "Enter to send · Shift+Enter for a new line")}</p>
+      </div>
     </div>`;
 
+  scrollEl = container.querySelector("#chat-scroll");
   messagesEl = container.querySelector("#chat-messages");
   formEl = container.querySelector("#chat-form");
   textEl = container.querySelector("#chat-text");
+  sendBtn = container.querySelector("#chat-send");
+
   formEl.addEventListener("submit", onSubmit);
   textEl.addEventListener("keydown", onKeydown);
+  textEl.addEventListener("input", autoResize);
 
   loadHistory();
 }

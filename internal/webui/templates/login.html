@@ -8,50 +8,101 @@
   <link rel="alternate icon" type="image/png" href="/static/v{{.AssetVersion}}/brand/icon.png" />
   <link rel="stylesheet" href="/static/v{{.AssetVersion}}/css/styles.css" />
 </head>
-<body class="flex h-full items-center justify-center bg-slate-950 text-slate-100 antialiased">
-  <div class="w-full max-w-sm rounded-lg border border-slate-800 bg-slate-900/50 p-6">
-    <div class="mb-6 flex flex-col items-center gap-2">
-      <img src="/static/v{{.AssetVersion}}/brand/icon.svg" alt="" class="h-14 w-14" />
-      <h1 class="text-lg font-semibold tracking-tight">{{.Strings.login_title}}</h1>
-    </div>
+<body class="flex min-h-full items-center justify-center bg-slate-950 px-4 py-8 text-slate-100 antialiased">
+  <!-- No overflow-hidden here: the decorative glow below is `fixed`, so it
+       never contributes to the page's scrollable area — and a short
+       viewport (e.g. a landscape phone with the keyboard open) must still
+       be able to scroll to reach the submit button. -->
+  <!-- A single, very restrained radial glow behind the card — the persona
+       doc warns against heavy gradients, so this stays low-opacity and
+       purely atmospheric, not a design element anyone should consciously
+       notice. aria-hidden since it's decorative only. -->
+  <div aria-hidden="true"
+       class="pointer-events-none fixed left-1/2 top-1/3 h-[36rem] w-[36rem] -translate-x-1/2 -translate-y-1/2 rounded-full bg-indigo-500/10 blur-3xl"></div>
 
-    {{if .Error}}
-    <div class="mb-4 rounded-md border border-red-900 bg-red-950/50 px-3 py-2 text-sm text-red-300">
-      {{.Strings.login_error}}
-    </div>
-    {{end}}
+  <main class="relative w-full max-w-sm animate-scale-in">
+    <div class="rounded-2xl border border-slate-800 bg-slate-900/60 p-8 shadow-2xl shadow-black/40 backdrop-blur">
+      <div class="mb-8 flex flex-col items-center gap-3 text-center">
+        <img src="/static/v{{.AssetVersion}}/brand/icon.svg" alt="" class="h-12 w-12" />
+        <h1 class="text-xl font-semibold tracking-tight text-white">{{.Strings.login_title}}</h1>
+      </div>
 
-    <form method="POST" action="/login" class="space-y-3">
-      <div>
-        <label class="mb-1 block text-xs text-slate-400" for="username">{{.Strings.login_username_label}}</label>
-        <input id="username" name="username" type="text" autocomplete="username" required autofocus
-               class="w-full rounded-md border border-slate-700 bg-slate-950 px-3 py-2 text-sm focus:border-slate-500 focus:outline-none" />
+      {{if .Error}}
+      <div role="alert" class="mb-5 flex items-start gap-2.5 rounded-lg border border-red-900/60 bg-red-950/40 px-3.5 py-3 text-sm text-red-300">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="mt-0.5 h-4 w-4 shrink-0" aria-hidden="true"><circle cx="12" cy="12" r="9"/><line x1="12" y1="8" x2="12" y2="13"/><line x1="12" y1="16" x2="12" y2="16.01"/></svg>
+        <span>{{.Strings.login_error}}</span>
       </div>
-      <div>
-        <label class="mb-1 block text-xs text-slate-400" for="password">{{.Strings.login_password_label}}</label>
-        <input id="password" name="password" type="password" autocomplete="current-password" required
-               class="w-full rounded-md border border-slate-700 bg-slate-950 px-3 py-2 text-sm focus:border-slate-500 focus:outline-none" />
+      {{end}}
+
+      <form method="POST" action="/login" class="space-y-4" novalidate>
+        <div>
+          <label class="mb-1.5 block text-xs font-medium text-slate-400" for="username">{{.Strings.login_username_label}}</label>
+          <input id="username" name="username" type="text" autocomplete="username" required autofocus
+                 class="w-full rounded-lg border border-slate-700 bg-slate-950 px-3.5 py-2.5 text-sm text-slate-100 transition-colors placeholder:text-slate-600 hover:border-slate-600 focus:border-indigo-400 focus:outline-none focus-visible:outline-none" />
+        </div>
+        <div>
+          <label class="mb-1.5 block text-xs font-medium text-slate-400" for="password">{{.Strings.login_password_label}}</label>
+          <div class="relative">
+            <input id="password" name="password" type="password" autocomplete="current-password" required
+                   class="w-full rounded-lg border border-slate-700 bg-slate-950 px-3.5 py-2.5 pr-11 text-sm text-slate-100 transition-colors placeholder:text-slate-600 hover:border-slate-600 focus:border-indigo-400 focus:outline-none focus-visible:outline-none" />
+            <button type="button" id="password-toggle" tabindex="0"
+                    class="absolute inset-y-0 right-0 flex w-11 items-center justify-center text-slate-500 transition-colors hover:text-slate-300 focus-visible:outline-none"
+                    aria-label="{{.Strings.login_password_show}}" aria-pressed="false">
+              <svg id="password-toggle-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="h-4 w-4" aria-hidden="true"><path d="M1 12s4-7 11-7 11 7 11 7-4 7-11 7-11-7-11-7z"/><circle cx="12" cy="12" r="3"/></svg>
+            </button>
+          </div>
+        </div>
+        <button type="submit" id="login-submit"
+                class="flex w-full items-center justify-center gap-2 rounded-lg bg-indigo-500 px-3.5 py-2.5 text-sm font-medium text-white transition-colors hover:bg-indigo-400 focus-visible:outline-none active:bg-indigo-600">
+          {{.Strings.login_button}}
+        </button>
+      </form>
+
+      {{if .WebAuthnEnabled}}
+      <div class="my-5 flex items-center gap-3 text-xs text-slate-600">
+        <span class="h-px flex-1 bg-slate-800"></span>
+        {{.Strings.login_or_divider}}
+        <span class="h-px flex-1 bg-slate-800"></span>
       </div>
-      <button type="submit"
-              class="w-full rounded-md bg-indigo-500 px-3 py-2 text-sm font-medium text-white hover:bg-indigo-400 active:bg-indigo-600">
-        {{.Strings.login_button}}
+
+      <button id="biometric-login" type="button" hidden
+              class="flex w-full items-center justify-center gap-2 rounded-lg border border-slate-700 px-3.5 py-2.5 text-sm font-medium text-slate-200 transition-colors hover:border-slate-600 hover:bg-slate-800/60 focus-visible:outline-none">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="h-4 w-4" aria-hidden="true"><circle cx="7" cy="15" r="4"/><path d="M9.5 12.5 20 2"/><path d="M17 5l3 3"/><path d="M14 8l2.5 2.5"/></svg>
+        {{.Strings.login_biometric_button}}
       </button>
-    </form>
-
-    {{if .WebAuthnEnabled}}
-    <button id="biometric-login" type="button" hidden
-            class="mt-3 w-full rounded-md border border-slate-700 px-3 py-2 text-sm font-medium text-slate-200 hover:bg-slate-800">
-      {{.Strings.login_biometric_button}}
-    </button>
-    <p id="biometric-error" class="mt-2 hidden text-center text-xs text-red-400"></p>
-    {{end}}
-
-    <div class="mt-5 flex justify-center gap-3 text-xs text-slate-500">
-      {{range .Languages}}
-      <a href="/set-lang?lang={{.Code}}&next=/login" class="{{if .Active}}text-slate-200{{else}}hover:text-slate-300{{end}}">{{.Label}}</a>
+      <p id="biometric-error" role="alert" class="mt-3 hidden text-center text-xs text-red-400"></p>
       {{end}}
     </div>
-  </div>
+
+    <div class="mt-6 flex justify-center gap-4 text-xs text-slate-600">
+      {{range .Languages}}
+      <a href="/set-lang?lang={{.Code}}&next=/login" class="font-medium transition-colors {{if .Active}}text-slate-300{{else}}hover:text-slate-400{{end}}">{{.Label}}</a>
+      {{end}}
+    </div>
+  </main>
+
+  <script>
+    // Password visibility toggle. Deliberately not an ES module: it's a
+    // single trivial interaction with no dependency on i18n.js/webauthn.js,
+    // and (unlike login.js) needs to run whether or not WebAuthn is
+    // enabled, so it can't live behind that template guard.
+    (function () {
+      var input = document.getElementById("password");
+      var toggle = document.getElementById("password-toggle");
+      var icon = document.getElementById("password-toggle-icon");
+      var showLabel = "{{.Strings.login_password_show}}";
+      var hideLabel = "{{.Strings.login_password_hide}}";
+      var eyeOff = '<path d="M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 7 11 7a13.16 13.16 0 0 1-1.67 2.68"/><path d="M6.61 6.61C3.35 8.36 1 12 1 12s4 7 11 7a9.26 9.26 0 0 0 5.39-1.61"/><path d="M14.12 14.12a3 3 0 1 1-4.24-4.24"/><line x1="1" y1="1" x2="23" y2="23"/>';
+      var eyeOn = '<path d="M1 12s4-7 11-7 11 7 11 7-4 7-11 7-11-7-11-7z"/><circle cx="12" cy="12" r="3"/>';
+      toggle.addEventListener("click", function () {
+        var show = input.type === "password";
+        input.type = show ? "text" : "password";
+        icon.innerHTML = show ? eyeOff : eyeOn;
+        toggle.setAttribute("aria-pressed", String(show));
+        toggle.setAttribute("aria-label", show ? hideLabel : showLabel);
+      });
+    })();
+  </script>
 
   {{if .WebAuthnEnabled}}
   <script>window.MIRANDA_I18N = {{.StringsJSON}};</script>

@@ -34,7 +34,10 @@ export function replay(source) {
 }
 
 function setStatus(connected) {
-  wsDot.className = `h-2.5 w-2.5 rounded-full ${connected ? "bg-emerald-500" : "bg-red-500"}`;
+  // Sized/positioned to match the dot's initial markup in index.html
+  // exactly (h-2 w-2 rounded-full) — only the color and the "still
+  // settling in" pulse animation change once we know the real state.
+  wsDot.className = `h-2 w-2 shrink-0 rounded-full ${connected ? "bg-emerald-400" : "bg-red-400 animate-pulse-soft"}`;
   wsStatus.textContent = connected ? t("ws_connected", "connected") : t("ws_disconnected", "disconnected — retrying…");
   wsDot.title = wsStatus.textContent;
 }

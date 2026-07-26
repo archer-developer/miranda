@@ -33,9 +33,33 @@ function render() {
   const screen = routes.get(hash);
   if (screen) screen.mount(container);
 
+  // A short fade-in on the freshly mounted screen — cheap, GPU-friendly
+  // (opacity only) motion that signals "new content arrived" on every
+  // navigation, per the persona doc's page-transition guidance (250-350ms).
+  // Re-triggered per navigation by removing/re-adding the class on the next
+  // frame, since the container element itself is reused.
+  container.classList.remove("animate-fade-in");
+  // eslint-disable-next-line no-unused-expressions -- force reflow so the
+  // animation restarts even though the class name didn't change.
+  void container.offsetWidth;
+  container.classList.add("animate-fade-in");
+
+  // Move focus to the new screen for keyboard/screen-reader users — without
+  // this, focus silently stays on whatever nav link was clicked (or nowhere,
+  // after a hashchange from history navigation), which makes a single-page
+  // app feel broken to anyone not using a mouse.
+  container.focus({ preventScroll: true });
+
   document.querySelectorAll("[data-nav-link]").forEach((el) => {
-    el.classList.toggle("bg-slate-800", el.getAttribute("href") === hash);
-    el.classList.toggle("text-white", el.getAttribute("href") === hash);
+    const active = el.getAttribute("href") === hash;
+    el.classList.toggle("bg-slate-800", active);
+    el.classList.toggle("text-white", active);
+    el.classList.toggle("text-slate-400", !active);
+    if (active) {
+      el.setAttribute("aria-current", "page");
+    } else {
+      el.removeAttribute("aria-current");
+    }
   });
 }
 
