@@ -17,9 +17,12 @@ import (
 	"net/http"
 	"strconv"
 
+	"github.com/go-webauthn/webauthn/protocol"
+
 	"github.com/archer-developer/miranda/internal/history"
 	"github.com/archer-developer/miranda/internal/session"
 	"github.com/archer-developer/miranda/internal/users"
+	"github.com/archer-developer/miranda/internal/webauthn"
 )
 
 //go:embed templates/index.html templates/login.html
@@ -45,14 +48,28 @@ type Memory interface {
 	Write(userID, content string) error
 }
 
+// WebAuthnService is the subset of *webauthn.Service the dashboard needs
+// for passkey registration/login/management. A nil WebAuthnService passed
+// to New disables the feature entirely — see New's doc comment.
+type WebAuthnService interface {
+	BeginRegistration(ctx context.Context, username, ceremonyKey string) (*protocol.CredentialCreation, error)
+	FinishRegistration(ctx context.Context, username, ceremonyKey, nickname string, body []byte) (webauthn.CredentialInfo, error)
+	BeginDiscoverableLogin(ctx context.Context) (*protocol.CredentialAssertion, string, error)
+	FinishDiscoverableLogin(ctx context.Context, ceremonyID string, body []byte) (string, error)
+	ListCredentials(ctx context.Context, username string) ([]webauthn.CredentialInfo, error)
+	DeleteCredential(ctx context.Context, username string, credentialID []byte) error
+}
+
 // Handler serves the dashboard page, its static assets, the auth flow, the
-// dialog history JSON API, and the current user's memory file API.
+// dialog history JSON API, the current user's memory file API, and
+// (optionally) passkey registration/login.
 type Handler struct {
 	mux             *http.ServeMux
 	indexTmpl       *template.Template
 	loginTmpl       *template.Template
 	history         History
 	memory          Memory
+	webauthn        WebAuthnService // nil disables passkey login/registration entirely
 	users           *users.Registry
 	sessions        *session.Store
 	defaultLanguage string
@@ -63,8 +80,12 @@ type Handler struct {
 // the dashboard is unreachable, which is the intended fail-closed state
 // rather than a bug to work around. avatarsDir, if non-empty, is served at
 // /static/avatars/ for UserConfig.Avatar values that name a local file
-// rather than an http(s) URL.
-func New(h History, mem Memory, usersRegistry *users.Registry, sessions *session.Store, defaultLanguage, avatarsDir string) (*Handler, error) {
+// rather than an http(s) URL. webauthnSvc may be nil (config.WebAuthnConfig.Enabled
+// false, the default) — in that case the six /api/webauthn/* routes are
+// never registered at all, and the frontend's own capability check
+// (window.PublicKeyCredential) keeps the passkey UI hidden; nothing in this
+// package needs a separate "is it enabled" branch beyond this one nil check.
+func New(h History, mem Memory, webauthnSvc WebAuthnService, usersRegistry *users.Registry, sessions *session.Store, defaultLanguage, avatarsDir string) (*Handler, error) {
 	indexTmpl, err := template.ParseFS(templatesFS, "templates/index.html")
 	if err != nil {
 		return nil, fmt.Errorf("webui: parse index template: %w", err)
@@ -79,6 +100,7 @@ func New(h History, mem Memory, usersRegistry *users.Registry, sessions *session
 		loginTmpl:       loginTmpl,
 		history:         h,
 		memory:          mem,
+		webauthn:        webauthnSvc,
 		users:           usersRegistry,
 		sessions:        sessions,
 		defaultLanguage: defaultLanguage,
@@ -103,6 +125,19 @@ func New(h History, mem Memory, usersRegistry *users.Registry, sessions *session
 	mux.Handle("GET /api/dialogs/{id}", handler.requireAuthAPI(http.HandlerFunc(handler.handleDialogMessages)))
 	mux.Handle("GET /api/memory", handler.requireAuthAPI(http.HandlerFunc(handler.handleGetMemory)))
 	mux.Handle("PUT /api/memory", handler.requireAuthAPI(http.HandlerFunc(handler.handlePutMemory)))
+
+	if webauthnSvc != nil {
+		// Registration/management require being logged in already (adding a
+		// passkey from the profile screen); login is of course the one pair
+		// that must be reachable while unauthenticated — it *is* a login
+		// mechanism.
+		mux.Handle("POST /api/webauthn/register/begin", handler.requireAuthAPI(http.HandlerFunc(handler.handleWebAuthnRegisterBegin)))
+		mux.Handle("POST /api/webauthn/register/finish", handler.requireAuthAPI(http.HandlerFunc(handler.handleWebAuthnRegisterFinish)))
+		mux.HandleFunc("POST /api/webauthn/login/begin", handler.handleWebAuthnLoginBegin)
+		mux.HandleFunc("POST /api/webauthn/login/finish", handler.handleWebAuthnLoginFinish)
+		mux.Handle("GET /api/webauthn/credentials", handler.requireAuthAPI(http.HandlerFunc(handler.handleWebAuthnListCredentials)))
+		mux.Handle("DELETE /api/webauthn/credentials/{id}", handler.requireAuthAPI(http.HandlerFunc(handler.handleWebAuthnDeleteCredential)))
+	}
 	handler.mux = mux
 
 	return handler, nil
@@ -116,13 +151,16 @@ func (h *Handler) handleIndex(w http.ResponseWriter, r *http.Request) {
 	user := currentUser(r)
 	lang := h.resolveLanguage(r, user)
 	strings := localizedStrings(lang)
+	userView := newCurrentUserView(user)
 
 	data := indexPageData{
-		Lang:        lang,
-		Strings:     strings,
-		StringsJSON: stringsJSON(strings),
-		User:        newCurrentUserView(user),
-		Languages:   languageOptions(lang),
+		Lang:            lang,
+		Strings:         strings,
+		StringsJSON:     stringsJSON(strings),
+		User:            userView,
+		UserJSON:        toJSON(userView),
+		Languages:       languageOptions(lang),
+		WebAuthnEnabled: h.webauthn != nil,
 	}
 
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")

@@ -14,16 +14,17 @@ import (
 // a value set in Default() so a missing or partial config.yaml still yields a
 // fully runnable configuration.
 type Config struct {
-	Server  ServerConfig  `yaml:"server"`
-	Storage StorageConfig `yaml:"storage"`
-	Logging LoggingConfig `yaml:"logging"`
-	LLM     LLMConfig     `yaml:"llm"`
-	Agent   AgentConfig   `yaml:"agent"`
-	Memory  MemoryConfig  `yaml:"memory"`
-	MCP     MCPConfig     `yaml:"mcp"`
-	TTS     TTSConfig     `yaml:"tts"`
-	WebUI   WebUIConfig   `yaml:"web_ui"`
-	Users   []UserConfig  `yaml:"users"`
+	Server   ServerConfig   `yaml:"server"`
+	Storage  StorageConfig  `yaml:"storage"`
+	Logging  LoggingConfig  `yaml:"logging"`
+	LLM      LLMConfig      `yaml:"llm"`
+	Agent    AgentConfig    `yaml:"agent"`
+	Memory   MemoryConfig   `yaml:"memory"`
+	MCP      MCPConfig      `yaml:"mcp"`
+	TTS      TTSConfig      `yaml:"tts"`
+	WebUI    WebUIConfig    `yaml:"web_ui"`
+	WebAuthn WebAuthnConfig `yaml:"webauthn"`
+	Users    []UserConfig   `yaml:"users"`
 }
 
 // UserConfig is one login account for the web UI, and doubles as the
@@ -61,6 +62,37 @@ type StorageConfig struct {
 	MemoryDir  string `yaml:"memory_dir"`
 	// AvatarsDir is served at /static/avatars/ — see UserConfig.Avatar.
 	AvatarsDir string `yaml:"avatars_dir"`
+	// WebAuthnSQLitePath is a separate small SQLite file for passkey
+	// credentials (internal/webauthn) — kept apart from SQLitePath so
+	// changing/wiping the dialog history never touches registered passkeys
+	// (and vice versa). Only used when WebAuthnConfig.Enabled is true.
+	WebAuthnSQLitePath string `yaml:"webauthn_sqlite_path"`
+}
+
+// WebAuthnConfig controls optional FIDO2/passkey ("biometric") login,
+// implemented by internal/webauthn. Opt-in (Enabled defaults false)
+// because RPID/RPOrigins are inherently deployment-specific — there's no
+// safe auto-detected default, and getting them wrong doesn't just fail
+// gracefully: a stale RPID orphans every previously-registered passkey.
+//
+// WebAuthn is a browser API that only works in a secure context (HTTPS, or
+// http://localhost) — it does not work over plain HTTP on a LAN IP, even
+// with this enabled. Miranda does not terminate TLS itself; front it with a
+// reverse proxy (or similar) that does, and point RPID/RPOrigins at that
+// proxy's hostname, not Miranda's own http_addr.
+type WebAuthnConfig struct {
+	Enabled bool `yaml:"enabled"`
+	// RPID is the bare hostname passkeys are bound to — no scheme, no port
+	// (e.g. "miranda.example.com"). Changing this later orphans every
+	// credential registered under the old value.
+	RPID string `yaml:"rp_id"`
+	// RPDisplayName is shown to the user by their browser/OS during the
+	// registration and login ceremonies (e.g. "Miranda").
+	RPDisplayName string `yaml:"rp_display_name"`
+	// RPOrigins lists every full origin (scheme+host+port) browsers may
+	// legitimately reach Miranda through, e.g. ["https://miranda.example.com"].
+	// Must be non-empty for WebAuthn to work at all if Enabled.
+	RPOrigins []string `yaml:"rp_origins"`
 }
 
 // LoggingConfig controls file logging: the general application log (a
@@ -178,8 +210,12 @@ type TTSConfig struct {
 
 // WebUIConfig controls the embedded monitoring dashboard.
 type WebUIConfig struct {
-	Enabled       bool `yaml:"enabled"`
-	LogBufferSize int  `yaml:"log_buffer_size"`
+	Enabled bool `yaml:"enabled"`
+	// LogBufferSize is how many recent hub.Event entries are replayed to a
+	// newly connected /ws/logs subscriber. Shared by chat/tool events and
+	// the log-viewer screen's mirrored app/LLM-trace log lines (see
+	// hub.Hub.Writer), so it needs more headroom than a chat-only buffer.
+	LogBufferSize int `yaml:"log_buffer_size"`
 	// DefaultLanguage is used for the login page (before we know which user
 	// is signing in) and as the fallback for any user without their own
 	// UserConfig.Language. One of "ru", "be", "en".
@@ -204,9 +240,10 @@ func Default() Config {
 			AuthToken: "",
 		},
 		Storage: StorageConfig{
-			SQLitePath: "./data/miranda.db",
-			MemoryDir:  "./data/memory",
-			AvatarsDir: "./data/avatars",
+			SQLitePath:         "./data/miranda.db",
+			MemoryDir:          "./data/memory",
+			AvatarsDir:         "./data/avatars",
+			WebAuthnSQLitePath: "./data/webauthn.db",
 		},
 		Logging: LoggingConfig{
 			Dir:        "./logs",
@@ -247,18 +284,59 @@ func Default() Config {
 			},
 		},
 		Agent: AgentConfig{
-			SystemPrompt: "Тебя зовут Miranda, ты домашний ассистент. Твоя задача помогать Саше и Ане управлять их умным домом и помогать им во всем, что ты умеешь. " +
-				"Твои ответы озвучиваются голосом если не указано иного - отвечай кратко и по сути. " +
-				"Длина ответа должна быть до 100 символов при обычном ответе и до 1000 при явной просьбе рассказать подробно. " +
-				"Перед тем как включить/выключить устройство или активировать сцену, если ты не уверена в точном названии " +
-				"устройства, комнаты или сцены (или это может быть и тем, и другим) - сначала вызови GetLiveContext, " +
-				"чтобы получить актуальный список устройств и сцен в доме, вместо того чтобы гадать или сразу переспрашивать " +
-				"пользователя.",
+			SystemPrompt: `Тебя зовут Miranda. Ты домашний голосовой ассистент.
+Твоя задача — помогать Саше и Ане управлять умным домом и отвечать на любые вопросы, которые ты можешь решить.
+
+## Стиль общения
+- По умолчанию отвечай кратко, естественно и по существу.
+- Большинство ответов будет озвучено голосом, поэтому не используй длинные вступления и лишние пояснения.
+- Если пользователь явно просит рассказать подробнее, дай развернутый ответ.
+
+## Ограничения длины
+- Обычный ответ — не более 100 символов.
+- Если пользователь явно просит рассказать подробно — не более 1000 символов.
+
+## Работа с умным домом
+Используй GetLiveContext в следующих случаях:
+
+- перед управлением устройствами;
+- если необходимо узнать текущее состояние устройства;
+- если существует хотя бы малейшая неоднозначность в названии устройства, комнаты или сцены;
+- если пользователь использует неполное или разговорное название.
+
+Не пытайся угадывать названия устройств, комнат или сцен.
+Не проси пользователя уточнить название, пока сначала не проверишь доступные устройства и сцены через GetLiveContext.
+Не вызывай GetLiveContext для обычных вопросов, не связанных с умным домом.
+
+## Источник истины
+Никогда не используй память разговора как источник информации о текущем состоянии дома.
+Единственным источником истины о состоянии устройств, сцен, яркости, громкости, температуре и других параметрах является GetLiveContext.
+Не утверждай, что устройство включено, выключено, имеет определенную яркость, громкость или другое состояние, пока не получишь актуальные данные через GetLiveContext.
+Если пользователь сообщает, что названное тобой состояние неверно:
+
+- считай информацию пользователя более достоверной;
+- повторно вызови GetLiveContext;
+- не повторяй прежний ответ без проверки.
+
+## Выполнение действий
+После управления устройствами сообщай только тот результат, который подтвержден инструментом.
+Не говори "Готово", "Включила" или "Выключила", если инструмент сообщил об ошибке или не подтвердил успешное выполнение.
+После успешного выполнения действия отвечай максимально кратко.
+
+## Общие правила
+Если для ответа необходимы актуальные данные о доме — сначала используй GetLiveContext.
+Если вопрос не связан с управлением домом или его состоянием, отвечай без вызова инструментов.
+Если информации недостаточно даже после использования GetLiveContext, задай пользователю уточняющий вопрос вместо того, чтобы делать предположения.`,
 		},
 		WebUI: WebUIConfig{
 			Enabled:         true,
-			LogBufferSize:   1000,
+			LogBufferSize:   2000,
 			DefaultLanguage: "ru",
+		},
+		// Disabled by default — see WebAuthnConfig's doc comment for why
+		// there's no safe auto-detected RPID/RPOrigins.
+		WebAuthn: WebAuthnConfig{
+			Enabled: false,
 		},
 		// No default Users: web UI login is mandatory and fails closed until
 		// config.yaml lists at least one account (see internal/users).

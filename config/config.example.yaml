@@ -17,6 +17,10 @@ server:
 storage:
   sqlite_path: "./data/miranda.db"
   memory_dir: "./data/memory"
+  # Separate small SQLite file for passkey credentials (see webauthn:
+  # below) — kept apart so wiping/backing up dialog history never touches
+  # registered passkeys, and vice versa. Only used if webauthn.enabled.
+  webauthn_sqlite_path: "./data/webauthn.db"
 
 logging:
   # Mirrors everything on stdout into logging.dir/miranda.log, plus a
@@ -99,8 +103,24 @@ tts:
 
 web_ui:
   enabled: true
-  log_buffer_size: 1000 # recent log lines replayed to a newly connected browser tab
+  # Recent hub.Event entries replayed to a newly connected browser tab.
+  # Shared by chat/tool events and the Logs screen's mirrored app/LLM-trace
+  # log lines, so it needs more headroom than a chat-only buffer.
+  log_buffer_size: 2000
   default_language: "ru" # ru | be | en — used for the login page and any user without their own `language`
+
+webauthn:
+  # Optional passwordless/biometric ("passkey") login — off by default,
+  # since there's no safe auto-detected rp_id/rp_origins for a given
+  # deployment. WebAuthn is a browser API that only works in a secure
+  # context (HTTPS, or http://localhost) — plain http://<lan-ip> will not
+  # work, even with this enabled; front Miranda with a reverse proxy that
+  # terminates TLS and point rp_id/rp_origins at *that* hostname, not at
+  # server.http_addr.
+  enabled: false
+  rp_id: "" # bare hostname, no scheme/port, e.g. "miranda.example.com" — changing this later orphans every registered passkey
+  rp_display_name: "Miranda"
+  rp_origins: [] # full origins the browser may reach Miranda through, e.g. ["https://miranda.example.com"]
 
 # Web UI login is mandatory — with no users listed here, the dashboard is
 # unreachable (fails closed by design, not a bug). Generate a password hash

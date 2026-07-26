@@ -34,6 +34,7 @@ import (
 	"github.com/archer-developer/miranda/internal/session"
 	"github.com/archer-developer/miranda/internal/tts"
 	"github.com/archer-developer/miranda/internal/users"
+	"github.com/archer-developer/miranda/internal/webauthn"
 	"github.com/archer-developer/miranda/internal/webui"
 )
 
@@ -51,6 +52,11 @@ const sessionTTL = 30 * 24 * time.Hour
 // itself) — this is just the polling cadence, and cheap to run often since
 // it's a single indexed SQLite query.
 const idleSweepInterval = time.Minute
+
+// webauthnCeremonyTTL bounds how long a pending passkey registration/login
+// ceremony (the gap between its begin and finish HTTP calls) stays valid —
+// comfortably above the WebAuthn library's own ~60s ceremony timeout.
+const webauthnCeremonyTTL = 2 * time.Minute
 
 // dotEnvPath is a .env file in the project root, loaded for local-dev
 // convenience (see internal/envfile) so secrets like ANTHROPIC_API_KEY or
@@ -80,32 +86,39 @@ func main() {
 		os.Exit(1)
 	}
 
-	logger, closeLogs, err := setupLogging(cfg.Logging)
+	// Built before setupLogging so the app logger can also mirror into it
+	// (see setupLogging) — the web UI's log-viewer screen and live event
+	// pane both read from this one Hub over /ws/logs.
+	eventHub := hub.New(cfg.WebUI.LogBufferSize)
+
+	logger, closeLogs, err := setupLogging(cfg.Logging, eventHub)
 	if err != nil {
 		bootstrap.Error("fatal", "error", err)
 		os.Exit(1)
 	}
 	defer closeLogs()
 
-	if err := run(cfg, logger); err != nil {
+	if err := run(cfg, logger, eventHub); err != nil {
 		logger.Error("fatal", "error", err)
 		os.Exit(1)
 	}
 }
 
 // setupLogging builds the application logger so everything it logs is
-// mirrored to a size-rotated file under cfg.Dir in addition to stdout — the
-// same messages you'd see in the terminal are also on disk for later
-// review. The returned close func closes the underlying log file and should
-// run at shutdown (best-effort: lumberjack writes synchronously, so nothing
-// is lost even if the process exits without calling it).
-func setupLogging(cfg config.LoggingConfig) (*slog.Logger, func(), error) {
+// mirrored to a size-rotated file under cfg.Dir *and* into eventHub (as
+// Source: "app_log" events, see hub.Hub.Writer) in addition to stdout — the
+// same messages you'd see in the terminal are also on disk for later review
+// and live on the web UI's log-viewer screen. The returned close func closes
+// the underlying log file and should run at shutdown (best-effort:
+// lumberjack writes synchronously, so nothing is lost even if the process
+// exits without calling it).
+func setupLogging(cfg config.LoggingConfig, eventHub *hub.Hub) (*slog.Logger, func(), error) {
 	if err := os.MkdirAll(cfg.Dir, 0o755); err != nil {
 		return nil, func() {}, fmt.Errorf("main: create log dir %s: %w", cfg.Dir, err)
 	}
 
 	appLogFile := rotatingLogFile(cfg, "miranda.log")
-	logger := slog.New(slog.NewTextHandler(io.MultiWriter(os.Stdout, appLogFile), nil))
+	logger := slog.New(slog.NewTextHandler(io.MultiWriter(os.Stdout, appLogFile, eventHub.Writer("app_log")), nil))
 	return logger, func() { _ = appLogFile.Close() }, nil
 }
 
@@ -121,10 +134,13 @@ func rotatingLogFile(cfg config.LoggingConfig, filename string) *lumberjack.Logg
 	}
 }
 
-func run(cfg config.Config, logger *slog.Logger) error {
+func run(cfg config.Config, logger *slog.Logger, eventHub *hub.Hub) error {
 	llmTraceFile := rotatingLogFile(cfg.Logging, "llm.log")
 	defer func() { _ = llmTraceFile.Close() }()
-	llmTracer := llmtrace.New(llmTraceFile)
+	// Mirrored into eventHub as Source: "llm_log" events too, same as the
+	// app logger above — the web UI's log-viewer screen tabs between the
+	// two over the one existing /ws/logs connection.
+	llmTracer := llmtrace.New(io.MultiWriter(llmTraceFile, eventHub.Writer("llm_log")))
 
 	historyStore, err := history.Open(cfg.Storage.SQLitePath)
 	if err != nil {
@@ -151,8 +167,6 @@ func run(cfg config.Config, logger *slog.Logger) error {
 
 	dispatcher := buildTTSDispatcher(cfg.TTS, logger)
 
-	eventHub := hub.New(cfg.WebUI.LogBufferSize)
-
 	usersRegistry, err := users.NewRegistry(cfg.Users)
 	if err != nil {
 		return err
@@ -162,15 +176,41 @@ func run(cfg config.Config, logger *slog.Logger) error {
 	}
 	sessions := session.NewStore(sessionTTL)
 
+	// webauthnSvc stays a true nil interface (not a nil *webauthn.Service)
+	// when disabled, so webui.New's "webauthnSvc != nil" check to skip
+	// registering the passkey routes actually works — assigning a nil
+	// *webauthn.Service to an interface variable would produce a non-nil
+	// interface wrapping a nil pointer, the classic Go footgun.
+	var webauthnSvc webui.WebAuthnService
+	if cfg.WebAuthn.Enabled {
+		if cfg.WebAuthn.RPID == "" || len(cfg.WebAuthn.RPOrigins) == 0 {
+			return fmt.Errorf("main: webauthn.enabled is true but rp_id/rp_origins are not configured")
+		}
+		webauthnStore, err := webauthn.Open(cfg.Storage.WebAuthnSQLitePath)
+		if err != nil {
+			return err
+		}
+		defer func() { _ = webauthnStore.Close() }()
+
+		svc, err := webauthn.NewService(
+			cfg.WebAuthn.RPID, cfg.WebAuthn.RPDisplayName, cfg.WebAuthn.RPOrigins,
+			webauthnStore, webauthn.NewCeremonyStore(webauthnCeremonyTTL), usersRegistry,
+		)
+		if err != nil {
+			return fmt.Errorf("main: configure webauthn: %w", err)
+		}
+		webauthnSvc = svc
+	}
+
 	defaultUserID := "debug"
 	orchestrator := httpapi.NewOrchestrator(
-		llmRouter, toolManager, historyStore, memoryStore, dispatcher, eventHub,
+		llmRouter, toolManager, historyStore, memoryStore, dispatcher, eventHub, usersRegistry,
 		cfg.Agent, cfg.Memory, cfg.LLM.Escalation, cfg.TTS.YandexStation.ChunkMaxChars, defaultUserID,
 	)
 
 	var webHandler http.Handler
 	if cfg.WebUI.Enabled {
-		wh, err := webui.New(historyStore, memoryStore, usersRegistry, sessions, cfg.WebUI.DefaultLanguage, cfg.Storage.AvatarsDir)
+		wh, err := webui.New(historyStore, memoryStore, webauthnSvc, usersRegistry, sessions, cfg.WebUI.DefaultLanguage, cfg.Storage.AvatarsDir)
 		if err != nil {
 			return err
 		}

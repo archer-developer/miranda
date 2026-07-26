@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/archer-developer/miranda/internal/history"
 	"github.com/archer-developer/miranda/internal/hub"
 	"github.com/archer-developer/miranda/internal/llm"
 	"github.com/archer-developer/miranda/internal/tts"
@@ -52,36 +53,59 @@ func (o *Orchestrator) resolveConversation(ctx context.Context, userID, source s
 		return "", nil, fmt.Errorf("orchestrator: load conversation %s: %w", open.ID, err)
 	}
 
-	// Prior turns are reconstructed as plain user/assistant text messages;
-	// tool-call/tool-result rows are dropped rather than replayed — their
-	// structure doesn't survive a fresh HTTP request anyway (an accepted v1
-	// simplification), and mislabeling a tool result as if the user said it
-	// would actively confuse the model on every later turn of a long-lived
-	// session.
+	// Prior turns are replayed in full, including tool calls and their
+	// results (see history.Message.ToolCallID / ToolCalls, populated by
+	// AppendAssistantMessage / AppendToolResultMessage) — not just the plain
+	// user/assistant text, so the model resuming this conversation sees
+	// exactly the same tool activity it saw when it originally ran.
 	messages := make([]llm.Message, 0, len(stored))
 	for _, m := range stored {
-		var role llm.Role
 		switch m.Role {
 		case "user":
-			role = llm.RoleUser
+			messages = append(messages, llm.Message{Role: llm.RoleUser, Content: m.Content})
 		case "assistant":
-			role = llm.RoleAssistant
-		default:
-			continue
+			msg := llm.Message{Role: llm.RoleAssistant, Content: m.Content}
+			for _, tc := range m.ToolCalls {
+				msg.ToolCalls = append(msg.ToolCalls, llm.ToolCall{ID: tc.ID, Name: tc.Name, Arguments: tc.Arguments})
+			}
+			messages = append(messages, msg)
+		case "tool":
+			messages = append(messages, llm.Message{Role: llm.RoleTool, ToolCallID: m.ToolCallID, Content: m.Content})
 		}
-		messages = append(messages, llm.Message{Role: role, Content: m.Content})
 	}
 	return open.ID, messages, nil
 }
 
-// buildSystemPrompt combines the base persona prompt with the user's
-// distilled long-term memory, so it's available on every turn without
-// re-deriving it from raw history.
-func (o *Orchestrator) buildSystemPrompt(memory string) string {
-	if memory == "" {
-		return o.baseSystemPrompt
+// buildSystemPrompt combines the base persona prompt with who is currently
+// speaking and the user's distilled long-term memory, so both are available
+// on every turn without re-deriving them from raw history. Without the
+// speaker identity, the model has no way to tell which of the household it
+// is talking to in a given conversation — it can only guess from what gets
+// said, which is exactly the kind of thing that should never need guessing.
+func (o *Orchestrator) buildSystemPrompt(userID, memory string) string {
+	prompt := o.baseSystemPrompt
+	if name := o.currentUserName(userID); name != "" {
+		prompt += "\n\nСейчас с тобой разговаривает: " + name + "."
 	}
-	return o.baseSystemPrompt + "\n\nWhat you remember about this user:\n" + memory
+	if memory != "" {
+		prompt += "\n\nWhat you remember about this user:\n" + memory
+	}
+	return prompt
+}
+
+// currentUserName resolves userID to a human-readable display name via the
+// users registry, if one is configured. Falls back to the bare userID when
+// there's no registry, no match (e.g. the "debug" fallback id, or ad-hoc
+// curl/testing), or an empty id — better to name the raw id than to say
+// nothing about who's speaking.
+func (o *Orchestrator) currentUserName(userID string) string {
+	if o.users == nil || userID == "" {
+		return userID
+	}
+	if u, ok := o.users.Get(userID); ok {
+		return u.DisplayName()
+	}
+	return userID
 }
 
 // availableTools combines every connected MCP server's tools with the
@@ -176,6 +200,7 @@ func (o *Orchestrator) runAgentLoop(ctx context.Context, userID, conversationID,
 			return text, providerUsed, nil
 		}
 
+		o.recordAssistantToolCallMessage(ctx, conversationID, text, toolCalls)
 		messages = append(messages, llm.Message{Role: llm.RoleAssistant, Content: text, ToolCalls: toolCalls})
 		for _, tc := range toolCalls {
 			result := o.executeTool(ctx, userID, tc, control)
@@ -296,8 +321,23 @@ func (o *Orchestrator) executeTool(ctx context.Context, userID string, tc llm.To
 	return result
 }
 
+// recordAssistantToolCallMessage persists the assistant's turn that
+// requested toolCalls (text may be empty when the model replies with only
+// tool calls), so resolveConversation can replay it on a later turn instead
+// of dropping it. Best-effort: a failure here is logged but must not abort
+// the turn — the caller already has the tool calls in hand to execute.
+func (o *Orchestrator) recordAssistantToolCallMessage(ctx context.Context, conversationID, text string, toolCalls []llm.ToolCall) {
+	refs := make([]history.ToolCallRef, len(toolCalls))
+	for i, tc := range toolCalls {
+		refs[i] = history.ToolCallRef{ID: tc.ID, Name: tc.Name, Arguments: tc.Arguments}
+	}
+	if _, err := o.history.AppendAssistantMessage(ctx, conversationID, text, refs); err != nil {
+		o.hub.Publish(hub.Event{Source: "error", Message: "record assistant tool-call message: " + err.Error()})
+	}
+}
+
 func (o *Orchestrator) recordToolCall(ctx context.Context, conversationID string, tc llm.ToolCall, result string) {
-	msgID, err := o.history.AppendMessage(ctx, conversationID, "tool", result)
+	msgID, err := o.history.AppendToolResultMessage(ctx, conversationID, tc.ID, result)
 	if err != nil {
 		o.hub.Publish(hub.Event{Source: "error", Message: "record tool call: " + err.Error()})
 		return

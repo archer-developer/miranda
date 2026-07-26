@@ -91,7 +91,7 @@ func newTestHandlerWithMemory(t *testing.T, fake *fakeHistory) (*Handler, *sessi
 	sessions := session.NewStore(time.Hour)
 	mem := newFakeMemory()
 
-	h, err := New(fake, mem, registry, sessions, "ru", "")
+	h, err := New(fake, mem, nil, registry, sessions, "ru", "")
 	require.NoError(t, err)
 	return h, sessions, mem
 }
@@ -135,7 +135,7 @@ func TestHandleIndex_LocalizesToRussianByDefault(t *testing.T) {
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
 
-	require.Contains(t, rec.Body.String(), "Живой лог") // live_log_title in ru.json
+	require.Contains(t, rec.Body.String(), "Выйти") // logout_button in ru.json
 }
 
 func TestHandleIndex_LanguageCookieOverridesDefault(t *testing.T) {
@@ -146,7 +146,7 @@ func TestHandleIndex_LanguageCookieOverridesDefault(t *testing.T) {
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
 
-	require.Contains(t, rec.Body.String(), "Live log")
+	require.Contains(t, rec.Body.String(), "Log out")
 }
 
 func TestLoginFlow_CorrectCredentialsGrantsSession(t *testing.T) {
@@ -225,7 +225,7 @@ func TestServesLocalAvatarFiles(t *testing.T) {
 	registry, err := users.NewRegistry([]config.UserConfig{{Username: "alex", PasswordHash: mustHash(t, "555")}})
 	require.NoError(t, err)
 	sessions := session.NewStore(time.Hour)
-	h, err := New(&fakeHistory{}, newFakeMemory(), registry, sessions, "ru", dir)
+	h, err := New(&fakeHistory{}, newFakeMemory(), nil, registry, sessions, "ru", dir)
 	require.NoError(t, err)
 
 	req := httptest.NewRequest(http.MethodGet, "/static/avatars/alex.png", nil)

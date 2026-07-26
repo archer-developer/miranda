@@ -11,17 +11,29 @@ import (
 
 // currentUserView is the subset of users.User templates/JS need — never the
 // PasswordHash.
+// currentUserView is both a Go template value (index.html/login.html) and,
+// via UserJSON below, a JSON value injected as window.MIRANDA_USER for the
+// SPA's profile screen — hence the json tags alongside the exported
+// (template-visible) field names.
 type currentUserView struct {
-	Username    string
-	DisplayName string
-	Avatar      string
+	Username    string `json:"username"`
+	DisplayName string `json:"displayName"`
+	Avatar      string `json:"avatar,omitempty"`
+	Language    string `json:"language,omitempty"`
+	HAUserID    string `json:"haUserId,omitempty"`
 }
 
 func newCurrentUserView(u *users.User) currentUserView {
 	if u == nil {
 		return currentUserView{}
 	}
-	return currentUserView{Username: u.Username, DisplayName: u.DisplayName(), Avatar: avatarURL(u.Avatar)}
+	return currentUserView{
+		Username:    u.Username,
+		DisplayName: u.DisplayName(),
+		Avatar:      avatarURL(u.Avatar),
+		Language:    u.Language,
+		HAUserID:    u.HAUserID,
+	}
 }
 
 // avatarURL passes http(s) URLs through unchanged; anything else is treated
@@ -60,24 +72,35 @@ func localizedStrings(lang string) map[string]string {
 // window.MIRANDA_I18N, so app.js can localize the dynamic strings it
 // produces (WS status changes, fetch error messages) without a round trip.
 func stringsJSON(strings map[string]string) template.JS {
-	data, err := json.Marshal(strings)
+	return toJSON(strings)
+}
+
+// toJSON marshals any value for inlining into a <script> tag. Used for both
+// window.MIRANDA_I18N and window.MIRANDA_USER — the SPA's screens read the
+// latter instead of re-fetching the logged-in user's own profile fields.
+func toJSON(v any) template.JS {
+	data, err := json.Marshal(v)
 	if err != nil {
-		return "{}"
+		return "null"
 	}
 	return template.JS(data)
 }
 
 type indexPageData struct {
-	Lang        string
-	Strings     map[string]string
-	StringsJSON template.JS
-	User        currentUserView
-	Languages   []languageOption
+	Lang            string
+	Strings         map[string]string
+	StringsJSON     template.JS
+	User            currentUserView
+	UserJSON        template.JS
+	Languages       []languageOption
+	WebAuthnEnabled bool
 }
 
 type loginPageData struct {
-	Lang      string
-	Strings   map[string]string
-	Error     bool
-	Languages []languageOption
+	Lang            string
+	Strings         map[string]string
+	StringsJSON     template.JS
+	Error           bool
+	Languages       []languageOption
+	WebAuthnEnabled bool
 }

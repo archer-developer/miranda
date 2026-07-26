@@ -13,6 +13,7 @@ import (
 	"github.com/archer-developer/miranda/internal/mcp"
 	"github.com/archer-developer/miranda/internal/memory"
 	"github.com/archer-developer/miranda/internal/tts"
+	"github.com/archer-developer/miranda/internal/users"
 )
 
 // maxToolIterations bounds the agent loop (model calls a tool, gets a
@@ -64,6 +65,7 @@ type Orchestrator struct {
 	memory           *memory.Store
 	tts              *tts.Dispatcher // may be nil: TTS dispatch is best-effort and optional
 	hub              *hub.Hub
+	users            *users.Registry // may be nil: falls back to the raw user id in the system prompt
 	memoryCfg        config.MemoryConfig
 	escalationCfg    config.EscalationConfig
 	chunkMaxChars    int
@@ -79,6 +81,7 @@ func NewOrchestrator(
 	memoryStore *memory.Store,
 	ttsDispatcher *tts.Dispatcher,
 	h *hub.Hub,
+	usersRegistry *users.Registry,
 	agentCfg config.AgentConfig,
 	memoryCfg config.MemoryConfig,
 	escalationCfg config.EscalationConfig,
@@ -92,6 +95,7 @@ func NewOrchestrator(
 		memory:           memoryStore,
 		tts:              ttsDispatcher,
 		hub:              h,
+		users:            usersRegistry,
 		memoryCfg:        memoryCfg,
 		escalationCfg:    escalationCfg,
 		chunkMaxChars:    chunkMaxChars,
@@ -125,7 +129,7 @@ func (o *Orchestrator) Handle(ctx context.Context, req InputRequest) (InputRespo
 		return InputResponse{}, fmt.Errorf("orchestrator: record user message: %w", err)
 	}
 
-	systemPrompt := o.buildSystemPrompt(memContent)
+	systemPrompt := o.buildSystemPrompt(userID, memContent)
 	if err := o.history.SetSystemPrompt(ctx, convID, systemPrompt); err != nil {
 		return InputResponse{}, fmt.Errorf("orchestrator: set system prompt: %w", err)
 	}

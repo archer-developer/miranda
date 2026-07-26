@@ -8,6 +8,7 @@ package history
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -25,6 +26,26 @@ type Message struct {
 	Role           string    `json:"role"`
 	Content        string    `json:"content"`
 	CreatedAt      time.Time `json:"created_at"`
+	// ToolCallID is set on Role == "tool" messages: the id of the ToolCall
+	// (see ToolCalls below) that this message's Content answers. Mirrors
+	// llm.Message.ToolCallID so a stored turn can be replayed to the model
+	// exactly as it was originally sent.
+	ToolCallID string `json:"tool_call_id,omitempty"`
+	// ToolCalls is set on Role == "assistant" messages that requested one or
+	// more tool invocations, mirroring llm.Message.ToolCalls. Stored
+	// alongside the assistant's own message (rather than only on the
+	// resulting "tool" message) so a resumed conversation can rebuild the
+	// exact assistant/tool message pair the model originally produced.
+	ToolCalls []ToolCallRef `json:"tool_calls,omitempty"`
+}
+
+// ToolCallRef is the durable record of one tool invocation the model
+// requested: enough to rebuild an llm.ToolCall when replaying stored
+// history, without internal/history depending on internal/llm.
+type ToolCallRef struct {
+	ID        string `json:"id"`
+	Name      string `json:"name"`
+	Arguments string `json:"arguments"`
 }
 
 // Conversation is one stored dialog session.
@@ -143,6 +164,16 @@ func (s *Store) migrate(ctx context.Context) error {
 		return err
 	}
 	if err := s.ensureColumn(ctx, "conversations", "system_prompt", "TEXT"); err != nil {
+		return err
+	}
+	// tool_call_id / tool_calls_json let a stored conversation be replayed to
+	// the model exactly as it happened, instead of dropping tool-call turns
+	// when resuming — see AppendAssistantMessage, AppendToolResultMessage,
+	// and resolveConversation in internal/httpapi.
+	if err := s.ensureColumn(ctx, "messages", "tool_call_id", "TEXT"); err != nil {
+		return err
+	}
+	if err := s.ensureColumn(ctx, "messages", "tool_calls_json", "TEXT"); err != nil {
 		return err
 	}
 	return nil
@@ -354,14 +385,54 @@ func (s *Store) IdleConversations(ctx context.Context, idleFor time.Duration) ([
 	return out, rows.Err()
 }
 
-// AppendMessage records one turn and returns its row id (used to attach
-// tool_calls to it via AppendToolCall).
+// AppendMessage records one plain turn (no tool-call metadata) and returns
+// its row id (used to attach tool_calls to it via AppendToolCall). Use
+// AppendAssistantMessage instead when the assistant's turn requested tool
+// calls, and AppendToolResultMessage for the resulting "tool" turn, so both
+// carry the metadata needed to replay them later.
 func (s *Store) AppendMessage(ctx context.Context, conversationID, role, content string) (int64, error) {
 	res, err := s.db.ExecContext(ctx,
 		`INSERT INTO messages (conversation_id, role, content) VALUES (?, ?, ?)`,
 		conversationID, role, content)
 	if err != nil {
 		return 0, fmt.Errorf("history: append message: %w", err)
+	}
+	return res.LastInsertId()
+}
+
+// AppendAssistantMessage records an assistant turn, optionally along with
+// the tool calls it requested (toolCalls may be empty for a plain text
+// reply). Storing the tool calls on the assistant's own message — rather
+// than only on the "tool" result message that follows — is what lets
+// resolveConversation rebuild the exact assistant/tool message pair on
+// resume, instead of dropping tool-call turns entirely.
+func (s *Store) AppendAssistantMessage(ctx context.Context, conversationID, content string, toolCalls []ToolCallRef) (int64, error) {
+	var toolCallsJSON sql.NullString
+	if len(toolCalls) > 0 {
+		b, err := json.Marshal(toolCalls)
+		if err != nil {
+			return 0, fmt.Errorf("history: encode tool calls: %w", err)
+		}
+		toolCallsJSON = sql.NullString{String: string(b), Valid: true}
+	}
+	res, err := s.db.ExecContext(ctx,
+		`INSERT INTO messages (conversation_id, role, content, tool_calls_json) VALUES (?, 'assistant', ?, ?)`,
+		conversationID, content, toolCallsJSON)
+	if err != nil {
+		return 0, fmt.Errorf("history: append assistant message: %w", err)
+	}
+	return res.LastInsertId()
+}
+
+// AppendToolResultMessage records the "tool" turn answering toolCallID —
+// the counterpart to the ToolCallRef stored on the preceding assistant
+// message by AppendAssistantMessage.
+func (s *Store) AppendToolResultMessage(ctx context.Context, conversationID, toolCallID, content string) (int64, error) {
+	res, err := s.db.ExecContext(ctx,
+		`INSERT INTO messages (conversation_id, role, content, tool_call_id) VALUES (?, 'tool', ?, ?)`,
+		conversationID, content, toolCallID)
+	if err != nil {
+		return 0, fmt.Errorf("history: append tool result message: %w", err)
 	}
 	return res.LastInsertId()
 }
@@ -377,10 +448,13 @@ func (s *Store) AppendToolCall(ctx context.Context, messageID int64, toolName, m
 	return nil
 }
 
-// ConversationMessages returns all messages in conversationID, oldest first.
+// ConversationMessages returns all messages in conversationID, oldest first,
+// including tool-call metadata (see Message.ToolCallID / Message.ToolCalls)
+// so the full turn — not just its text — can be reconstructed.
 func (s *Store) ConversationMessages(ctx context.Context, conversationID string) ([]Message, error) {
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT id, conversation_id, role, content, created_at FROM messages WHERE conversation_id = ? ORDER BY id ASC`,
+		`SELECT id, conversation_id, role, content, created_at, COALESCE(tool_call_id, ''), COALESCE(tool_calls_json, '')
+		 FROM messages WHERE conversation_id = ? ORDER BY id ASC`,
 		conversationID)
 	if err != nil {
 		return nil, fmt.Errorf("history: query messages: %w", err)
@@ -450,7 +524,7 @@ func scanConversations(rows *sql.Rows) ([]Conversation, error) {
 // misinterpreted as an FTS5 operator and error out the search.
 func (s *Store) SearchMessages(ctx context.Context, userID, query string, limit int) ([]Message, error) {
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT m.id, m.conversation_id, m.role, m.content, m.created_at
+		SELECT m.id, m.conversation_id, m.role, m.content, m.created_at, COALESCE(m.tool_call_id, ''), COALESCE(m.tool_calls_json, '')
 		FROM messages_fts
 		JOIN messages m ON m.id = messages_fts.rowid
 		JOIN conversations c ON c.id = m.conversation_id
@@ -481,8 +555,14 @@ func scanMessages(rows *sql.Rows) ([]Message, error) {
 	var out []Message
 	for rows.Next() {
 		var m Message
-		if err := rows.Scan(&m.ID, &m.ConversationID, &m.Role, &m.Content, &m.CreatedAt); err != nil {
+		var toolCallsJSON string
+		if err := rows.Scan(&m.ID, &m.ConversationID, &m.Role, &m.Content, &m.CreatedAt, &m.ToolCallID, &toolCallsJSON); err != nil {
 			return nil, fmt.Errorf("history: scan message: %w", err)
+		}
+		if toolCallsJSON != "" {
+			if err := json.Unmarshal([]byte(toolCallsJSON), &m.ToolCalls); err != nil {
+				return nil, fmt.Errorf("history: decode tool calls for message %d: %w", m.ID, err)
+			}
 		}
 		out = append(out, m)
 	}

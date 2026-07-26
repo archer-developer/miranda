@@ -1,0 +1,23 @@
+// SPA entrypoint: wires up the nav bar, the hash router and its five
+// screens, and the one persistent WebSocket connection. Native ES modules —
+// no bundler, no build step (see internal/webui's package doc comment).
+import * as ws from "./ws.js";
+import * as router from "./router.js";
+import * as nav from "./nav.js";
+import * as chat from "./screens/chat.js";
+import * as history from "./screens/history.js";
+import * as memory from "./screens/memory.js";
+import * as logs from "./screens/logs.js";
+import * as profile from "./screens/profile.js";
+
+nav.init();
+
+router.register("#/chat", chat);
+router.register("#/history", history);
+router.register("#/memory", memory);
+router.register("#/logs", logs);
+router.register("#/profile", profile);
+router.setDefault("#/chat");
+router.start();
+
+ws.connect();

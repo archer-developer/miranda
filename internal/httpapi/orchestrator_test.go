@@ -65,7 +65,7 @@ func newTestOrchestratorWithTTS(t *testing.T, provider *llmtest.FakeProvider) (*
 	}, ha)
 
 	o := NewOrchestrator(
-		r, mcp.NewManager(), h, mem, dispatcher, hub.New(100),
+		r, mcp.NewManager(), h, mem, dispatcher, hub.New(100), nil,
 		config.AgentConfig{},
 		config.MemoryConfig{ExplicitTool: true},
 		config.EscalationConfig{Enabled: true, ToolName: "escalate_to_claude", TargetProvider: provider.Name()},
@@ -90,7 +90,7 @@ func newTestOrchestrator(t *testing.T, provider *llmtest.FakeProvider, mcpClient
 	toolManager := mcp.NewManager(mcpClients...)
 
 	o := NewOrchestrator(
-		r, toolManager, h, mem, nil, hub.New(100),
+		r, toolManager, h, mem, nil, hub.New(100), nil,
 		config.AgentConfig{},
 		config.MemoryConfig{
 			ExplicitTool: true, AutoSummarize: false, SearchHistoryTool: true,
@@ -174,7 +174,7 @@ func TestOrchestrator_EscalationIsTransparentToOrchestrator(t *testing.T) {
 	mem, err := memory.New(t.TempDir())
 	require.NoError(t, err)
 
-	o := NewOrchestrator(r, mcp.NewManager(), h, mem, nil, hub.New(100),
+	o := NewOrchestrator(r, mcp.NewManager(), h, mem, nil, hub.New(100), nil,
 		config.AgentConfig{},
 		config.MemoryConfig{ExplicitTool: true},
 		config.EscalationConfig{Enabled: true, ToolName: "escalate_to_claude", TargetProvider: "claude"},

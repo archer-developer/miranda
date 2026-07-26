@@ -10,87 +10,60 @@
 </head>
 <body class="h-full bg-slate-950 text-slate-100 antialiased">
   <div class="flex h-full flex-col">
-    <header class="flex items-center justify-between border-b border-slate-800 px-4 py-3 sm:px-6">
-      <div class="flex items-center gap-2">
-        <img src="/static/brand/icon.svg" alt="" class="h-8 w-8 rounded-full" />
-        <span class="text-lg font-semibold tracking-tight">Miranda</span>
-        <span class="rounded-full bg-slate-800 px-2 py-0.5 text-xs text-slate-400">{{.Strings.badge_agent_monitor}}</span>
-      </div>
-      <div class="flex items-center gap-4 text-sm">
+    <header class="border-b border-slate-800 px-4 py-3 sm:px-6">
+      <div class="flex items-center justify-between gap-4">
         <div class="flex items-center gap-2">
-          <span id="ws-dot" class="h-2.5 w-2.5 rounded-full bg-slate-600"></span>
-          <span id="ws-status" class="text-slate-400">{{.Strings.ws_connecting}}</span>
+          <img src="/static/brand/icon.svg" alt="" class="h-8 w-8 rounded-full" />
+          <span class="text-lg font-semibold tracking-tight">Miranda</span>
         </div>
-        <div class="flex items-center gap-2 text-xs text-slate-500">
+
+        <nav id="nav-links" class="hidden items-center gap-1 text-sm sm:flex"></nav>
+
+        <div class="flex items-center gap-3">
+          <div class="flex items-center gap-2">
+            <span id="ws-dot" class="h-2.5 w-2.5 rounded-full bg-slate-600" title="{{.Strings.ws_connecting}}"></span>
+            <span id="ws-status" class="hidden text-xs text-slate-400 md:inline">{{.Strings.ws_connecting}}</span>
+          </div>
+          <div class="hidden items-center gap-2 text-xs text-slate-500 lg:flex">
+            {{range .Languages}}
+            <a href="/set-lang?lang={{.Code}}&next=/" class="{{if .Active}}text-slate-200{{else}}hover:text-slate-300{{end}}">{{.Label}}</a>
+            {{end}}
+          </div>
+          <a href="#/profile" class="hidden items-center gap-2 sm:flex">
+            {{if .User.Avatar}}<img src="{{.User.Avatar}}" alt="" class="h-7 w-7 rounded-full object-cover" />{{end}}
+            <span class="text-slate-300">{{.User.DisplayName}}</span>
+          </a>
+          <button id="nav-burger" type="button" class="rounded-md border border-slate-700 p-1.5 text-slate-300 hover:bg-slate-800 sm:hidden" aria-label="Menu" aria-expanded="false">
+            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="h-5 w-5">
+              <path stroke-linecap="round" stroke-linejoin="round" d="M3.75 6.75h16.5M3.75 12h16.5M3.75 17.25h16.5" />
+            </svg>
+          </button>
+        </div>
+      </div>
+
+      <div id="nav-drawer" class="mt-3 hidden flex-col gap-3 border-t border-slate-800 pt-3 sm:hidden">
+        <nav id="nav-links-mobile" class="flex flex-col gap-1 text-sm"></nav>
+        <div class="flex items-center gap-3 text-xs text-slate-500">
           {{range .Languages}}
           <a href="/set-lang?lang={{.Code}}&next=/" class="{{if .Active}}text-slate-200{{else}}hover:text-slate-300{{end}}">{{.Label}}</a>
           {{end}}
         </div>
-        <div class="flex items-center gap-2">
-          {{if .User.Avatar}}
-          <img src="{{.User.Avatar}}" alt="" class="h-7 w-7 rounded-full object-cover" />
-          {{end}}
-          <span class="hidden text-slate-300 sm:inline">{{.User.DisplayName}}</span>
-          <form method="POST" action="/logout">
-            <button type="submit" class="rounded-md border border-slate-700 px-2 py-1 text-xs text-slate-300 hover:bg-slate-800">
-              {{.Strings.logout_button}}
-            </button>
-          </form>
-        </div>
+        <form method="POST" action="/logout">
+          <button type="submit" class="w-full rounded-md border border-slate-700 px-3 py-2 text-left text-sm text-slate-300 hover:bg-slate-800">
+            {{.Strings.logout_button}}
+          </button>
+        </form>
       </div>
     </header>
 
-    <main class="grid flex-1 grid-cols-1 gap-4 overflow-hidden p-4 sm:p-6 lg:grid-cols-[1fr_380px]">
-      <!-- Live log -->
-      <section class="flex min-h-0 flex-col rounded-lg border border-slate-800 bg-slate-900/50">
-        <div class="border-b border-slate-800 px-4 py-2 text-sm font-medium text-slate-300">{{.Strings.live_log_title}}</div>
-        <div id="log" class="flex-1 space-y-1 overflow-y-auto p-4 font-mono text-xs leading-relaxed"></div>
-      </section>
-
-      <!-- Sidebar: debug input + dialog browser -->
-      <aside class="flex min-h-0 flex-col gap-4 overflow-y-auto">
-        <section class="rounded-lg border border-slate-800 bg-slate-900/50 p-4">
-          <h2 class="mb-3 text-sm font-medium text-slate-300">{{.Strings.send_command_title}}</h2>
-          <p class="mb-2 text-xs text-slate-500">{{.Strings.sending_as}}: <span class="text-slate-300">{{.User.DisplayName}}</span></p>
-          <form id="debug-form" class="space-y-2">
-            <textarea id="debug-text" rows="3" placeholder="{{.Strings.text_placeholder}}" required
-                      class="w-full resize-none rounded-md border border-slate-700 bg-slate-950 px-3 py-2 text-sm placeholder:text-slate-500 focus:border-slate-500 focus:outline-none"></textarea>
-            <button type="submit"
-                    class="w-full rounded-md bg-indigo-500 px-3 py-2 text-sm font-medium text-white hover:bg-indigo-400 active:bg-indigo-600">
-              {{.Strings.send_button}}
-            </button>
-          </form>
-          <div id="debug-reply" class="mt-3 hidden rounded-md border border-slate-800 bg-slate-950 p-3 text-sm text-slate-200"></div>
-        </section>
-
-        <section class="flex min-h-0 flex-1 flex-col rounded-lg border border-slate-800 bg-slate-900/50 p-4">
-          <div class="mb-3 flex items-center justify-between">
-            <h2 class="text-sm font-medium text-slate-300">{{.Strings.dialog_history_title}}</h2>
-            <button id="dialogs-load"
-                    class="rounded-md border border-slate-700 px-3 py-1 text-xs text-slate-200 hover:bg-slate-800">
-              {{.Strings.load_button}}
-            </button>
-          </div>
-          <div id="dialogs-list" class="flex-1 space-y-2 overflow-y-auto text-sm text-slate-300"></div>
-        </section>
-
-        <section class="flex min-h-0 flex-col rounded-lg border border-slate-800 bg-slate-900/50 p-4">
-          <div class="mb-3 flex items-center justify-between">
-            <h2 class="text-sm font-medium text-slate-300">{{.Strings.memory_title}}</h2>
-            <span id="memory-status" class="text-xs text-slate-500"></span>
-          </div>
-          <textarea id="memory-text" rows="8" placeholder="{{.Strings.memory_placeholder}}"
-                    class="w-full flex-1 resize-none rounded-md border border-slate-700 bg-slate-950 px-3 py-2 font-mono text-xs placeholder:text-slate-500 focus:border-slate-500 focus:outline-none"></textarea>
-          <button id="memory-save"
-                  class="mt-2 rounded-md bg-indigo-500 px-3 py-2 text-sm font-medium text-white hover:bg-indigo-400 active:bg-indigo-600">
-            {{.Strings.memory_save_button}}
-          </button>
-        </section>
-      </aside>
-    </main>
+    <main id="app" class="min-h-0 flex-1 overflow-hidden"></main>
   </div>
 
-  <script>window.MIRANDA_I18N = {{.StringsJSON}};</script>
-  <script src="/static/app.js"></script>
+  <script>
+    window.MIRANDA_I18N = {{.StringsJSON}};
+    window.MIRANDA_USER = {{.UserJSON}};
+    window.MIRANDA_WEBAUTHN_ENABLED = {{.WebAuthnEnabled}};
+  </script>
+  <script type="module" src="/static/js/app.js"></script>
 </body>
 </html>

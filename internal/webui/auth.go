@@ -70,11 +70,14 @@ func (h *Handler) handleLoginPage(w http.ResponseWriter, r *http.Request) {
 	}
 
 	lang := h.resolveLanguage(r, nil)
+	strings := localizedStrings(lang)
 	data := loginPageData{
-		Lang:      lang,
-		Strings:   localizedStrings(lang),
-		Error:     r.URL.Query().Get("error") == "1",
-		Languages: languageOptions(lang),
+		Lang:            lang,
+		Strings:         strings,
+		StringsJSON:     stringsJSON(strings),
+		Error:           r.URL.Query().Get("error") == "1",
+		Languages:       languageOptions(lang),
+		WebAuthnEnabled: h.webauthn != nil,
 	}
 
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
@@ -93,10 +96,23 @@ func (h *Handler) handleLoginSubmit(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	token, err := h.sessions.Create(user.Username)
-	if err != nil {
+	if err := h.issueSessionCookie(w, r, user); err != nil {
 		http.Redirect(w, r, "/login?error=1", http.StatusSeeOther)
 		return
+	}
+
+	http.Redirect(w, r, "/", http.StatusSeeOther)
+}
+
+// issueSessionCookie creates a session for user and sets the session
+// cookie — the final step shared by every login method (password form,
+// WebAuthn — see webauthn.go's login/finish handler), so the two auth paths
+// can never drift apart on cookie attributes or first-login language
+// adoption.
+func (h *Handler) issueSessionCookie(w http.ResponseWriter, r *http.Request, user users.User) error {
+	token, err := h.sessions.Create(user.Username)
+	if err != nil {
+		return err
 	}
 
 	http.SetCookie(w, &http.Cookie{
@@ -119,8 +135,7 @@ func (h *Handler) handleLoginSubmit(w http.ResponseWriter, r *http.Request) {
 			setLangCookie(w, user.Language)
 		}
 	}
-
-	http.Redirect(w, r, "/", http.StatusSeeOther)
+	return nil
 }
 
 func (h *Handler) handleLogout(w http.ResponseWriter, r *http.Request) {

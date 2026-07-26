@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Regenerates internal/webui/static/css/styles.css from the Tailwind classes
-# used in internal/webui/templates and internal/webui/static/app.js. Run this
+# used in internal/webui/templates and internal/webui/static/js. Run this
 # after changing UI markup; the compiled output is committed since go:embed
 # needs it present at `go build` time and we don't want a Node/npm build
 # step in the runtime build path.

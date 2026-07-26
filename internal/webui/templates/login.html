@@ -38,11 +38,24 @@
       </button>
     </form>
 
+    {{if .WebAuthnEnabled}}
+    <button id="biometric-login" type="button" hidden
+            class="mt-3 w-full rounded-md border border-slate-700 px-3 py-2 text-sm font-medium text-slate-200 hover:bg-slate-800">
+      {{.Strings.login_biometric_button}}
+    </button>
+    <p id="biometric-error" class="mt-2 hidden text-center text-xs text-red-400"></p>
+    {{end}}
+
     <div class="mt-5 flex justify-center gap-3 text-xs text-slate-500">
       {{range .Languages}}
       <a href="/set-lang?lang={{.Code}}&next=/login" class="{{if .Active}}text-slate-200{{else}}hover:text-slate-300{{end}}">{{.Label}}</a>
       {{end}}
     </div>
   </div>
+
+  {{if .WebAuthnEnabled}}
+  <script>window.MIRANDA_I18N = {{.StringsJSON}};</script>
+  <script type="module" src="/static/js/login.js"></script>
+  {{end}}
 </body>
 </html>

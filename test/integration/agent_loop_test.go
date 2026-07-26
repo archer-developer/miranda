@@ -55,7 +55,7 @@ func newHarness(t *testing.T, provider *llmtest.FakeProvider, mcpClients ...mcp.
 	eventHub := hub.New(200)
 
 	orchestrator := httpapi.NewOrchestrator(
-		r, toolManager, historyStore, memoryStore, nil, eventHub,
+		r, toolManager, historyStore, memoryStore, nil, eventHub, nil,
 		config.AgentConfig{},
 		config.MemoryConfig{
 			ExplicitTool: true, AutoSummarize: false,
@@ -124,6 +124,38 @@ func TestAgentLoop_MCPToolCallRoundTrip(t *testing.T) {
 		}
 	}
 	require.True(t, sawToolResult, "expected the tool's result to be recorded in history")
+}
+
+func TestAgentLoop_ToolCallRoundTripIsReplayedOnNextTurnInSameConversation(t *testing.T) {
+	ha := mcptest.New("ha", llm.ToolDef{Name: "light_turn_on"}).WithResult("light_turn_on", "ok")
+	provider := llmtest.New("local",
+		llmtest.Response{ToolCall: &llm.ToolCall{ID: "call-1", Name: "ha_light_turn_on", Arguments: `{"entity_id":"light.living_room"}`}},
+		llmtest.Response{Text: "Готово, включил свет в зале."},
+		llmtest.Response{Text: "Не за что."},
+	)
+	h := newHarness(t, provider, ha)
+
+	first := h.post(t, httpapi.InputRequest{Source: "cli", UserID: "alex", Text: "включи свет в зале"})
+	require.Equal(t, "Готово, включил свет в зале.", first.Reply)
+
+	second := h.post(t, httpapi.InputRequest{Source: "cli", UserID: "alex", Text: "спасибо"})
+	require.Equal(t, first.ConversationID, second.ConversationID)
+	require.Equal(t, "Не за что.", second.Reply)
+
+	// The second Chat call (index 1) must have replayed the first turn's
+	// tool-call round trip, not just the plain user/assistant text.
+	require.Len(t, provider.Requests, 3)
+	replayed := provider.Requests[1].Messages
+	require.Len(t, replayed, 4, "system, user, assistant-with-tool-call, tool-result")
+	require.Equal(t, llm.RoleSystem, replayed[0].Role)
+	require.Equal(t, llm.RoleUser, replayed[1].Role)
+	require.Equal(t, llm.RoleAssistant, replayed[2].Role)
+	require.Len(t, replayed[2].ToolCalls, 1)
+	require.Equal(t, "call-1", replayed[2].ToolCalls[0].ID)
+	require.Equal(t, "ha_light_turn_on", replayed[2].ToolCalls[0].Name)
+	require.Equal(t, llm.RoleTool, replayed[3].Role)
+	require.Equal(t, "call-1", replayed[3].ToolCallID)
+	require.Equal(t, "ok", replayed[3].Content)
 }
 
 func TestAgentLoop_RememberThisUpdatesMemoryFile(t *testing.T) {
