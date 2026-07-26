@@ -254,11 +254,26 @@ func (o *Orchestrator) runAgentLoop(ctx context.Context, userID, conversationID,
 // streamOneTurn consumes one router.Chat stream: text deltas are pushed
 // through a tts.Accumulator so complete sentences get spoken as soon as
 // they're available, and tool calls are collected for the caller to execute.
+//
+// voiceKnownUpfront captures whether this turn should be spoken *before* the
+// stream has produced anything — true for ha_assist, or when an earlier
+// turn in this same request already called speak_reply. When it's false, we
+// can't speak chunks live as they arrive: a model can place its entire
+// answer in this turn's text and only afterward emit the speak_reply tool
+// call asking for it to be voiced (content blocks stream in the order the
+// model produced them — text, then tool_use — so the tool call is only
+// known once the text is already fully generated). In that case chunks are
+// only published to the hub as they stream, and — if a speak_reply call
+// does show up once the stream ends — the whole turn's text is spoken in
+// one shot afterward, instead of being silently dropped because the voice
+// decision arrived one turn too late.
 func (o *Orchestrator) streamOneTurn(ctx context.Context, source string, control *turnControl, messages []llm.Message, tools []llm.ToolDef, providerUsed *string) (string, []llm.ToolCall, error) {
 	stream, err := o.router.Chat(ctx, llm.ChatRequest{Messages: messages, Tools: tools}, func(name string) { *providerUsed = name })
 	if err != nil {
 		return "", nil, fmt.Errorf("orchestrator: chat: %w", err)
 	}
+
+	voiceKnownUpfront := source == users.SourceHAAssist || control.speakRequested
 
 	var fullText string
 	var toolCalls []llm.ToolCall
@@ -270,38 +285,75 @@ func (o *Orchestrator) streamOneTurn(ctx context.Context, source string, control
 		}
 		if chunk.TextDelta != "" {
 			fullText += chunk.TextDelta
-			o.speakChunks(ctx, source, control, acc.Push(chunk.TextDelta))
+			ready := acc.Push(chunk.TextDelta)
+			if voiceKnownUpfront {
+				o.speakChunks(ctx, source, control, ready)
+			} else {
+				o.publishChunks(ready)
+			}
 		}
 		if chunk.ToolCall != nil {
 			toolCalls = append(toolCalls, *chunk.ToolCall)
 		}
 	}
-	o.speakChunks(ctx, source, control, acc.Flush())
+	final := acc.Flush()
+	if voiceKnownUpfront {
+		o.speakChunks(ctx, source, control, final)
+	} else {
+		o.publishChunks(final)
+	}
+
+	if !voiceKnownUpfront {
+		for _, tc := range toolCalls {
+			if tc.Name == speakReplyToolName {
+				control.speakRequested = true
+				o.speakText(ctx, fullText)
+				break
+			}
+		}
+	}
 
 	return fullText, toolCalls, nil
 }
 
-// speakChunks dispatches each ready chunk to tts.primary, but only for turns
-// that either arrived via Home Assistant's voice pipeline (source ==
-// ha_assist: that's the one channel where the reply also needs to come out
-// of a physical speaker, separate from — and in addition to — the text
-// reply HA's pipeline itself may speak, see README) or where the
-// speak_reply tool was called this turn because the user explicitly asked
-// to hear the answer (control.speakRequested). Every other turn must never
-// trigger the shared Yandex Station, or testing via the web UI's debug box
-// would make it talk unprompted. TTS itself is best-effort: a dispatch
-// failure is logged to the hub but never fails the turn — a broken speaker
-// shouldn't stop the assistant from answering.
-func (o *Orchestrator) speakChunks(ctx context.Context, source string, control *turnControl, chunks []string) {
-	voice := source == users.SourceHAAssist || control.speakRequested
+// publishChunks puts each chunk on the hub as an "assistant" event (chat/log
+// visibility) without any TTS decision — used for text streamed before we
+// yet know whether this turn should be voiced; see streamOneTurn.
+func (o *Orchestrator) publishChunks(chunks []string) {
 	for _, chunk := range chunks {
 		o.hub.Publish(hub.Event{Source: "assistant", Message: chunk})
-		if o.tts == nil || !voice {
-			continue
-		}
-		if err := o.tts.Speak(ctx, chunk); err != nil {
-			o.hub.Publish(hub.Event{Source: "tts", Message: "speak failed: " + err.Error()})
-		}
+	}
+}
+
+// speakChunks publishes each chunk (see publishChunks) and, for turns that
+// either arrived via Home Assistant's voice pipeline (source == ha_assist:
+// that's the one channel where the reply also needs to come out of a
+// physical speaker, separate from — and in addition to — the text reply
+// HA's pipeline itself may speak, see README) or where the speak_reply tool
+// was called this turn because the user explicitly asked to hear the answer
+// (control.speakRequested), also dispatches it to TTS. Every other turn must
+// never trigger the shared Yandex Station, or testing via the web UI's debug
+// box would make it talk unprompted.
+func (o *Orchestrator) speakChunks(ctx context.Context, source string, control *turnControl, chunks []string) {
+	o.publishChunks(chunks)
+	if source != users.SourceHAAssist && !control.speakRequested {
+		return
+	}
+	for _, chunk := range chunks {
+		o.speakText(ctx, chunk)
+	}
+}
+
+// speakText dispatches one already-voice-approved piece of text to
+// tts.primary. Best-effort: a dispatch failure is logged to the hub but
+// never fails the turn — a broken speaker shouldn't stop the assistant from
+// answering.
+func (o *Orchestrator) speakText(ctx context.Context, text string) {
+	if o.tts == nil || text == "" {
+		return
+	}
+	if err := o.tts.Speak(ctx, text); err != nil {
+		o.hub.Publish(hub.Event{Source: "tts", Message: "speak failed: " + err.Error()})
 	}
 }
 

@@ -65,6 +65,10 @@ func newTestOrchestratorWithTTS(t *testing.T, provider *llmtest.FakeProvider) (*
 			Entities:           []string{"media_player.kitchen"},
 			ChunkMaxChars:      100,
 			IdlePollIntervalMS: 1,
+			// fakeHAClient.State always reports "idle", so the dispatcher's
+			// "wait for it to leave idle" phase always times out; keep that
+			// timeout tiny too, or every TTS dispatch in these tests pays it.
+			PlaybackStartTimeoutMS: 1,
 		},
 		SpeakReplyTool: true,
 	}
@@ -352,6 +356,34 @@ func TestOrchestrator_SpeaksViaTTSWhenSpeakReplyToolIsCalledOnNonHASource(t *tes
 	// The user's explicit request must still reach the Yandex Station even
 	// though this turn didn't arrive via ha_assist.
 	require.NotEmpty(t, ha.calls)
+}
+
+// TestOrchestrator_SpeaksTurnsOwnTextWhenItCallsSpeakReplyInTheSameTurn
+// guards against a real production bug: a model can answer the question and
+// call speak_reply in the very same completion (text then tool_use, in that
+// order, as Claude actually streams it) rather than calling speak_reply
+// first and answering afterward. Naively speaking chunks live as they
+// stream would miss this: control.speakRequested only flips once the tool
+// call is executed, which happens after this whole turn's text has already
+// gone by, so every one of its chunks would see voice=false and never reach
+// the Yandex Station — only a short throwaway confirmation from the *next*
+// turn would get spoken, with the actual answer silently dropped.
+func TestOrchestrator_SpeaksTurnsOwnTextWhenItCallsSpeakReplyInTheSameTurn(t *testing.T) {
+	provider := llmtest.New("local",
+		llmtest.Response{
+			Text:     "Осень — время урожая и тёплого чая.",
+			ToolCall: &llm.ToolCall{ID: "call-1", Name: "speak_reply", Arguments: `{}`},
+		},
+		llmtest.Response{Text: "Готово, озвучила!"},
+	)
+	o, ha := newTestOrchestratorWithTTS(t, provider)
+
+	resp, err := o.Handle(context.Background(), InputRequest{Source: "web_ui", UserID: "alex", Text: "сгенерируй текст и озвучь его"})
+	require.NoError(t, err)
+	require.Equal(t, "Готово, озвучила!", resp.Reply)
+
+	require.NotEmpty(t, ha.calls)
+	require.Contains(t, ha.calls, "Осень — время урожая и тёплого чая.")
 }
 
 func TestOrchestrator_DoesNotSpeakViaTTSForNonHASources(t *testing.T) {
