@@ -242,6 +242,11 @@ type YandexStationConfig struct {
 	Entities           []string `yaml:"entities"`
 	ChunkMaxChars      int      `yaml:"chunk_max_chars"`
 	IdlePollIntervalMS int      `yaml:"idle_poll_interval_ms"`
+	// PlaybackStartTimeoutMS bounds how long the dispatcher waits, after a
+	// play_media call, for the entity to actually leave "idle" before giving
+	// up and moving on to waiting for it to return to idle. See waitIdle in
+	// internal/tts/dispatcher.go for why this two-phase wait exists.
+	PlaybackStartTimeoutMS int `yaml:"playback_start_timeout_ms"`
 }
 
 // TTSConfig selects and configures the TTS channel.
@@ -322,9 +327,10 @@ func Default() Config {
 		TTS: TTSConfig{
 			Primary: "yandex_station",
 			YandexStation: YandexStationConfig{
-				Entities:           nil,
-				ChunkMaxChars:      100,
-				IdlePollIntervalMS: 300,
+				Entities:               nil,
+				ChunkMaxChars:          100,
+				IdlePollIntervalMS:     300,
+				PlaybackStartTimeoutMS: 3000,
 			},
 			SpeakReplyTool: true,
 		},

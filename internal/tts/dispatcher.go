@@ -2,11 +2,17 @@ package tts
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
 	"github.com/archer-developer/miranda/internal/config"
 )
+
+// errPollTimeout is returned internally by pollUntil when its timeout
+// elapses before match ever returns true; callers decide whether that's
+// fatal.
+var errPollTimeout = errors.New("tts: poll timed out")
 
 // HAClient is the subset of *ha.Client the dispatcher needs, as an interface
 // so tests can substitute a fake instead of a real Home Assistant instance.
@@ -57,21 +63,53 @@ func (d *Dispatcher) speakYandexStation(ctx context.Context, text string) error 
 	return nil
 }
 
-// waitIdle polls entity's state until it returns to "idle", so the next
-// chunk isn't sent while the station is still speaking the previous one.
+// waitIdle waits for entity to finish playing the chunk just sent to it, so
+// the next play_media call isn't fired while the station is still speaking
+// this one.
+//
+// This is a two-phase wait, not a single poll-for-idle loop: right after
+// play_media returns, the entity typically still reports the *previous*
+// "idle" state for a beat, because synthesis and the station's own wake-up
+// take real time. A single poll-for-idle loop can land in that window,
+// wrongly conclude playback of the chunk we just sent is already done, and
+// fire the next chunk's play_media immediately — which interrupts the
+// station mid-utterance. That's exactly what produced the reported bug:
+// long replies got cut mid-sentence, with the tail end only surfacing once
+// the *next* chunk started playing. So we first wait for the entity to
+// actually leave "idle" (proof this chunk started), then wait for it to
+// return to "idle" (proof it finished).
 func (d *Dispatcher) waitIdle(ctx context.Context, entity string) error {
 	interval := time.Duration(d.cfg.YandexStation.IdlePollIntervalMS) * time.Millisecond
 	if interval <= 0 {
 		interval = 300 * time.Millisecond
 	}
+	startTimeout := time.Duration(d.cfg.YandexStation.PlaybackStartTimeoutMS) * time.Millisecond
+	if startTimeout <= 0 {
+		startTimeout = 3 * time.Second
+	}
 
-	// Wait one interval before the first poll: right after play_media the
-	// station is still "idle" from before playback started, so polling
-	// immediately would return early.
-	select {
-	case <-time.After(interval):
-	case <-ctx.Done():
-		return ctx.Err()
+	// Give up waiting for playback to start after startTimeout rather than
+	// hang forever — the chunk may have been too short to observe leaving
+	// idle, or playback may have failed silently upstream. Either way, fall
+	// through to the idle-wait below, which is a harmless no-op if the
+	// chunk already finished (or never started).
+	err := d.pollUntil(ctx, entity, interval, startTimeout, func(s string) bool { return s != "idle" })
+	if err != nil && !errors.Is(err, errPollTimeout) {
+		return err
+	}
+
+	return d.pollUntil(ctx, entity, interval, 0, func(s string) bool { return s == "idle" })
+}
+
+// pollUntil polls entity's state every interval until match(state) is true,
+// ctx is cancelled, or (if timeout > 0) timeout elapses without a match —
+// in which case it returns errPollTimeout.
+func (d *Dispatcher) pollUntil(ctx context.Context, entity string, interval, timeout time.Duration, match func(state string) bool) error {
+	var deadline <-chan time.Time
+	if timeout > 0 {
+		timer := time.NewTimer(timeout)
+		defer timer.Stop()
+		deadline = timer.C
 	}
 
 	ticker := time.NewTicker(interval)
@@ -81,11 +119,13 @@ func (d *Dispatcher) waitIdle(ctx context.Context, entity string) error {
 		if err != nil {
 			return fmt.Errorf("tts: poll state of %s: %w", entity, err)
 		}
-		if state == "idle" {
+		if match(state) {
 			return nil
 		}
 		select {
 		case <-ticker.C:
+		case <-deadline:
+			return errPollTimeout
 		case <-ctx.Done():
 			return ctx.Err()
 		}
