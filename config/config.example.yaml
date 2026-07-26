@@ -17,6 +17,10 @@ server:
 storage:
   sqlite_path: "./data/miranda.db"
   memory_dir: "./data/memory"
+  # Where gemini_tts's content-addressed, permanent (no TTL) rendered-audio
+  # cache lives, and what GET /tts-audio/{key}.{ext} serves out of. Only
+  # relevant if tts.gemini_tts is enabled.
+  tts_cache_dir: "./data/storage"
   # Separate small SQLite file for passkey credentials (see webauthn:
   # below) — kept apart so wiping/backing up dialog history never touches
   # registered passkeys, and vice versa. Only used if webauthn.enabled.
@@ -88,7 +92,13 @@ mcp:
     #   enabled: false
 
 tts:
-  primary: yandex_station
+  # yandex_station_text (Yandex Station's own built-in voice — the default,
+  # zero external dependencies) or gemini_tts (renders audio via Gemini's
+  # API and plays it back through the same station as a fetched file — see
+  # gemini_tts: below). Dispatch is asynchronous either way: replies are
+  # enqueued onto a background player and never block the turn on synthesis
+  # or physical playback (see README).
+  primary: yandex_station_text
   yandex_station:
     entities: [] # media_player.* entity ids of your Yandex Stations
     chunk_max_chars: 100 # Yandex Station's real-world text limit, even locally
@@ -100,10 +110,41 @@ tts:
     # this two-phase wait, the dispatcher could mistake that stale "idle"
     # for "already finished" and fire the next chunk mid-utterance.
     playback_start_timeout_ms: 3000
+  # Retried, with the same text, if primary's Speak reports its quota
+  # exhausted (gemini_tts exhausting every configured API key, most
+  # notably) — so the user still hears *something* instead of silence.
+  # Equal to primary (the default) disables the fallback path.
+  fallback: yandex_station_text
+  gemini_tts:
+    # Opt-in: needs real API keys and its own quota/cost tradeoffs, unlike
+    # the always-available yandex_station_text.
+    enabled: false
+    # Environment variable names, each holding one Gemini API key (never the
+    # keys themselves — see .env.example). Listing several lets Miranda
+    # rotate across them when one hits its quota (see README).
+    api_key_envs: ["GEMINI_API_KEY_1", "GEMINI_API_KEY_2"]
+    model: "gemini-3.1-flash-tts-preview"
+    voice: "Kore" # one of Gemini's prebuilt voice names
+    # "wav" (a bare RIFF header, no dependency) or "mp3" (via shine-mp3, pure
+    # Go). Whether a real Yandex Station accepts WAV over play_media's URL
+    # playback isn't verified against real hardware yet — try "mp3" if WAV
+    # doesn't play.
+    audio_format: "wav"
+    # Where the Yandex Station can reach Miranda's own GET /tts-audio/ route
+    # — e.g. Miranda's LAN address, or a reverse-proxied hostname.
+    public_base_url: "http://192.168.1.50:8787"
+    chunk_max_chars: 200
+    request_timeout_seconds: 30
+    quota_cooldown_seconds: 5
+    max_quota_retry_cycles: 3
   # Lets the model call speak_reply to dispatch this turn's reply to
   # tts.primary even when the request didn't arrive via ha_assist, when the
   # user explicitly asks to hear the answer read aloud.
   speak_reply_tool: true
+  # Lets the model call stop_speech to interrupt whatever is currently
+  # speaking/queued, e.g. when the user explicitly asks Miranda to stop
+  # talking mid-reply.
+  stop_speech_tool: true
 
 web_ui:
   enabled: true

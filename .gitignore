@@ -2,6 +2,8 @@
 /dist/
 /data/*.db
 /data/*.db-*
+/data/storage/*
+!/data/storage/.gitkeep
 /data/memory/*.md
 !/data/memory/.gitkeep
 /config/config.yaml

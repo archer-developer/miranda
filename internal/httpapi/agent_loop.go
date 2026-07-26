@@ -185,6 +185,16 @@ func (o *Orchestrator) availableTools(ctx context.Context) ([]llm.ToolDef, error
 		})
 	}
 
+	if o.tts != nil && o.ttsCfg.StopSpeechTool {
+		tools = append(tools, llm.ToolDef{
+			Name: stopSpeechToolName,
+			Description: "Stop speaking immediately — use when the user explicitly asks Miranda to stop talking " +
+				"(e.g. \"хватит\", \"замолчи\", \"stop talking\") — clears anything still queued and silences " +
+				"whatever is currently playing on the physical speaker.",
+			Parameters: map[string]any{"type": "object", "properties": map[string]any{}},
+		})
+	}
+
 	if o.telegram != nil && o.telegramCfg.SendMessageTool {
 		tools = append(tools, llm.ToolDef{
 			Name: sendTelegramToolName,
@@ -344,17 +354,17 @@ func (o *Orchestrator) speakChunks(ctx context.Context, source string, control *
 	}
 }
 
-// speakText dispatches one already-voice-approved piece of text to
-// tts.primary. Best-effort: a dispatch failure is logged to the hub but
-// never fails the turn — a broken speaker shouldn't stop the assistant from
-// answering.
+// speakText enqueues one already-voice-approved piece of text onto
+// tts.primary's background Player (via Dispatcher.Speak) — it returns
+// immediately without waiting for synthesis or physical playback, and any
+// eventual failure is published to the hub by the Player itself (Source:
+// "tts"), not returned here, so a broken speaker shouldn't stop the
+// assistant from answering.
 func (o *Orchestrator) speakText(ctx context.Context, text string) {
 	if o.tts == nil || text == "" {
 		return
 	}
-	if err := o.tts.Speak(ctx, text); err != nil {
-		o.hub.Publish(hub.Event{Source: "tts", Message: "speak failed: " + err.Error()})
-	}
+	o.tts.Speak(ctx, text)
 }
 
 // executeTool runs one tool call, either locally (remember_this,
@@ -410,6 +420,13 @@ func (o *Orchestrator) executeTool(ctx context.Context, userID string, tc llm.To
 	if tc.Name == speakReplyToolName {
 		control.speakRequested = true
 		return "will speak the reply aloud"
+	}
+
+	if tc.Name == stopSpeechToolName {
+		if o.tts != nil {
+			o.tts.Stop(ctx)
+		}
+		return "stopped"
 	}
 
 	if tc.Name == sendTelegramToolName {

@@ -32,6 +32,8 @@ const forgetConversationToolName = "forget_conversation"
 
 const speakReplyToolName = "speak_reply"
 
+const stopSpeechToolName = "stop_speech"
+
 const sendTelegramToolName = "send_telegram"
 
 // InputRequest is the body of POST /api/v1/input — the single entry point
@@ -126,6 +128,14 @@ func NewOrchestrator(
 
 // Handle runs one full turn and returns the assistant's reply.
 func (o *Orchestrator) Handle(ctx context.Context, req InputRequest) (InputResponse, error) {
+	if req.Source == users.SourceHAAssist && o.tts != nil {
+		// Barge-in: interrupt whatever the station is still finishing from a
+		// previous turn *before* this turn's own speech has any chance to
+		// enqueue anything, so a new voice turn always cuts in rather than
+		// queuing after what's already playing.
+		o.tts.Stop(ctx)
+	}
+
 	userID := req.UserID
 	if userID == "" {
 		userID = o.defaultUserID

@@ -167,7 +167,7 @@ func run(cfg config.Config, logger *slog.Logger, eventHub *hub.Hub) error {
 
 	toolManager := connectMCP(cfg.MCP.Servers, logger)
 
-	dispatcher := buildTTSDispatcher(cfg.TTS, logger)
+	dispatcher, ttsAudioHandler := buildTTSDispatcher(cfg.TTS, cfg.Storage, eventHub, logger)
 
 	usersRegistry, err := users.NewRegistry(cfg.Users)
 	if err != nil {
@@ -212,7 +212,7 @@ func run(cfg config.Config, logger *slog.Logger, eventHub *hub.Hub) error {
 	defaultUserID := "debug"
 	orchestrator := httpapi.NewOrchestrator(
 		llmRouter, toolManager, historyStore, memoryStore, dispatcher, eventHub, usersRegistry,
-		cfg.Agent, cfg.Memory, cfg.TTS, cfg.LLM.Escalation, cfg.TTS.YandexStation.ChunkMaxChars, defaultUserID,
+		cfg.Agent, cfg.Memory, cfg.TTS, cfg.LLM.Escalation, ttsChunkMaxChars(cfg.TTS), defaultUserID,
 	)
 	if cfg.Telegram.Enabled {
 		orchestrator.SetTelegram(telegram.NewSender(tgClient, tgChats), cfg.Telegram)
@@ -228,6 +228,9 @@ func run(cfg config.Config, logger *slog.Logger, eventHub *hub.Hub) error {
 	}
 
 	server := httpapi.NewServer(orchestrator, eventHub, cfg.Server.AuthToken, webHandler, logger, usersRegistry, sessions)
+	if ttsAudioHandler != nil {
+		server.SetTTSAudioHandler(ttsAudioHandler)
+	}
 	if cfg.Telegram.Enabled {
 		server.SetTelegramWebhook(&httpapi.TelegramWebhook{
 			Path:   cfg.Telegram.WebhookPath,
@@ -387,14 +390,65 @@ func setupTelegram(cfg config.TelegramConfig, storageCfg config.StorageConfig, l
 }
 
 // buildTTSDispatcher wires up the Home Assistant REST client TTS needs, if
-// HA_BASE_URL is configured. TTS is entirely optional: without it the agent
-// still answers via the HTTP API/web UI, just without speaking replies.
-func buildTTSDispatcher(cfg config.TTSConfig, logger *slog.Logger) *tts.Dispatcher {
+// HA_BASE_URL is configured, plus the primary/fallback tts.Provider pair
+// named by cfg.Primary/cfg.Fallback and (if a gemini_tts provider was built)
+// the HTTP handler that serves its rendered audio files back to the
+// station. TTS is entirely optional: without HA_BASE_URL the agent still
+// answers via the HTTP API/web UI, just without speaking replies.
+//
+// A provider failing to build (e.g. gemini_tts requested with no usable API
+// key) disables TTS dispatch entirely rather than falling back silently to
+// some other provider the config didn't actually ask for — better to notice
+// a misconfiguration in the logs than to have replies quietly go out over
+// the wrong voice.
+func buildTTSDispatcher(cfg config.TTSConfig, storageCfg config.StorageConfig, h *hub.Hub, logger *slog.Logger) (*tts.Dispatcher, *tts.HTTPHandler) {
 	baseURL := os.Getenv("HA_BASE_URL")
 	if baseURL == "" {
 		logger.Warn("HA_BASE_URL not set — TTS dispatch is disabled")
-		return nil
+		return nil, nil
 	}
 	haClient := ha.New(baseURL, os.Getenv("HA_TOKEN"))
-	return tts.NewDispatcher(cfg, haClient, logger)
+
+	primary, err := tts.NewProvider(cfg.Primary, cfg, storageCfg.TTSCacheDir, haClient, logger)
+	if err != nil {
+		logger.Error("tts: failed to build primary provider, TTS dispatch is disabled", "error", err, "primary", cfg.Primary)
+		return nil, nil
+	}
+
+	var fallback tts.Provider
+	if cfg.Fallback != "" && cfg.Fallback != cfg.Primary {
+		fallback, err = tts.NewProvider(cfg.Fallback, cfg, storageCfg.TTSCacheDir, haClient, logger)
+		if err != nil {
+			logger.Warn("tts: failed to build fallback provider, continuing without one", "error", err, "fallback", cfg.Fallback)
+			fallback = nil
+		}
+	}
+
+	dispatcher := tts.NewDispatcher(primary, fallback, haClient, cfg.YandexStation.Entities, h, logger)
+
+	// Always registered (independent of which provider ended up being usable
+	// above): a gemini_tts cache directory populated by an earlier, since-
+	// reconfigured run should still be servable, and this is cheap to keep
+	// around regardless.
+	ttsHandler, err := tts.NewHTTPHandler(storageCfg.TTSCacheDir)
+	if err != nil {
+		logger.Error("tts: failed to create the /tts-audio HTTP handler", "error", err)
+		return dispatcher, nil
+	}
+	return dispatcher, ttsHandler
+}
+
+// ttsChunkMaxChars picks the sentence-boundary chunk size (see
+// tts.Accumulator/Chunk) the agent loop uses to split streaming LLM text
+// before handing it to TTS — sized to whichever provider is actually
+// configured as primary, since gemini_tts renders a real audio file and
+// isn't limited by what Yandex Station's own on-device TTS can swallow in
+// one call the way yandex_station_text is. Chunking itself is always
+// maximally greedy regardless of provider (see Accumulator's doc comment) —
+// only the limit differs.
+func ttsChunkMaxChars(cfg config.TTSConfig) int {
+	if cfg.Primary == "gemini_tts" {
+		return cfg.GeminiTTS.ChunkMaxChars
+	}
+	return cfg.YandexStation.ChunkMaxChars
 }

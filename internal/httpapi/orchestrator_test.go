@@ -6,7 +6,9 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 
@@ -26,20 +28,69 @@ import (
 
 // fakeHAClient is an in-memory tts.HAClient: play_media calls are recorded,
 // and AliceState always reports "IDLE" so the dispatcher's wait-for-idle
-// poll never blocks the test.
+// poll never blocks the test. TTS dispatch is asynchronous (see
+// tts.Dispatcher/Player), so tests must poll Calls() rather than read the
+// calls slice immediately after Orchestrator.Handle returns.
 type fakeHAClient struct {
-	calls []string // recorded media_content_id values
+	mu        sync.Mutex
+	calls     []string // recorded media_content_id values (play_media)
+	stopCalls []string // recorded entity_id values (media_stop)
 }
 
 func (f *fakeHAClient) CallService(ctx context.Context, domain, service string, data map[string]any) error {
 	if domain == "media_player" && service == "play_media" {
+		f.mu.Lock()
 		f.calls = append(f.calls, data["media_content_id"].(string))
+		f.mu.Unlock()
+	}
+	if domain == "media_player" && service == "media_stop" {
+		f.mu.Lock()
+		f.stopCalls = append(f.stopCalls, data["entity_id"].(string))
+		f.mu.Unlock()
 	}
 	return nil
 }
 
 func (f *fakeHAClient) AliceState(ctx context.Context, entityID string) (string, error) {
 	return "IDLE", nil
+}
+
+// Calls returns a snapshot of every play_media call's media_content_id so
+// far, safe to call concurrently with the Player's worker goroutine still
+// appending to it.
+func (f *fakeHAClient) Calls() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	out := make([]string, len(f.calls))
+	copy(out, f.calls)
+	return out
+}
+
+// StopCalls returns a snapshot of every media_stop call's entity_id so far.
+func (f *fakeHAClient) StopCalls() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	out := make([]string, len(f.stopCalls))
+	copy(out, f.stopCalls)
+	return out
+}
+
+// requireEventuallySpoken waits for at least one TTS dispatch to have
+// reached ha, since Dispatcher.Speak only enqueues (see tts.Player) instead
+// of blocking Orchestrator.Handle until playback actually happens.
+func requireEventuallySpoken(t *testing.T, ha *fakeHAClient) {
+	t.Helper()
+	require.Eventually(t, func() bool { return len(ha.Calls()) > 0 }, 2*time.Second, 5*time.Millisecond,
+		"expected at least one TTS dispatch to reach the (simulated) Yandex Station")
+}
+
+// requireNeverSpoken gives any wrongly-triggered async TTS dispatch a brief
+// window to show up, then asserts nothing did — there's no positive signal
+// to wait on when asserting an absence.
+func requireNeverSpoken(t *testing.T, ha *fakeHAClient) {
+	t.Helper()
+	time.Sleep(50 * time.Millisecond)
+	require.Empty(t, ha.Calls())
 }
 
 // newTestOrchestratorWithTTS is like newTestOrchestrator but wires up a real
@@ -59,20 +110,23 @@ func newTestOrchestratorWithTTS(t *testing.T, provider *llmtest.FakeProvider) (*
 	require.NoError(t, err)
 
 	ha := &fakeHAClient{}
-	ttsCfg := config.TTSConfig{
-		Primary: "yandex_station",
-		YandexStation: config.YandexStationConfig{
-			Entities:           []string{"media_player.kitchen"},
-			ChunkMaxChars:      100,
-			IdlePollIntervalMS: 1,
-			// fakeHAClient.State always reports "idle", so the dispatcher's
-			// "wait for it to leave idle" phase always times out; keep that
-			// timeout tiny too, or every TTS dispatch in these tests pays it.
-			PlaybackStartTimeoutMS: 1,
-		},
-		SpeakReplyTool: true,
+	yandexCfg := config.YandexStationConfig{
+		Entities:           []string{"media_player.kitchen"},
+		ChunkMaxChars:      100,
+		IdlePollIntervalMS: 1,
+		// fakeHAClient.AliceState always reports "idle", so the "wait for it
+		// to leave idle" phase always times out; keep that timeout tiny too,
+		// or every TTS dispatch in these tests pays it.
+		PlaybackStartTimeoutMS: 1,
 	}
-	dispatcher := tts.NewDispatcher(ttsCfg, ha, nil)
+	ttsCfg := config.TTSConfig{
+		Primary:        "yandex_station_text",
+		YandexStation:  yandexCfg,
+		SpeakReplyTool: true,
+		StopSpeechTool: true,
+	}
+	primary := tts.NewTextProvider(yandexCfg, ha, nil)
+	dispatcher := tts.NewDispatcher(primary, nil, ha, yandexCfg.Entities, hub.New(100), nil)
 
 	o := NewOrchestrator(
 		r, mcp.NewManager(), h, mem, dispatcher, hub.New(100), nil,
@@ -339,7 +393,7 @@ func TestOrchestrator_SpeaksViaTTSForHAAssistSource(t *testing.T) {
 
 	// The reply must also have been spoken to the configured Yandex Station —
 	// ha_assist is the one channel with a physical speaker to answer through.
-	require.NotEmpty(t, ha.calls)
+	requireEventuallySpoken(t, ha)
 }
 
 func TestOrchestrator_SpeaksViaTTSWhenSpeakReplyToolIsCalledOnNonHASource(t *testing.T) {
@@ -355,7 +409,7 @@ func TestOrchestrator_SpeaksViaTTSWhenSpeakReplyToolIsCalledOnNonHASource(t *tes
 
 	// The user's explicit request must still reach the Yandex Station even
 	// though this turn didn't arrive via ha_assist.
-	require.NotEmpty(t, ha.calls)
+	requireEventuallySpoken(t, ha)
 }
 
 // TestOrchestrator_SpeaksTurnsOwnTextWhenItCallsSpeakReplyInTheSameTurn
@@ -382,8 +436,8 @@ func TestOrchestrator_SpeaksTurnsOwnTextWhenItCallsSpeakReplyInTheSameTurn(t *te
 	require.NoError(t, err)
 	require.Equal(t, "Готово, озвучила!", resp.Reply)
 
-	require.NotEmpty(t, ha.calls)
-	require.Contains(t, ha.calls, "Осень — время урожая и тёплого чая.")
+	requireEventuallySpoken(t, ha)
+	require.Contains(t, ha.Calls(), "Осень — время урожая и тёплого чая.")
 }
 
 func TestOrchestrator_DoesNotSpeakViaTTSForNonHASources(t *testing.T) {
@@ -398,9 +452,41 @@ func TestOrchestrator_DoesNotSpeakViaTTSForNonHASources(t *testing.T) {
 
 			// Every other channel already has its own output surface (the HTTP
 			// response) — it must never also make the shared Yandex Station talk.
-			require.Empty(t, ha.calls)
+			requireNeverSpoken(t, ha)
 		})
 	}
+}
+
+// TestOrchestrator_StopSpeechToolStopsTheStation exercises the stop_speech
+// tool end to end: the model calling it must reach Dispatcher.Stop, which
+// (via tts.Player.Stop) issues a media_player.media_stop call for every
+// configured entity so the physical station actually falls silent.
+func TestOrchestrator_StopSpeechToolStopsTheStation(t *testing.T) {
+	provider := llmtest.New("local",
+		llmtest.Response{ToolCall: &llm.ToolCall{ID: "call-1", Name: "stop_speech", Arguments: `{}`}},
+		llmtest.Response{Text: "Молчу."},
+	)
+	o, ha := newTestOrchestratorWithTTS(t, provider)
+
+	resp, err := o.Handle(context.Background(), InputRequest{Source: "cli", UserID: "alex", Text: "хватит болтать"})
+	require.NoError(t, err)
+	require.Equal(t, "Молчу.", resp.Reply)
+
+	require.Contains(t, ha.StopCalls(), "media_player.kitchen")
+}
+
+// TestOrchestrator_HAAssistTurnAlwaysStopsWhateverWasPlayingFirst guards the
+// barge-in behavior: every ha_assist turn calls tts.Stop before its own
+// speech has any chance to enqueue, so a new voice turn always interrupts a
+// previous turn's still-finishing speech instead of queuing after it.
+func TestOrchestrator_HAAssistTurnAlwaysStopsWhateverWasPlayingFirst(t *testing.T) {
+	provider := llmtest.New("local", llmtest.Response{Text: "Привет!"})
+	o, ha := newTestOrchestratorWithTTS(t, provider)
+
+	_, err := o.Handle(context.Background(), InputRequest{Source: users.SourceHAAssist, UserID: "alex", Text: "привет"})
+	require.NoError(t, err)
+
+	require.Contains(t, ha.StopCalls(), "media_player.kitchen")
 }
 
 // newTestOrchestratorWithTelegram is like newTestOrchestrator but also wires

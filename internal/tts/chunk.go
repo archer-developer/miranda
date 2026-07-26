@@ -1,14 +1,21 @@
 // Package tts turns assistant text into speech via Yandex Station (the
-// primary and only channel, dispatched through HA's
-// media_player.play_media).
+// always-available provider, dispatched through HA's media_player.play_media)
+// or, optionally, Gemini (an external voice rendered to a file and played
+// back through the same station — see gemini.go).
 package tts
 
 import "unicode"
 
 // Accumulator buffers text as it streams in from the LLM and emits complete
-// chunks — cut at a sentence boundary (.!?…) when possible, otherwise at the
-// last whitespace before maxChars — so playback of the first sentence can
-// start well before the model has finished generating the whole reply.
+// chunks once one is ready. Chunking is always maximally greedy: it never
+// cuts just because a sentence boundary is available — it keeps buffering
+// until forced past maxChars, then cuts at the *latest* sentence boundary
+// (.!?…) at or before maxChars, so a chunk packs in as many complete
+// sentences as fit rather than firing one request/utterance per sentence.
+// Only if the buffer exceeds maxChars with no sentence boundary in range at
+// all (one very long run-on sentence) does the cut fall back to the last
+// whitespace at or before maxChars, or a hard cut as a last resort — a
+// sentence is never split if a whitespace-or-boundary cut is available.
 type Accumulator struct {
 	maxChars int
 	buf      []rune
@@ -65,35 +72,43 @@ func Chunk(text string, maxChars int) []string {
 }
 
 // nextChunkCut returns the index (exclusive) to cut buf at for one complete
-// chunk, or 0 if buf doesn't yet contain a full chunk worth emitting.
+// chunk, or 0 if buf isn't yet forced to cut (still under maxChars) — see
+// Accumulator's doc comment for the greedy strategy this implements.
 func nextChunkCut(buf []rune, maxChars int) int {
-	if len(buf) == 0 {
+	if len(buf) == 0 || len(buf) <= maxChars {
 		return 0
 	}
+	if i := latestSentenceEnd(buf, maxChars); i > 0 {
+		return i
+	}
+	return forceCut(buf, maxChars)
+}
 
-	// Prefer the earliest sentence-ending punctuation (followed by
-	// whitespace or end of buffer) that still fits within maxChars.
+// latestSentenceEnd returns the index just past the last sentence-ending
+// punctuation (followed by whitespace or end of buffer) at or before
+// maxChars, or 0 if there is none.
+func latestSentenceEnd(buf []rune, maxChars int) int {
+	last := 0
 	for i, r := range buf {
 		if i+1 > maxChars {
 			break
 		}
 		if isSentenceEnd(r) && (i+1 == len(buf) || unicode.IsSpace(buf[i+1])) {
-			return i + 1
+			last = i + 1
 		}
 	}
+	return last
+}
 
-	if len(buf) <= maxChars {
-		return 0 // no sentence boundary yet, and not forced to cut yet
-	}
-
-	// Buffer exceeds the limit with no sentence boundary in range: cut at
-	// the last whitespace at or before maxChars to avoid splitting a word.
+// forceCut cuts buf at the last whitespace at or before maxChars, to avoid
+// splitting a word, or hard-cuts at maxChars if there's no whitespace at all
+// (one giant token).
+func forceCut(buf []rune, maxChars int) int {
 	for i := maxChars; i > 0; i-- {
 		if unicode.IsSpace(buf[i-1]) {
 			return i
 		}
 	}
-	// No whitespace at all (one giant token) — hard-cut at the limit.
 	return maxChars
 }
 

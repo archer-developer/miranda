@@ -27,24 +27,27 @@ import (
 // the HA user-id-mapping path, or spoof another user_id.
 const webUISource = "web_ui"
 
-// turnTimeout bounds one full agent turn: LLM generation, tool calls, and
-// any synchronous TTS dispatch (speakChunks blocks for the physical
-// speaker's actual playback duration — see internal/tts.Dispatcher.waitIdle
-// — which for a multi-sentence reply can legitimately take well past what a
-// browser tab, VPN link, or reverse proxy will hold a connection open for).
-// detachedTurnContext below is what makes this the thing that bounds a
-// turn instead of the caller's connection: once a reply may already have
-// been spoken aloud or sent to Telegram, it must still get recorded to
-// history even if the original HTTP/webhook connection drops first.
+// turnTimeout bounds one full agent turn: LLM generation and tool calls,
+// which for a turn that calls several tools (or escalates to a slower
+// provider) can legitimately take well past what a browser tab, VPN link,
+// or reverse proxy will hold a connection open for. TTS dispatch itself no
+// longer contributes to this: Dispatcher.Speak only enqueues text onto a
+// background Player and returns immediately (see internal/tts/player.go) —
+// synthesis and the physical speaker's actual playback duration happen
+// entirely off this turn's own goroutine. detachedTurnContext below is what
+// makes turnTimeout the thing that bounds a turn instead of the caller's
+// connection: once a reply may already have been enqueued for TTS or sent
+// to Telegram, it must still get recorded to history even if the original
+// HTTP/webhook connection drops first.
 const turnTimeout = 5 * time.Minute
 
 // detachedTurnContext derives a context for one orchestrator.Handle call
 // that keeps parent values (deadlines aside) but is immune to the parent
 // being cancelled by the inbound connection closing — see turnTimeout.
 // Without this, a dropped client connection cancels ctx mid-turn, and
-// everything downstream that still needs to run (finishing TTS chunks
-// already audible on a physical speaker, persisting the assistant's
-// reply to history so the next turn sees it) fails with context.Canceled.
+// everything downstream that still needs to run (persisting the
+// assistant's reply to history so the next turn sees it) fails with
+// context.Canceled.
 func detachedTurnContext(parent context.Context) (context.Context, context.CancelFunc) {
 	return context.WithTimeout(context.WithoutCancel(parent), turnTimeout)
 }
@@ -94,6 +97,27 @@ func NewServer(orchestrator *Orchestrator, h *hub.Hub, authToken string, webUI h
 
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	s.mux.ServeHTTP(w, r)
+}
+
+// SetTTSAudioHandler wires the optional GET /tts-audio/{filename} route in,
+// mirroring SetTelegramWebhook's post-construction style for an optional
+// dependency — no existing NewServer call site has to change to pass one
+// more nil. h is a *tts.HTTPHandler (accepted as the http.Handler interface
+// to avoid an import cycle risk between internal/httpapi and internal/tts;
+// none exists today, but this keeps the dependency direction the same as
+// every other optional-feature setter here). A nil h is a no-op — that's
+// the case where TTS dispatch itself is disabled (no HA_BASE_URL) or
+// gemini_tts was never configured, so nothing ever serves synthesized
+// audio out of config.StorageConfig.TTSCacheDir.
+//
+// The route pattern captures the whole "{key}.{ext}" filename as one
+// wildcard, not two: net/http's ServeMux only supports one wildcard per
+// path segment, so tts.HTTPHandler.ServeHTTP splits key/ext itself.
+func (s *Server) SetTTSAudioHandler(h http.Handler) {
+	if h == nil {
+		return
+	}
+	s.mux.Handle("GET /tts-audio/{filename}", h)
 }
 
 // handleHealthz is an unauthenticated liveness check — used by the Home

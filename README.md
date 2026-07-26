@@ -6,8 +6,9 @@ living inside HA. It compiles to a single self-contained binary (no Docker,
 no cgo), routes conversations across multiple LLM providers, keeps dialog
 history in embedded SQLite and long-term memory as per-user markdown files,
 calls tools over MCP (Home Assistant and others), and speaks replies through
-Yandex Station. See `docs/PROJECT_PREREQUISITES.md` for the full design
-rationale.
+Yandex Station — either its own built-in voice, or (opt-in) a voice rendered
+by Gemini's TTS API and played back through the same station. See
+`docs/PROJECT_PREREQUISITES.md` for the full design rationale.
 
 ```
 HA (voice input, MCP tools, TTS output) <---> Miranda Agent Service <---> LLM providers
@@ -93,8 +94,46 @@ Key sections: `llm.providers` (the fallback chain — one entry per model
 backend, `type: openai_compat` for any OpenAI Chat Completions compatible
 server — Ollama, vLLM, LM Studio, OpenRouter — or `type: anthropic` for
 Claude), `mcp.servers` (tool sources, see below), `tts` (Yandex Station
-routing), `storage` (SQLite + memory file paths), `users` (web UI login
-accounts — see **Web UI** below).
+routing, and the opt-in `gemini_tts` provider — see **TTS** below),
+`storage` (SQLite + memory file + TTS audio cache paths), `users` (web UI
+login accounts — see **Web UI** below).
+
+## TTS
+
+Two providers, selected via `tts.primary` (and an optional `tts.fallback`
+tried if the primary reports its quota exhausted): `yandex_station_text`
+(the default — Yandex Station's own built-in voice, no external dependency)
+and `gemini_tts` (opt-in — renders audio via Gemini's speech-generation API
+and plays it back through the same station as a fetched file, for a
+different voice than Yandex's own).
+
+Dispatch is always asynchronous: a reply is enqueued onto a background
+player and the turn continues immediately — it never blocks on synthesis or
+on the physical speaker's actual playback duration. A new `ha_assist` voice
+turn always interrupts (stops) whatever a previous turn's speech is still
+finishing, rather than queuing after it, and the model can also stop
+speaking mid-reply itself via the `stop_speech` tool (e.g. "хватит", "замолчи").
+
+`gemini_tts` needs:
+
+- One or more Gemini API keys, each in its own environment variable named
+  under `tts.gemini_tts.api_key_envs` (see `.env.example`). Listing several
+  lets Miranda rotate across them when one hits its quota, retrying the
+  whole list again after a cooldown before giving up.
+- `tts.gemini_tts.public_base_url` — the URL the Yandex Station can reach
+  Miranda through, so it can fetch a rendered file from
+  `GET /tts-audio/{key}.{ext}`.
+- A choice of `tts.gemini_tts.audio_format`: `"wav"` (default, no extra
+  dependency) or `"mp3"`. Whether a real Yandex Station's
+  `media_player.play_media` URL playback accepts WAV isn't verified against
+  actual hardware yet — the AlexxIT/YandexStation integration's own docs
+  only list AAC/FLAC/MP3 for URL playback — so try `"mp3"` first if replies
+  don't play.
+
+Every rendered file is cached permanently (content-addressed by model +
+voice + format + text, under `storage.tts_cache_dir`, `./data/storage` by
+default) — a cache hit skips calling Gemini entirely, which matters more
+for quota than chunk size.
 
 ## Logging
 
@@ -261,12 +300,15 @@ your HA host, e.g. `http://192.168.1.50:8787`.
    **Conversation agent** to **Miranda**. Voice input transcribed by that
    pipeline's STT step is now forwarded to Miranda (`source: ha_assist`);
    its reply is spoken back through that pipeline's TTS step *and*
-   dispatched to Miranda's own Yandex Station channel — `ha_assist` is the
-   only source that gets the direct TTS dispatch automatically, since it's
-   the only channel with a physical speaker to answer through. Every other
-   channel (the web UI, the Telegram bot, a future mobile app) only gets its
-   reply back over its own connection (the HTTP response) unless the user
-   explicitly asks to hear it, via the model's `speak_reply` tool.
+   dispatched to Miranda's own Yandex Station channel (see **TTS** above) —
+   `ha_assist` is the only source that gets the direct TTS dispatch
+   automatically, since it's the only channel with a physical speaker to
+   answer through, and every new `ha_assist` turn interrupts whatever a
+   previous one is still finishing. Every other channel (the web UI, the
+   Telegram bot, a future mobile app) only gets its reply back over its own
+   connection (the HTTP response) unless the user explicitly asks to hear
+   it, via the model's `speak_reply` tool — and any turn can be stopped
+   mid-reply via `stop_speech`.
 5. The integration ships with English, Russian, and Belarusian translations
    for its config flow; Home Assistant picks the one matching your user
    profile's language automatically.
@@ -375,7 +417,8 @@ internal/llm/           provider-agnostic chat interface
 internal/mcp/            MCP Client/Manager abstraction, multi-server tool-name prefixing
 internal/history/        SQLite (pure-Go, no cgo) dialog log with FTS5 search
 internal/memory/         per-user markdown long-term memory
-internal/tts/            sentence-boundary chunking + Yandex Station dispatch
+internal/tts/            sentence-boundary chunking, Yandex Station text + Gemini TTS providers,
+                           disk cache, async player, GET /tts-audio/ handler
 internal/ha/             minimal Home Assistant REST client (for TTS dispatch)
 internal/telegram/       Telegram Bot API client, webhook types, chat-id store
 internal/webui/          Tailwind v4 dashboard, embedded via go:embed
