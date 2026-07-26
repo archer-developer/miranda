@@ -94,6 +94,9 @@ type indexPageData struct {
 	UserJSON        template.JS
 	Languages       []languageOption
 	WebAuthnEnabled bool
+	// AssetVersion is embedded in /static/v<AssetVersion>/... URLs so a new
+	// build's assets get a new URL — see staticAssetVersion in webui.go.
+	AssetVersion string
 }
 
 type loginPageData struct {
@@ -103,4 +106,5 @@ type loginPageData struct {
 	Error           bool
 	Languages       []languageOption
 	WebAuthnEnabled bool
+	AssetVersion    string
 }

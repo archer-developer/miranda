@@ -78,6 +78,7 @@ func (h *Handler) handleLoginPage(w http.ResponseWriter, r *http.Request) {
 		Error:           r.URL.Query().Get("error") == "1",
 		Languages:       languageOptions(lang),
 		WebAuthnEnabled: h.webauthn != nil,
+		AssetVersion:    h.assetVersion,
 	}
 
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")

@@ -216,6 +216,19 @@ func TestHandleStatic_ServesCompiledStylesheetWithoutAuth(t *testing.T) {
 
 	require.Equal(t, http.StatusOK, rec.Code)
 	require.Contains(t, rec.Body.String(), "tailwindcss")
+	require.Empty(t, rec.Header().Get("Cache-Control"), "the unversioned path isn't safe to cache forever")
+}
+
+func TestHandleStatic_VersionedPathIsCachedForeverAndServesSameContent(t *testing.T) {
+	h, _ := newTestHandler(t, &fakeHistory{})
+
+	req := httptest.NewRequest(http.MethodGet, "/static/v"+h.assetVersion+"/css/styles.css", nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusOK, rec.Code)
+	require.Contains(t, rec.Body.String(), "tailwindcss")
+	require.Equal(t, "public, max-age=31536000, immutable", rec.Header().Get("Cache-Control"))
 }
 
 func TestServesLocalAvatarFiles(t *testing.T) {

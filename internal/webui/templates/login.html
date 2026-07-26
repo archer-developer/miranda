@@ -4,14 +4,14 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>{{.Strings.login_title}} — Miranda</title>
-  <link rel="icon" type="image/svg+xml" href="/static/brand/icon.svg" />
-  <link rel="alternate icon" type="image/png" href="/static/brand/icon.png" />
-  <link rel="stylesheet" href="/static/css/styles.css" />
+  <link rel="icon" type="image/svg+xml" href="/static/v{{.AssetVersion}}/brand/icon.svg" />
+  <link rel="alternate icon" type="image/png" href="/static/v{{.AssetVersion}}/brand/icon.png" />
+  <link rel="stylesheet" href="/static/v{{.AssetVersion}}/css/styles.css" />
 </head>
 <body class="flex h-full items-center justify-center bg-slate-950 text-slate-100 antialiased">
   <div class="w-full max-w-sm rounded-lg border border-slate-800 bg-slate-900/50 p-6">
     <div class="mb-6 flex flex-col items-center gap-2">
-      <img src="/static/brand/icon.svg" alt="" class="h-14 w-14" />
+      <img src="/static/v{{.AssetVersion}}/brand/icon.svg" alt="" class="h-14 w-14" />
       <h1 class="text-lg font-semibold tracking-tight">{{.Strings.login_title}}</h1>
     </div>
 
@@ -55,7 +55,7 @@
 
   {{if .WebAuthnEnabled}}
   <script>window.MIRANDA_I18N = {{.StringsJSON}};</script>
-  <script type="module" src="/static/js/login.js"></script>
+  <script type="module" src="/static/v{{.AssetVersion}}/js/login.js"></script>
   {{end}}
 </body>
 </html>

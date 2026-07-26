@@ -4,16 +4,16 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>Miranda</title>
-  <link rel="icon" type="image/svg+xml" href="/static/brand/icon.svg" />
-  <link rel="alternate icon" type="image/png" href="/static/brand/icon.png" />
-  <link rel="stylesheet" href="/static/css/styles.css" />
+  <link rel="icon" type="image/svg+xml" href="/static/v{{.AssetVersion}}/brand/icon.svg" />
+  <link rel="alternate icon" type="image/png" href="/static/v{{.AssetVersion}}/brand/icon.png" />
+  <link rel="stylesheet" href="/static/v{{.AssetVersion}}/css/styles.css" />
 </head>
 <body class="h-full bg-slate-950 text-slate-100 antialiased">
   <div class="flex h-full flex-col">
     <header class="border-b border-slate-800 px-4 py-3 sm:px-6">
       <div class="flex items-center justify-between gap-4">
         <div class="flex items-center gap-2">
-          <img src="/static/brand/icon.svg" alt="" class="h-8 w-8 rounded-full" />
+          <img src="/static/v{{.AssetVersion}}/brand/icon.svg" alt="" class="h-8 w-8 rounded-full" />
           <span class="text-lg font-semibold tracking-tight">Miranda</span>
         </div>
 
@@ -64,6 +64,6 @@
     window.MIRANDA_USER = {{.UserJSON}};
     window.MIRANDA_WEBAUTHN_ENABLED = {{.WebAuthnEnabled}};
   </script>
-  <script type="module" src="/static/js/app.js"></script>
+  <script type="module" src="/static/v{{.AssetVersion}}/js/app.js"></script>
 </body>
 </html>

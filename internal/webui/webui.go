@@ -10,12 +10,18 @@ package webui
 
 import (
 	"context"
+	"crypto/sha256"
 	"embed"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"html/template"
+	"io"
+	"io/fs"
 	"net/http"
+	"net/url"
 	"strconv"
+	"strings"
 
 	"github.com/go-webauthn/webauthn/protocol"
 
@@ -73,6 +79,39 @@ type Handler struct {
 	users           *users.Registry
 	sessions        *session.Store
 	defaultLanguage string
+	assetVersion    string // see staticAssetVersion; templates embed this in /static/v<version>/ URLs
+}
+
+// staticAssetVersion hashes every embedded static file's content into a
+// short hex digest. Since staticFS is compiled into the binary via go:embed,
+// this value is stable for a given build and changes automatically whenever
+// any static asset changes — which is what lets templates serve assets at
+// /static/v<version>/... and have that path change (and therefore bust
+// every client's cache) on every new build, with zero manual bookkeeping.
+func staticAssetVersion(fsys fs.FS) (string, error) {
+	h := sha256.New()
+	err := fs.WalkDir(fsys, "static", func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() {
+			return nil
+		}
+		f, err := fsys.Open(path)
+		if err != nil {
+			return err
+		}
+		defer f.Close()
+		if _, err := io.WriteString(h, path+"\x00"); err != nil {
+			return err
+		}
+		_, err = io.Copy(h, f)
+		return err
+	})
+	if err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(h.Sum(nil))[:12], nil
 }
 
 // New builds a Handler. usersRegistry and sessions back the mandatory login
@@ -94,6 +133,10 @@ func New(h History, mem Memory, webauthnSvc WebAuthnService, usersRegistry *user
 	if err != nil {
 		return nil, fmt.Errorf("webui: parse login template: %w", err)
 	}
+	assetVersion, err := staticAssetVersion(staticFS)
+	if err != nil {
+		return nil, fmt.Errorf("webui: hash static assets: %w", err)
+	}
 
 	handler := &Handler{
 		indexTmpl:       indexTmpl,
@@ -104,6 +147,7 @@ func New(h History, mem Memory, webauthnSvc WebAuthnService, usersRegistry *user
 		users:           usersRegistry,
 		sessions:        sessions,
 		defaultLanguage: defaultLanguage,
+		assetVersion:    assetVersion,
 	}
 
 	mux := http.NewServeMux()
@@ -112,6 +156,13 @@ func New(h History, mem Memory, webauthnSvc WebAuthnService, usersRegistry *user
 	mux.HandleFunc("POST /logout", handler.handleLogout)
 	mux.HandleFunc("GET /set-lang", handler.handleSetLanguage)
 	mux.Handle("GET /static/", http.FileServerFS(staticFS)) // public: needed to render the login page itself
+	// The versioned alias templates actually link to: same content, but at a
+	// path that changes on every build, so it's safe to tell browsers to
+	// cache it forever instead of revalidating on every page load (the
+	// plain /static/ above never got a Cache-Control header at all, which is
+	// why nothing was being cached — see New's doc comment).
+	versionedPrefix := "/static/v" + assetVersion + "/"
+	mux.Handle("GET "+versionedPrefix, cacheForever(versionedStatic(versionedPrefix)))
 	if avatarsDir != "" {
 		// Registered as a more specific pattern than "/static/" above;
 		// net/http's ServeMux routes to the longest matching pattern
@@ -147,6 +198,34 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	h.mux.ServeHTTP(w, r)
 }
 
+// versionedStatic rewrites a request under prefix (e.g. "/static/v<hash>/")
+// back to the plain "/static/..." path staticFS actually holds, then serves
+// it from the embedded FS. The version segment only exists to make the URL
+// change when the build's assets change; it carries no other meaning, so
+// there's nothing to validate.
+func versionedStatic(prefix string) http.Handler {
+	fileServer := http.FileServerFS(staticFS)
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		r2 := new(http.Request)
+		*r2 = *r
+		r2.URL = new(url.URL)
+		*r2.URL = *r.URL
+		r2.URL.Path = "/static/" + strings.TrimPrefix(r.URL.Path, prefix)
+		fileServer.ServeHTTP(w, r2)
+	})
+}
+
+// cacheForever marks a response as safe for browsers/proxies to cache
+// indefinitely without revalidating — only correct for content served at a
+// content-derived URL (see versionedStatic), since the only way to get a
+// client to see new content is to change the URL.
+func cacheForever(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
+		next.ServeHTTP(w, r)
+	})
+}
+
 func (h *Handler) handleIndex(w http.ResponseWriter, r *http.Request) {
 	user := currentUser(r)
 	lang := h.resolveLanguage(r, user)
@@ -161,6 +240,7 @@ func (h *Handler) handleIndex(w http.ResponseWriter, r *http.Request) {
 		UserJSON:        toJSON(userView),
 		Languages:       languageOptions(lang),
 		WebAuthnEnabled: h.webauthn != nil,
+		AssetVersion:    h.assetVersion,
 	}
 
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
