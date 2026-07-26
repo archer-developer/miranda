@@ -4,6 +4,7 @@
 import * as ws from "./ws.js";
 import * as router from "./router.js";
 import * as nav from "./nav.js";
+import * as theme from "./theme.js";
 import * as chat from "./screens/chat.js";
 import * as history from "./screens/history.js";
 import * as memory from "./screens/memory.js";
@@ -11,6 +12,7 @@ import * as logs from "./screens/logs.js";
 import * as profile from "./screens/profile.js";
 
 nav.init();
+theme.init(document.getElementById("theme-toggle"));
 
 router.register("#/chat", chat);
 router.register("#/history", history);

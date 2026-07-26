@@ -4,50 +4,73 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>Miranda</title>
+  <script>
+    // Sets the .dark class on <html> synchronously, before the stylesheet
+    // below even starts loading, so the page never flashes the wrong theme
+    // for a split second. Deliberately not an ES module (those are always
+    // deferred) and duplicated in login.html (see that template) since the
+    // two pages don't share a layout. Keep STORAGE_KEY in sync with
+    // static/js/theme.js by hand if it ever changes.
+    (function () {
+      try {
+        var STORAGE_KEY = "miranda-theme";
+        var stored = localStorage.getItem(STORAGE_KEY);
+        var dark = stored ? stored === "dark" : window.matchMedia("(prefers-color-scheme: dark)").matches;
+        document.documentElement.classList.toggle("dark", dark);
+      } catch (e) {
+        /* Storage/matchMedia can throw in restricted contexts; falling
+           through leaves the light theme (the unconditional default). */
+      }
+    })();
+  </script>
   <link rel="icon" type="image/svg+xml" href="/static/v{{.AssetVersion}}/brand/icon.svg" />
   <link rel="alternate icon" type="image/png" href="/static/v{{.AssetVersion}}/brand/icon.png" />
   <link rel="stylesheet" href="/static/v{{.AssetVersion}}/css/styles.css" />
 </head>
-<body class="h-full bg-slate-950 text-slate-100 antialiased">
-  <a href="#app" class="sr-only focus-visible:not-sr-only focus-visible:fixed focus-visible:left-4 focus-visible:top-4 focus-visible:z-50 focus-visible:rounded-lg focus-visible:bg-indigo-500 focus-visible:px-4 focus-visible:py-2 focus-visible:text-sm focus-visible:font-medium focus-visible:text-white">
+<body class="h-full bg-(--color-bg) text-(--color-text) antialiased">
+  <a href="#app" class="sr-only focus-visible:not-sr-only focus-visible:fixed focus-visible:left-4 focus-visible:top-4 focus-visible:z-50 focus-visible:rounded-lg focus-visible:bg-(--color-accent) focus-visible:px-4 focus-visible:py-2 focus-visible:text-sm focus-visible:font-medium focus-visible:text-white">
     {{.Strings.skip_to_content}}
   </a>
 
   <div class="flex h-full flex-col">
-    <header class="relative z-40 border-b border-slate-800/70 bg-slate-950/80 backdrop-blur supports-[backdrop-filter]:bg-slate-950/60">
+    <header class="relative z-40 border-b border-(--color-border) bg-(--color-bg)/80 backdrop-blur supports-[backdrop-filter]:bg-(--color-bg)/60">
       <div class="mx-auto flex max-w-7xl items-center justify-between gap-3 px-4 py-3 sm:px-6">
         <a href="#/chat" class="flex items-center gap-2.5 rounded-lg py-1 transition-opacity hover:opacity-80">
-          <img src="/static/v{{.AssetVersion}}/brand/icon.svg" alt="" class="h-8 w-8 rounded-full ring-2 ring-slate-100" />
-          <span class="text-base font-semibold tracking-tight text-white">Miranda</span>
+          <img src="/static/v{{.AssetVersion}}/brand/icon.svg" alt="" class="h-8 w-8 rounded-full ring-2 ring-(--color-border-strong)" />
+          <span class="text-base font-semibold tracking-tight text-(--color-text)">Miranda</span>
         </a>
 
         <nav id="nav-links" aria-label="{{.Strings.nav_primary_label}}" class="hidden items-center gap-1 text-sm sm:flex"></nav>
 
         <div class="flex items-center gap-2 sm:gap-3">
-          <div class="flex items-center gap-2 rounded-full border border-slate-800/80 bg-slate-900/40 px-2.5 py-1.5 sm:px-3">
-            <span id="ws-dot" class="h-2 w-2 shrink-0 animate-pulse-soft rounded-full bg-slate-600" title="{{.Strings.ws_connecting}}"></span>
-            <span id="ws-status" class="hidden text-xs font-medium text-slate-400 md:inline">{{.Strings.ws_connecting}}</span>
+          <div class="flex items-center gap-2 rounded-full border border-(--color-border) bg-(--color-surface)/40 px-2.5 py-1.5 sm:px-3">
+            <span id="ws-dot" class="h-2 w-2 shrink-0 animate-pulse-soft rounded-full bg-(--color-text-faint)" title="{{.Strings.ws_connecting}}"></span>
+            <span id="ws-status" class="hidden text-xs font-medium text-(--color-text-muted) md:inline">{{.Strings.ws_connecting}}</span>
           </div>
 
-          <div class="hidden items-center gap-0.5 rounded-full border border-slate-800 bg-slate-900/40 p-0.5 text-xs lg:flex">
+          <div class="hidden items-center gap-0.5 rounded-full border border-(--color-border) bg-(--color-surface)/40 p-0.5 text-xs lg:flex">
             {{range .Languages}}
-            <a href="/set-lang?lang={{.Code}}&next=/" class="rounded-full px-2.5 py-1 font-medium transition-colors {{if .Active}}bg-slate-800 text-white{{else}}text-slate-500 hover:text-slate-300{{end}}">{{.Label}}</a>
+            <a href="/set-lang?lang={{.Code}}&next=/" class="rounded-full px-2.5 py-1 font-medium transition-colors {{if .Active}}bg-(--color-surface-2) text-(--color-text){{else}}text-(--color-text-faint) hover:text-(--color-text-muted){{end}}">{{.Label}}</a>
             {{end}}
           </div>
 
-          <a href="#/profile" class="hidden min-h-11 items-center gap-2 rounded-full pl-1 pr-3 text-sm transition-colors hover:bg-slate-900 sm:flex">
+          <button id="theme-toggle" type="button"
+                  class="inline-flex h-11 w-11 items-center justify-center rounded-lg text-(--color-text-muted) transition-colors hover:bg-(--color-surface-2) hover:text-(--color-text) focus-visible:outline-none">
+          </button>
+
+          <a href="#/profile" class="hidden min-h-11 items-center gap-2 rounded-full pl-1 pr-3 text-sm transition-colors hover:bg-(--color-surface-2) sm:flex">
             {{if .User.Avatar}}
-            <img src="{{.User.Avatar}}" alt="" class="h-7 w-7 rounded-full object-cover ring-1 ring-slate-800" />
+            <img src="{{.User.Avatar}}" alt="" class="h-7 w-7 rounded-full object-cover ring-1 ring-(--color-border)" />
             {{else}}
-            <span class="flex h-7 w-7 items-center justify-center rounded-full bg-slate-800 text-slate-400">
+            <span class="flex h-7 w-7 items-center justify-center rounded-full bg-(--color-surface-2) text-(--color-text-faint)">
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="h-4 w-4" aria-hidden="true"><circle cx="12" cy="8" r="4"/><path d="M4 20c0-4 4-6 8-6s8 2 8 6"/></svg>
             </span>
             {{end}}
-            <span class="font-medium text-slate-200">{{.User.DisplayName}}</span>
+            <span class="font-medium text-(--color-text)">{{.User.DisplayName}}</span>
           </a>
 
           <button id="nav-burger" type="button"
-                  class="inline-flex h-11 w-11 items-center justify-center rounded-lg text-slate-300 transition-colors hover:bg-slate-900 focus-visible:outline-none sm:hidden"
+                  class="inline-flex h-11 w-11 items-center justify-center rounded-lg text-(--color-text-muted) transition-colors hover:bg-(--color-surface-2) hover:text-(--color-text) focus-visible:outline-none sm:hidden"
                   aria-label="{{.Strings.nav_menu_toggle}}" aria-expanded="false" aria-controls="nav-drawer">
             <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="h-5 w-5">
               <path d="M3.75 6.75h16.5M3.75 12h16.5M3.75 17.25h16.5" />
@@ -57,16 +80,16 @@
       </div>
 
       <div id="nav-drawer"
-           class="drawer-closed absolute inset-x-0 top-full flex origin-top flex-col gap-4 border-b border-slate-800/70 bg-slate-950/95 p-4 shadow-xl shadow-black/30 backdrop-blur transition-[opacity,transform] duration-200 ease-out sm:hidden"
+           class="drawer-closed absolute inset-x-0 top-full flex origin-top flex-col gap-4 border-b border-(--color-border) bg-(--color-bg)/95 p-4 shadow-xl shadow-black/10 backdrop-blur transition-[opacity,transform] duration-200 ease-out sm:hidden"
            role="menu" aria-hidden="true">
         <nav id="nav-links-mobile" aria-label="{{.Strings.nav_primary_label}}" class="flex flex-col gap-1 text-sm"></nav>
-        <div class="flex items-center gap-4 border-t border-slate-800/70 pt-4 text-xs text-slate-500">
+        <div class="flex items-center gap-4 border-t border-(--color-border) pt-4 text-xs text-(--color-text-faint)">
           {{range .Languages}}
-          <a href="/set-lang?lang={{.Code}}&next=/" class="font-medium {{if .Active}}text-slate-100{{else}}hover:text-slate-300{{end}}">{{.Label}}</a>
+          <a href="/set-lang?lang={{.Code}}&next=/" class="font-medium {{if .Active}}text-(--color-text){{else}}hover:text-(--color-text-muted){{end}}">{{.Label}}</a>
           {{end}}
         </div>
         <form method="POST" action="/logout">
-          <button type="submit" class="flex w-full items-center gap-2 rounded-lg border border-slate-800 px-3 py-2.5 text-left text-sm font-medium text-slate-300 transition-colors hover:border-red-900/60 hover:bg-red-950/30 hover:text-red-300">
+          <button type="submit" class="flex w-full items-center gap-2 rounded-lg border border-(--color-border) px-3 py-2.5 text-left text-sm font-medium text-(--color-text-muted) transition-colors hover:border-(--color-danger-border) hover:bg-(--color-danger-bg) hover:text-(--color-danger-text)">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="h-4 w-4" aria-hidden="true"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" y1="12" x2="9" y2="12"/></svg>
             {{.Strings.logout_button}}
           </button>

@@ -6,6 +6,8 @@
   "nav_profile": "Profile",
   "nav_primary_label": "Primary navigation",
   "nav_menu_toggle": "Menu",
+  "theme_toggle_dark": "Switch to dark theme",
+  "theme_toggle_light": "Switch to light theme",
   "skip_to_content": "Skip to content",
   "ws_connecting": "connecting…",
   "ws_connected": "connected",

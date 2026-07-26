@@ -1,13 +1,43 @@
 @import "tailwindcss";
 
+/* Tailwind v4's `dark:` variant defaults to `prefers-color-scheme`. Miranda
+   now has a user-clickable theme toggle (see static/js/theme.js), so `dark:`
+   utilities need to key off a `.dark` class placed on <html> instead — the
+   toggle adds/removes that class, and a small inline script in each
+   template's <head> sets it synchronously before first paint (reading
+   localStorage, falling back to prefers-color-scheme) to avoid a flash of
+   the wrong theme. `&:where(.dark, .dark *)` matches the class itself or
+   anything nested under it, mirroring Tailwind's own prefers-color-scheme
+   variant semantics. */
+@custom-variant dark (&:where(.dark, .dark *));
+
 /*
  * Design tokens and hand-rolled primitives for Miranda's dashboard.
  *
- * The dashboard is dark-only by design (a household control surface, not a
- * public site that needs to respect OS light/dark preference), so this file
- * doesn't branch on prefers-color-scheme — it commits to one restrained
- * slate + indigo palette (see the frontend-designer persona doc) and keeps
- * every screen consistent with it rather than reaching for new hues.
+ * The dashboard supports both a light and a dark theme, switched by the
+ * header/login-page toggle (static/js/theme.js) and persisted in
+ * localStorage. Colors are NOT hardcoded per-utility with scattered `dark:`
+ * variants — with ~10 files (2 templates + JS screen modules) building
+ * markup independently, hand-pairing every `bg-slate-*`/`text-slate-*` with
+ * a matching `dark:` variant everywhere would be extremely easy to leave
+ * gaps in. Instead every screen references a small set of *semantic*
+ * custom properties (`--color-bg`, `--color-surface`, `--color-text`, …)
+ * defined once below, with light values as the default (`:root`) and dark
+ * overrides scoped under `.dark`. Markup uses Tailwind v4's arbitrary-value
+ * shorthand to consume them, e.g. `bg-(--color-surface)` or, with an
+ * opacity modifier exactly like a stock color utility, `bg-(--color-surface)/60`.
+ *
+ * These are plain CSS custom properties, not `@theme` entries — putting
+ * `--color-bg`/`--color-text` etc. in `@theme` would also register
+ * Tailwind utilities named after them (`bg-bg`, `text-text`, …), which is
+ * exactly the awkward doubling the arbitrary-value approach avoids.
+ *
+ * Both ramps intentionally reuse Tailwind's own palette (`var(--color-slate-900)`
+ * etc., already exposed as CSS variables by `@import "tailwindcss"` above)
+ * rather than inventing new hex values, so the whole palette stays
+ * traceable to Tailwind's documented scale. The accent (indigo) and status
+ * hues (red/amber/emerald) stay the same family in both themes — only the
+ * exact shade shifts to keep contrast comfortable against each background.
  *
  * Font stack: intentionally system-native (no @font-face / Google Fonts
  * <link>). Miranda runs on a home LAN and the dashboard should render
@@ -95,32 +125,123 @@
 }
 
 @layer base {
-  html {
+  /* Light theme (default — no .dark class on <html>). A faint slate-50
+     canvas rather than pure white so the white `--color-surface` cards
+     actually read as elevated instead of blending into the page. */
+  :root {
+    color-scheme: light;
+
+    --color-bg: var(--color-slate-50);
+    --color-surface: var(--color-white);
+    --color-surface-2: var(--color-slate-100);
+    --color-border: var(--color-slate-200);
+    --color-border-strong: var(--color-slate-300);
+    --color-text: var(--color-slate-900);
+    --color-text-muted: var(--color-slate-600);
+    --color-text-faint: var(--color-slate-500);
+
+    /* Accent stays the same indigo family in both themes (one restrained
+       accent color, per the persona doc). `--color-accent` is the solid
+       brand color used for filled buttons/bubbles/badges — kept identical
+       in both themes since white-on-indigo-500 already reads fine against
+       either surface. `--color-accent-emphasis` is for accent used *as*
+       text/border color directly against the page (links, focus rings,
+       input focus borders) — indigo-500 text on white is a touch light for
+       AA body-text contrast, so light mode borrows the darker indigo-600
+       there while dark mode keeps the brighter indigo-400. */
+    --color-accent: var(--color-indigo-500);
+    --color-accent-hover: var(--color-indigo-400);
+    --color-accent-active: var(--color-indigo-600);
+    --color-accent-emphasis: var(--color-indigo-600);
+
+    --color-danger-bg: var(--color-red-50);
+    --color-danger-border: var(--color-red-200);
+    --color-danger-text: var(--color-red-700);
+    --color-danger-icon: var(--color-red-600);
+
+    --color-warning-bg: var(--color-amber-500);
+    --color-warning-text: var(--color-amber-700);
+    --color-warning-dot: var(--color-amber-500);
+
+    /* emerald-600 (~3.6:1 on this bg) fails AA for the small "Live" badge
+       text (logs.js) — emerald-700 clears 4.5:1. */
+    --color-success-text: var(--color-emerald-700);
+    --color-success-dot: var(--color-emerald-500);
+  }
+
+  /* Dark theme. Base background is slate-900, not slate-950 — the previous
+     near-black canvas was deliberately softened by one full step on the
+     whole neutral ramp (bg/surface/border all move one shade lighter than
+     before), which keeps every existing surface-over-surface relationship
+     intact instead of just patching the outermost background. The text
+     ramp is bumped a notch too (300/400 instead of the original 400/500-600)
+     because the softer, lighter background reduces contrast for light text
+     sitting on it — slate-500 "faint" text against slate-900 dips to
+     ~3.8:1, under the 4.5:1 AA threshold for body text, so the faint tier
+     moved to slate-400 (~7:1) to stay comfortably accessible. */
+  .dark {
     color-scheme: dark;
+
+    --color-bg: var(--color-slate-900);
+    --color-surface: var(--color-slate-800);
+    --color-surface-2: var(--color-slate-700);
+    --color-border: var(--color-slate-700);
+    --color-border-strong: var(--color-slate-600);
+    --color-text: var(--color-slate-100);
+    --color-text-muted: var(--color-slate-300);
+    --color-text-faint: var(--color-slate-400);
+
+    --color-accent: var(--color-indigo-500);
+    --color-accent-hover: var(--color-indigo-400);
+    --color-accent-active: var(--color-indigo-600);
+    --color-accent-emphasis: var(--color-indigo-400);
+
+    --color-danger-bg: var(--color-red-950);
+    --color-danger-border: var(--color-red-900);
+    --color-danger-text: var(--color-red-300);
+    --color-danger-icon: var(--color-red-400);
+
+    --color-warning-bg: var(--color-amber-500);
+    --color-warning-text: var(--color-amber-400);
+    --color-warning-dot: var(--color-amber-400);
+
+    --color-success-text: var(--color-emerald-400);
+    --color-success-dot: var(--color-emerald-400);
   }
 
   /* A visible, on-brand focus ring everywhere — keyboard navigation must
      never be harder to see than a mouse hover (WCAG 2.4.7). Scoped to
      :focus-visible so mouse clicks don't show a ring, only keyboard/AT
-     navigation does. */
+     navigation does. Uses --color-accent-emphasis so the ring stays
+     readable against either theme's background. */
   :focus-visible {
-    outline: 2px solid var(--color-indigo-400);
+    outline: 2px solid var(--color-accent-emphasis);
     outline-offset: 2px;
     border-radius: 4px;
   }
 
+  /* Selection needs its own light/dark split rather than one fixed
+     translucent tint: a fixed accent-at-40%-over-transparent highlight with
+     forced white text (the previous, dark-only approach) reads fine over a
+     dark page but leaves white text nearly invisible on the pale lavender
+     that same highlight produces over a light page. */
   ::selection {
-    background-color: color-mix(in oklab, var(--color-indigo-500) 40%, transparent);
+    background-color: color-mix(in oklab, var(--color-accent) 25%, var(--color-surface));
+    color: var(--color-text);
+  }
+  .dark ::selection {
+    background-color: color-mix(in oklab, var(--color-accent) 45%, black);
     color: white;
   }
 
   /* Firefox thin-scrollbar hint; the .scrollbar-thin utility below covers
      the WebKit/Blink side. Applied globally since every scrollable pane in
      this dashboard (chat, logs, history, memory textarea) wants the same
-     restrained scrollbar rather than the platform default. */
+     restrained scrollbar rather than the platform default. Themed via the
+     border tokens so it adapts with everything else. */
   * {
     scrollbar-width: thin;
-    scrollbar-color: var(--color-slate-700) transparent;
+    scrollbar-color: var(--color-border-strong) transparent;
   }
 }
 
@@ -133,25 +254,26 @@
     background: transparent;
   }
   .scrollbar-thin::-webkit-scrollbar-thumb {
-    background-color: var(--color-slate-700);
+    background-color: var(--color-border-strong);
     border-radius: 9999px;
     border: 2px solid transparent;
     background-clip: content-box;
   }
   .scrollbar-thin::-webkit-scrollbar-thumb:hover {
-    background-color: var(--color-slate-600);
+    background-color: var(--color-text-faint);
   }
 
   /* Skeleton loading bars: a soft gradient sweep instead of Tailwind's
      default opacity-pulse — reads as "content is arriving" rather than
-     "something is broken and blinking." */
+     "something is broken and blinking." Themed so the sweep stays visible
+     against either theme's surface-2 base. */
   .skeleton {
     border-radius: 6px;
-    background-color: var(--color-slate-800);
+    background-color: var(--color-surface-2);
     background-image: linear-gradient(
       90deg,
       transparent 0%,
-      color-mix(in oklab, var(--color-slate-500) 35%, transparent) 50%,
+      color-mix(in oklab, var(--color-text-faint) 35%, transparent) 50%,
       transparent 100%
     );
     background-size: 200% 100%;

@@ -13,7 +13,7 @@ const NAV_ITEMS = [
   { hash: "#/profile", key: "nav_profile", fallback: "Profile", icon: "profile" },
 ];
 
-// router.js owns toggling bg-slate-800/text-white/text-slate-400 and
+// router.js owns toggling the active-link surface/text tokens and
 // aria-current on the active link (it already knows the current hash); this
 // module only owns the classes that never change once rendered.
 //
@@ -23,8 +23,8 @@ const NAV_ITEMS = [
 // a real touch target too, not just the burger-menu/drawer variant.
 function linkClass(mobile) {
   return mobile
-    ? "flex min-h-11 items-center gap-3 rounded-lg px-3 py-2.5 text-slate-400 transition-colors hover:bg-slate-900 hover:text-slate-200"
-    : "flex min-h-11 items-center gap-2 rounded-full px-3.5 text-slate-400 transition-colors hover:bg-slate-900 hover:text-slate-200";
+    ? "flex min-h-11 items-center gap-3 rounded-lg px-3 py-2.5 text-(--color-text-muted) transition-colors hover:bg-(--color-surface-2) hover:text-(--color-text)"
+    : "flex min-h-11 items-center gap-2 rounded-full px-3.5 text-(--color-text-muted) transition-colors hover:bg-(--color-surface-2) hover:text-(--color-text)";
 }
 
 function renderLinks(container, mobile) {

@@ -33,7 +33,7 @@ function appendLine(ev) {
 
   emptyEl.classList.add("hidden");
   const line = document.createElement("div");
-  line.className = "whitespace-pre-wrap break-words py-0.5 text-slate-300";
+  line.className = "whitespace-pre-wrap break-words py-0.5 text-(--color-text-muted)";
   line.textContent = ev.message;
   paneEl.appendChild(line);
 
@@ -58,9 +58,9 @@ function selectTab(source, container) {
   activeSource = source;
   container.querySelectorAll("[data-log-tab]").forEach((btn) => {
     const isActive = btn.dataset.logTab === source;
-    btn.classList.toggle("bg-slate-800", isActive);
-    btn.classList.toggle("text-white", isActive);
-    btn.classList.toggle("text-slate-400", !isActive);
+    btn.classList.toggle("bg-(--color-surface-2)", isActive);
+    btn.classList.toggle("text-(--color-text)", isActive);
+    btn.classList.toggle("text-(--color-text-faint)", !isActive);
     btn.setAttribute("aria-selected", String(isActive));
   });
   renderActiveTab();
@@ -71,21 +71,21 @@ export function mount(container) {
     <div class="flex h-full flex-col">
       <div class="mx-auto flex w-full max-w-5xl flex-1 flex-col px-4 py-6 sm:px-6 sm:py-8">
         <div class="flex items-center justify-between gap-3">
-          <h1 class="text-2xl font-semibold tracking-tight text-white">${t("nav_logs", "Logs")}</h1>
-          <span class="flex items-center gap-1.5 text-xs font-medium text-emerald-400">
-            <span class="h-1.5 w-1.5 rounded-full bg-emerald-400 animate-pulse-soft"></span>${t("logs_live_badge", "Live")}
+          <h1 class="text-2xl font-semibold tracking-tight text-(--color-text)">${t("nav_logs", "Logs")}</h1>
+          <span class="flex items-center gap-1.5 text-xs font-medium text-(--color-success-text)">
+            <span class="h-1.5 w-1.5 rounded-full bg-(--color-success-dot) animate-pulse-soft"></span>${t("logs_live_badge", "Live")}
           </span>
         </div>
 
-        <div role="tablist" aria-label="${t("nav_logs", "Logs")}" class="mt-5 flex gap-1 rounded-lg border border-slate-800 bg-slate-900/40 p-1 text-sm">
+        <div role="tablist" aria-label="${t("nav_logs", "Logs")}" class="mt-5 flex gap-1 rounded-lg border border-(--color-border) bg-(--color-surface)/40 p-1 text-sm">
           ${TABS.map(
             (tab) =>
               `<button type="button" role="tab" data-log-tab="${tab.source}" aria-selected="false"
-                 class="flex-1 rounded-md px-3 py-1.5 font-medium text-slate-400 transition-colors focus-visible:outline-none">${t(tab.key, tab.fallback)}</button>`,
+                 class="flex-1 rounded-md px-3 py-1.5 font-medium text-(--color-text-faint) transition-colors focus-visible:outline-none">${t(tab.key, tab.fallback)}</button>`,
           ).join("")}
         </div>
 
-        <div id="logs-pane" class="scrollbar-thin relative mt-3 min-h-0 flex-1 overflow-y-auto rounded-xl border border-slate-800 bg-slate-950/60 p-4 font-mono text-xs leading-relaxed"></div>
+        <div id="logs-pane" class="scrollbar-thin relative mt-3 min-h-0 flex-1 overflow-y-auto rounded-xl border border-(--color-border) bg-(--color-bg)/60 p-4 font-mono text-xs leading-relaxed"></div>
       </div>
     </div>`;
 
@@ -94,8 +94,8 @@ export function mount(container) {
   emptyEl = document.createElement("div");
   emptyEl.className = "flex h-full flex-col items-center justify-center gap-3 py-12 text-center font-sans";
   emptyEl.innerHTML = `
-    <span class="flex h-10 w-10 items-center justify-center rounded-full bg-slate-900 text-slate-600">${icon("logs", "h-4 w-4")}</span>
-    <p class="text-sm text-slate-500">${t("logs_empty", "No log lines yet.")}</p>`;
+    <span class="flex h-10 w-10 items-center justify-center rounded-full bg-(--color-surface-2) text-(--color-text-faint)">${icon("logs", "h-4 w-4")}</span>
+    <p class="text-sm text-(--color-text-faint)">${t("logs_empty", "No log lines yet.")}</p>`;
 
   container.querySelectorAll("[data-log-tab]").forEach((btn) => {
     btn.addEventListener("click", () => selectTab(btn.dataset.logTab, container));
@@ -105,9 +105,9 @@ export function mount(container) {
   // render directly instead.
   container.querySelectorAll("[data-log-tab]").forEach((btn) => {
     const isActive = btn.dataset.logTab === activeSource;
-    btn.classList.toggle("bg-slate-800", isActive);
-    btn.classList.toggle("text-white", isActive);
-    btn.classList.toggle("text-slate-400", !isActive);
+    btn.classList.toggle("bg-(--color-surface-2)", isActive);
+    btn.classList.toggle("text-(--color-text)", isActive);
+    btn.classList.toggle("text-(--color-text-faint)", !isActive);
     btn.setAttribute("aria-selected", String(isActive));
   });
   renderActiveTab();

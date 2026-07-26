@@ -22,14 +22,14 @@ function bubble(role, text, timeIso) {
   const b = document.createElement("div");
   b.className =
     role === "user"
-      ? "max-w-[85%] whitespace-pre-wrap rounded-2xl rounded-br-md bg-indigo-500 px-4 py-2.5 text-sm leading-relaxed text-white sm:max-w-[75%]"
-      : "max-w-[85%] whitespace-pre-wrap rounded-2xl rounded-bl-md border border-slate-800 bg-slate-900/70 px-4 py-2.5 text-sm leading-relaxed text-slate-100 sm:max-w-[75%]";
+      ? "max-w-[85%] whitespace-pre-wrap rounded-2xl rounded-br-md bg-(--color-accent) px-4 py-2.5 text-sm leading-relaxed text-white sm:max-w-[75%]"
+      : "max-w-[85%] whitespace-pre-wrap rounded-2xl rounded-bl-md border border-(--color-border) bg-(--color-surface)/70 px-4 py-2.5 text-sm leading-relaxed text-(--color-text) sm:max-w-[75%]";
   b.textContent = text;
   wrap.appendChild(b);
 
   if (timeIso) {
     const time = document.createElement("span");
-    time.className = "mt-1 px-1 text-xs text-slate-300";
+    time.className = "mt-1 px-1 text-xs text-(--color-text-muted)";
     time.textContent = formatTime(timeIso);
     wrap.appendChild(time);
   }
@@ -42,10 +42,10 @@ function typingIndicator() {
   const wrap = document.createElement("div");
   wrap.className = "flex items-start";
   wrap.innerHTML = `
-    <div class="flex items-center gap-1 rounded-2xl rounded-bl-md border border-slate-800 bg-slate-900/70 px-4 py-3">
-      <span class="h-1.5 w-1.5 animate-bounce rounded-full bg-slate-500 [animation-delay:-0.3s]"></span>
-      <span class="h-1.5 w-1.5 animate-bounce rounded-full bg-slate-500 [animation-delay:-0.15s]"></span>
-      <span class="h-1.5 w-1.5 animate-bounce rounded-full bg-slate-500"></span>
+    <div class="flex items-center gap-1 rounded-2xl rounded-bl-md border border-(--color-border) bg-(--color-surface)/70 px-4 py-3">
+      <span class="h-1.5 w-1.5 animate-bounce rounded-full bg-(--color-text-faint) [animation-delay:-0.3s]"></span>
+      <span class="h-1.5 w-1.5 animate-bounce rounded-full bg-(--color-text-faint) [animation-delay:-0.15s]"></span>
+      <span class="h-1.5 w-1.5 animate-bounce rounded-full bg-(--color-text-faint)"></span>
     </div>`;
   return wrap;
 }
@@ -57,7 +57,7 @@ function errorBubble(detail, onRetry) {
   const wrap = document.createElement("div");
   wrap.className = "flex flex-col items-start gap-2";
   wrap.innerHTML = `
-    <div class="flex max-w-[85%] items-start gap-2 rounded-2xl rounded-bl-md border border-red-900/50 bg-red-950/30 px-4 py-2.5 text-sm text-red-300 sm:max-w-[75%]">
+    <div class="flex max-w-[85%] items-start gap-2 rounded-2xl rounded-bl-md border border-(--color-danger-border) bg-(--color-danger-bg) px-4 py-2.5 text-sm text-(--color-danger-text) sm:max-w-[75%]">
       ${icon("alert-circle", "mt-0.5 h-4 w-4 shrink-0")}
       <span class="detail-text"></span>
     </div>`;
@@ -69,7 +69,7 @@ function errorBubble(detail, onRetry) {
   const retry = document.createElement("button");
   retry.type = "button";
   retry.className =
-    "ml-1 rounded-md px-2 py-1 text-xs font-medium text-slate-400 underline decoration-slate-700 underline-offset-2 transition-colors hover:text-slate-200 focus-visible:outline-none";
+    "ml-1 rounded-md px-2 py-1 text-xs font-medium text-(--color-text-muted) underline decoration-(--color-border-strong) underline-offset-2 transition-colors hover:text-(--color-text) focus-visible:outline-none";
   retry.textContent = t("retry_button", "Try again");
   retry.addEventListener("click", onRetry);
   wrap.appendChild(retry);
@@ -81,10 +81,10 @@ function emptyState() {
   wrap.dataset.emptyState = "true";
   wrap.className = "flex flex-col items-center gap-3 px-6 py-20 text-center";
   wrap.innerHTML = `
-    <span class="flex h-12 w-12 items-center justify-center rounded-full bg-slate-900 text-slate-600">${icon("chat", "h-5 w-5")}</span>
+    <span class="flex h-12 w-12 items-center justify-center rounded-full bg-(--color-surface-2) text-(--color-text-faint)">${icon("chat", "h-5 w-5")}</span>
     <div class="space-y-1">
-      <p class="text-sm font-medium text-slate-300">${t("chat_empty_title", "Start a conversation")}</p>
-      <p class="max-w-xs text-sm text-slate-500">${t("chat_empty_subtitle", "Ask Miranda anything — she remembers context across the conversation.")}</p>
+      <p class="text-sm font-medium text-(--color-text-muted)">${t("chat_empty_title", "Start a conversation")}</p>
+      <p class="max-w-xs text-sm text-(--color-text-faint)">${t("chat_empty_subtitle", "Ask Miranda anything — she remembers context across the conversation.")}</p>
     </div>`;
   return wrap;
 }
@@ -216,17 +216,17 @@ export function mount(container) {
           <div id="chat-messages" class="flex flex-col gap-4" aria-live="polite" aria-relevant="additions"></div>
         </div>
       </div>
-      <div class="border-t border-slate-800/70 bg-slate-950/70">
+      <div class="border-t border-(--color-border) bg-(--color-bg)/70">
         <form id="chat-form" class="mx-auto flex max-w-3xl items-end gap-2 px-4 py-3 sm:px-6">
           <label for="chat-text" class="sr-only">${t("chat_placeholder", "Message Miranda…")}</label>
           <textarea id="chat-text" rows="1" placeholder="${t("chat_placeholder", "Message Miranda…")}"
-            class="scrollbar-thin max-h-40 flex-1 resize-none rounded-xl border border-slate-700 bg-slate-900/60 px-4 py-2.5 text-sm text-slate-100 transition-colors placeholder:text-slate-500 hover:border-slate-600 focus:border-indigo-400 focus:outline-none focus-visible:outline-none"></textarea>
+            class="scrollbar-thin max-h-40 flex-1 resize-none rounded-xl border border-(--color-border-strong) bg-(--color-surface)/60 px-4 py-2.5 text-sm text-(--color-text) transition-colors placeholder:text-(--color-text-faint) hover:border-(--color-text-faint) focus:border-(--color-accent-emphasis) focus:outline-none focus-visible:outline-none"></textarea>
           <button type="submit" id="chat-send" aria-label="${t("send_button", "Send")}"
-            class="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl bg-indigo-500 text-white transition-colors hover:bg-indigo-400 focus-visible:outline-none active:bg-indigo-600 disabled:cursor-not-allowed disabled:opacity-60">
+            class="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl bg-(--color-accent) text-white transition-colors hover:bg-(--color-accent-hover) focus-visible:outline-none active:bg-(--color-accent-active) disabled:cursor-not-allowed disabled:opacity-60">
             ${icon("send", "h-4 w-4")}
           </button>
         </form>
-        <p class="mx-auto hidden max-w-3xl px-4 pb-3 text-xs text-slate-600 sm:block sm:px-6">${t("chat_hint", "Enter to send · Shift+Enter for a new line")}</p>
+        <p class="mx-auto hidden max-w-3xl px-4 pb-3 text-xs text-(--color-text-faint) sm:block sm:px-6">${t("chat_hint", "Enter to send · Shift+Enter for a new line")}</p>
       </div>
     </div>`;
 

@@ -6,6 +6,8 @@
   "nav_profile": "Профиль",
   "nav_primary_label": "Основная навигация",
   "nav_menu_toggle": "Меню",
+  "theme_toggle_dark": "Переключить на тёмную тему",
+  "theme_toggle_light": "Переключить на светлую тему",
   "skip_to_content": "Перейти к содержимому",
   "ws_connecting": "подключение…",
   "ws_connected": "подключено",

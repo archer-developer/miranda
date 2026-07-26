@@ -65,16 +65,16 @@ export function mount(container) {
     <div class="scrollbar-thin h-full overflow-y-auto">
       <form id="memory-form" class="mx-auto flex h-full max-w-3xl flex-col px-4 py-6 sm:px-6 sm:py-8">
         <div class="mb-1 flex items-center justify-between gap-3">
-          <h1 class="text-2xl font-semibold tracking-tight text-white">${t("memory_title", "My memory")}</h1>
+          <h1 class="text-2xl font-semibold tracking-tight text-(--color-text)">${t("memory_title", "My memory")}</h1>
           <button type="submit" id="memory-save"
-            class="flex items-center gap-2 rounded-lg bg-indigo-500 px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-indigo-400 focus-visible:outline-none active:bg-indigo-600 disabled:cursor-not-allowed disabled:opacity-60">
+            class="flex items-center gap-2 rounded-lg bg-(--color-accent) px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-(--color-accent-hover) focus-visible:outline-none active:bg-(--color-accent-active) disabled:cursor-not-allowed disabled:opacity-60">
             ${t("memory_save_button", "Save")}
           </button>
         </div>
-        <p class="mb-4 text-sm text-slate-500">${t("memory_hint", "Miranda fills this in automatically as she learns about you. Edit or delete anything that's wrong.")}</p>
+        <p class="mb-4 text-sm text-(--color-text-faint)">${t("memory_hint", "Miranda fills this in automatically as she learns about you. Edit or delete anything that's wrong.")}</p>
         <label for="memory-text" class="sr-only">${t("memory_title", "My memory")}</label>
         <textarea id="memory-text" placeholder="${t("memory_placeholder", "Nothing remembered yet.")}"
-          class="scrollbar-thin min-h-[16rem] flex-1 resize-none rounded-xl border border-slate-700 bg-slate-900/40 px-4 py-3.5 font-mono text-sm leading-relaxed text-slate-100 transition-colors placeholder:text-slate-600 hover:border-slate-600 focus:border-indigo-400 focus:outline-none focus-visible:outline-none"></textarea>
+          class="scrollbar-thin min-h-[16rem] flex-1 resize-none rounded-xl border border-(--color-border-strong) bg-(--color-surface)/40 px-4 py-3.5 font-mono text-sm leading-relaxed text-(--color-text) transition-colors placeholder:text-(--color-text-faint) hover:border-(--color-text-faint) focus:border-(--color-accent-emphasis) focus:outline-none focus-visible:outline-none"></textarea>
       </form>
     </div>`;
 

@@ -52,9 +52,9 @@ function render() {
 
   document.querySelectorAll("[data-nav-link]").forEach((el) => {
     const active = el.getAttribute("href") === hash;
-    el.classList.toggle("bg-slate-800", active);
-    el.classList.toggle("text-white", active);
-    el.classList.toggle("text-slate-400", !active);
+    el.classList.toggle("bg-(--color-surface-2)", active);
+    el.classList.toggle("text-(--color-text)", active);
+    el.classList.toggle("text-(--color-text-muted)", !active);
     if (active) {
       el.setAttribute("aria-current", "page");
     } else {

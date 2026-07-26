@@ -30,9 +30,9 @@ function ensureRegion() {
 }
 
 const VARIANTS = {
-  success: { icon: "check", accent: "text-emerald-400" },
-  error: { icon: "alert-circle", accent: "text-red-400" },
-  info: { icon: "check", accent: "text-slate-400" },
+  success: { icon: "check", accent: "text-(--color-success-text)" },
+  error: { icon: "alert-circle", accent: "text-(--color-danger-icon)" },
+  info: { icon: "check", accent: "text-(--color-text-muted)" },
 };
 
 /**
@@ -46,12 +46,12 @@ export function showToast(message, type = "info") {
 
   const el = document.createElement("div");
   el.className =
-    "animate-slide-up pointer-events-auto flex w-full max-w-sm items-start gap-3 rounded-xl border border-slate-800 bg-slate-900/95 p-4 shadow-lg shadow-black/20 backdrop-blur";
+    "animate-slide-up pointer-events-auto flex w-full max-w-sm items-start gap-3 rounded-xl border border-(--color-border) bg-(--color-surface)/95 p-4 shadow-lg shadow-black/10 backdrop-blur";
   el.innerHTML = `
     <span class="${variant.accent} shrink-0">${icon(variant.icon, "h-5 w-5")}</span>
-    <p class="message-text min-w-0 flex-1 text-sm leading-snug text-slate-200"></p>
+    <p class="message-text min-w-0 flex-1 text-sm leading-snug text-(--color-text)"></p>
     <button type="button" aria-label="${t("close_button", "Close")}"
-      class="shrink-0 rounded-md p-1 text-slate-500 transition-colors hover:bg-slate-800 hover:text-slate-300 focus-visible:outline-none">
+      class="shrink-0 rounded-md p-1 text-(--color-text-faint) transition-colors hover:bg-(--color-surface-2) hover:text-(--color-text-muted) focus-visible:outline-none">
       ${icon("close", "h-4 w-4")}
     </button>`;
   // `message` can carry a caught exception's text (e.g. from a failed
