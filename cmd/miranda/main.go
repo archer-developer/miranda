@@ -396,5 +396,5 @@ func buildTTSDispatcher(cfg config.TTSConfig, logger *slog.Logger) *tts.Dispatch
 		return nil
 	}
 	haClient := ha.New(baseURL, os.Getenv("HA_TOKEN"))
-	return tts.NewDispatcher(cfg, haClient)
+	return tts.NewDispatcher(cfg, haClient, logger)
 }

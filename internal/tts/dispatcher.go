@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"time"
 
 	"github.com/archer-developer/miranda/internal/config"
@@ -23,16 +24,21 @@ type HAClient interface {
 
 // Dispatcher sends assistant replies to the configured TTS channel(s).
 type Dispatcher struct {
-	cfg config.TTSConfig
-	ha  HAClient
+	cfg    config.TTSConfig
+	ha     HAClient
+	logger *slog.Logger
 	// sem is a size-1 semaphore serializing Speak calls to the shared
 	// speaker(s) — see Speak.
 	sem chan struct{}
 }
 
-// NewDispatcher builds a Dispatcher from the agent's TTS config.
-func NewDispatcher(cfg config.TTSConfig, haClient HAClient) *Dispatcher {
-	return &Dispatcher{cfg: cfg, ha: haClient, sem: make(chan struct{}, 1)}
+// NewDispatcher builds a Dispatcher from the agent's TTS config. logger may
+// be nil (defaults to slog.Default()).
+func NewDispatcher(cfg config.TTSConfig, haClient HAClient, logger *slog.Logger) *Dispatcher {
+	if logger == nil {
+		logger = slog.Default()
+	}
+	return &Dispatcher{cfg: cfg, ha: haClient, logger: logger, sem: make(chan struct{}, 1)}
 }
 
 // Speak sends a complete piece of text to the primary channel (Yandex
@@ -116,18 +122,24 @@ func (d *Dispatcher) waitIdle(ctx context.Context, entity string) error {
 	// idle, or playback may have failed silently upstream. Either way, fall
 	// through to the idle-wait below, which is a harmless no-op if the
 	// chunk already finished (or never started).
-	err := d.pollUntil(ctx, entity, interval, startTimeout, func(s string) bool { return s != "idle" })
+	err := d.pollUntil(ctx, entity, "leave idle", interval, startTimeout, func(s string) bool { return s != "idle" })
 	if err != nil && !errors.Is(err, errPollTimeout) {
 		return err
 	}
+	if errors.Is(err, errPollTimeout) {
+		d.logger.Warn("tts: entity never left idle within playback_start_timeout_ms, proceeding anyway", "entity", entity, "timeout", startTimeout)
+	}
 
-	return d.pollUntil(ctx, entity, interval, 0, func(s string) bool { return s == "idle" })
+	return d.pollUntil(ctx, entity, "return to idle", interval, 0, func(s string) bool { return s == "idle" })
 }
 
 // pollUntil polls entity's state every interval until match(state) is true,
 // ctx is cancelled, or (if timeout > 0) timeout elapses without a match —
-// in which case it returns errPollTimeout.
-func (d *Dispatcher) pollUntil(ctx context.Context, entity string, interval, timeout time.Duration, match func(state string) bool) error {
+// in which case it returns errPollTimeout. label identifies which of
+// waitIdle's two phases this is, purely for the state-transition log lines
+// below — the tool for seeing exactly what a real device reported when a
+// wait doesn't resolve the way we expect.
+func (d *Dispatcher) pollUntil(ctx context.Context, entity, label string, interval, timeout time.Duration, match func(state string) bool) error {
 	var deadline <-chan time.Time
 	if timeout > 0 {
 		timer := time.NewTimer(timeout)
@@ -137,10 +149,15 @@ func (d *Dispatcher) pollUntil(ctx context.Context, entity string, interval, tim
 
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
+	lastState := ""
 	for {
 		state, err := d.ha.State(ctx, entity)
 		if err != nil {
 			return fmt.Errorf("tts: poll state of %s: %w", entity, err)
+		}
+		if state != lastState {
+			d.logger.Info("tts: entity state", "entity", entity, "waiting_for", label, "state", state)
+			lastState = state
 		}
 		if match(state) {
 			return nil

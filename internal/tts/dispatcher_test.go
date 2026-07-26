@@ -56,7 +56,7 @@ func yandexConfig(entities ...string) config.TTSConfig {
 
 func TestDispatcher_SpeaksChunkedTextToEachEntity(t *testing.T) {
 	ha := &fakeHA{}
-	d := NewDispatcher(yandexConfig("media_player.kitchen", "media_player.bedroom"), ha)
+	d := NewDispatcher(yandexConfig("media_player.kitchen", "media_player.bedroom"), ha, nil)
 
 	err := d.Speak(context.Background(), "Первое предложение. Второе предложение.")
 	require.NoError(t, err)
@@ -70,7 +70,7 @@ func TestDispatcher_SpeaksChunkedTextToEachEntity(t *testing.T) {
 
 func TestDispatcher_ReturnsErrorWhenYandexFails(t *testing.T) {
 	ha := &fakeHA{failDomain: "media_player"}
-	d := NewDispatcher(yandexConfig("media_player.kitchen"), ha)
+	d := NewDispatcher(yandexConfig("media_player.kitchen"), ha, nil)
 
 	err := d.Speak(context.Background(), "привет")
 	require.Error(t, err)
@@ -126,7 +126,7 @@ func TestDispatcher_WaitsForPlaybackToStartBeforePollingForIdle(t *testing.T) {
 			PlaybackStartTimeoutMS: 50,
 		},
 	}
-	d := NewDispatcher(cfg, ha)
+	d := NewDispatcher(cfg, ha, nil)
 
 	err := d.Speak(context.Background(), "Первое предложение. Второе предложение.")
 	require.NoError(t, err)
@@ -173,7 +173,7 @@ func (f *gatedHA) State(ctx context.Context, entityID string) (string, error) { 
 // transitions caused by the *other* call — hanging one or both indefinitely.
 func TestDispatcher_SerializesConcurrentSpeakCalls(t *testing.T) {
 	ha := &gatedHA{gate: make(chan struct{}), entered: make(chan struct{})}
-	d := NewDispatcher(yandexConfig("media_player.kitchen"), ha)
+	d := NewDispatcher(yandexConfig("media_player.kitchen"), ha, nil)
 
 	firstDone := make(chan struct{})
 	go func() {
@@ -203,7 +203,7 @@ func TestDispatcher_SerializesConcurrentSpeakCalls(t *testing.T) {
 
 func TestDispatcher_ErrorsWhenNoChannelConfigured(t *testing.T) {
 	cfg := config.TTSConfig{Primary: "yandex_station"} // no entities configured
-	d := NewDispatcher(cfg, &fakeHA{})
+	d := NewDispatcher(cfg, &fakeHA{}, nil)
 
 	err := d.Speak(context.Background(), "привет")
 	require.Error(t, err)

@@ -72,7 +72,7 @@ func newTestOrchestratorWithTTS(t *testing.T, provider *llmtest.FakeProvider) (*
 		},
 		SpeakReplyTool: true,
 	}
-	dispatcher := tts.NewDispatcher(ttsCfg, ha)
+	dispatcher := tts.NewDispatcher(ttsCfg, ha, nil)
 
 	o := NewOrchestrator(
 		r, mcp.NewManager(), h, mem, dispatcher, hub.New(100), nil,
