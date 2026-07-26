@@ -26,6 +26,18 @@
   <link rel="icon" type="image/svg+xml" href="/static/v{{.AssetVersion}}/brand/icon.svg" />
   <link rel="alternate icon" type="image/png" href="/static/v{{.AssetVersion}}/brand/icon.png" />
   <link rel="stylesheet" href="/static/v{{.AssetVersion}}/css/styles.css" />
+
+  <!-- PWA: install metadata. manifest.webmanifest is served unversioned
+       (see webui.go) because its own icon URLs can't embed the
+       content-derived AssetVersion hash without creating a circular
+       dependency on that hash. -->
+  <link rel="manifest" href="/static/manifest.webmanifest" />
+  <meta name="theme-color" content="#160b2e" />
+  <link rel="apple-touch-icon" href="/static/v{{.AssetVersion}}/brand/apple-touch-icon.png" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+  <meta name="apple-mobile-web-app-title" content="Miranda" />
+  <meta name="mobile-web-app-capable" content="yes" />
 </head>
 <body class="h-full bg-(--color-bg) text-(--color-text) antialiased">
   <a href="#app" class="sr-only focus-visible:not-sr-only focus-visible:fixed focus-visible:left-4 focus-visible:top-4 focus-visible:z-50 focus-visible:rounded-lg focus-visible:bg-(--color-accent) focus-visible:px-4 focus-visible:py-2 focus-visible:text-sm focus-visible:font-medium focus-visible:text-white">

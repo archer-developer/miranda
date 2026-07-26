@@ -18,6 +18,7 @@ import (
 	"html/template"
 	"io"
 	"io/fs"
+	"mime"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -36,6 +37,13 @@ var templatesFS embed.FS
 
 //go:embed static
 var staticFS embed.FS
+
+func init() {
+	// .webmanifest isn't in Go's (or every OS's) built-in mime table, and
+	// without this http.FileServerFS falls back to application/octet-stream,
+	// which some browsers refuse to treat as a valid PWA manifest.
+	_ = mime.AddExtensionType(".webmanifest", "application/manifest+json")
+}
 
 const defaultDialogLimit = 20
 
