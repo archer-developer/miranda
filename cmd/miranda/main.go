@@ -205,7 +205,7 @@ func run(cfg config.Config, logger *slog.Logger, eventHub *hub.Hub) error {
 	defaultUserID := "debug"
 	orchestrator := httpapi.NewOrchestrator(
 		llmRouter, toolManager, historyStore, memoryStore, dispatcher, eventHub, usersRegistry,
-		cfg.Agent, cfg.Memory, cfg.LLM.Escalation, cfg.TTS.YandexStation.ChunkMaxChars, defaultUserID,
+		cfg.Agent, cfg.Memory, cfg.TTS, cfg.LLM.Escalation, cfg.TTS.YandexStation.ChunkMaxChars, defaultUserID,
 	)
 
 	var webHandler http.Handler

@@ -6,8 +6,8 @@ living inside HA. It compiles to a single self-contained binary (no Docker,
 no cgo), routes conversations across multiple LLM providers, keeps dialog
 history in embedded SQLite and long-term memory as per-user markdown files,
 calls tools over MCP (Home Assistant and others), and speaks replies through
-Yandex Station or HA's native TTS. See `docs/PROJECT_PREREQUISITES.md` for
-the full design rationale.
+Yandex Station. See `docs/PROJECT_PREREQUISITES.md` for the full design
+rationale.
 
 ```
 HA (voice input, MCP tools, TTS output) <---> Miranda Agent Service <---> LLM providers
@@ -80,9 +80,9 @@ cp .env.example .env
 Key sections: `llm.providers` (the fallback chain — one entry per model
 backend, `type: openai_compat` for any OpenAI Chat Completions compatible
 server — Ollama, vLLM, LM Studio, OpenRouter — or `type: anthropic` for
-Claude), `mcp.servers` (tool sources, see below), `tts` (Yandex Station /
-HA TTS routing), `storage` (SQLite + memory file paths), `users` (web UI
-login accounts — see **Web UI** below).
+Claude), `mcp.servers` (tool sources, see below), `tts` (Yandex Station
+routing), `storage` (SQLite + memory file paths), `users` (web UI login
+accounts — see **Web UI** below).
 
 ## Logging
 
@@ -217,11 +217,11 @@ separate HA integrations — don't mix them up.
    Restart Miranda. A server that fails to connect is logged and skipped
    rather than blocking startup — check Miranda's logs or the web UI's live
    log tail if HA's tools aren't showing up.
-5. **(Optional) TTS needs its own HA credentials.** Yandex Station / HA TTS
-   dispatch talks to HA's REST API directly (`media_player.play_media`,
-   `tts.speak`) and needs its own token via the `HA_BASE_URL` / `HA_TOKEN`
-   environment variables. You can reuse the token from step 3, or create a
-   separate one to revoke independently.
+5. **(Optional) TTS needs its own HA credentials.** Yandex Station dispatch
+   talks to HA's REST API directly (`media_player.play_media`) and needs its
+   own token via the `HA_BASE_URL` / `HA_TOKEN` environment variables. You
+   can reuse the token from step 3, or create a separate one to revoke
+   independently.
 
 ### Connecting Miranda to Home Assistant (thin conversation client)
 
@@ -250,11 +250,11 @@ your HA host, e.g. `http://192.168.1.50:8787`.
    pipeline's STT step is now forwarded to Miranda (`source: ha_assist`);
    its reply is spoken back through that pipeline's TTS step *and*
    dispatched to Miranda's own Yandex Station channel — `ha_assist` is the
-   only source that gets the direct TTS dispatch, since it's the only
-   channel with a physical speaker to answer through. Every other channel
-   (the web UI, a future Telegram bot/mobile app) only ever gets its reply
-   back over its own connection (the HTTP response) — it never triggers the
-   shared Yandex Station.
+   only source that gets the direct TTS dispatch automatically, since it's
+   the only channel with a physical speaker to answer through. Every other
+   channel (the web UI, a future Telegram bot/mobile app) only gets its
+   reply back over its own connection (the HTTP response) unless the user
+   explicitly asks to hear it, via the model's `speak_reply` tool.
 5. The integration ships with English, Russian, and Belarusian translations
    for its config flow; Home Assistant picks the one matching your user
    profile's language automatically.
@@ -300,7 +300,7 @@ internal/llm/           provider-agnostic chat interface
 internal/mcp/            MCP Client/Manager abstraction, multi-server tool-name prefixing
 internal/history/        SQLite (pure-Go, no cgo) dialog log with FTS5 search
 internal/memory/         per-user markdown long-term memory
-internal/tts/            sentence-boundary chunking + Yandex Station/HA TTS dispatch
+internal/tts/            sentence-boundary chunking + Yandex Station dispatch
 internal/ha/             minimal Home Assistant REST client (for TTS dispatch)
 internal/webui/          Tailwind v4 dashboard, embedded via go:embed
 test/integration/        black-box agent-loop test (fake LLM + fake MCP, real everything else)

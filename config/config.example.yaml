@@ -93,13 +93,10 @@ tts:
     entities: [] # media_player.* entity ids of your Yandex Stations
     chunk_max_chars: 100 # Yandex Station's real-world text limit, even locally
     idle_poll_interval_ms: 300
-  # Home Assistant's own TTS pipeline, used only if the primary channel is
-  # disabled or fails.
-  fallback: ha_tts
-  ha_tts:
-    enabled: false
-    entity_id: "" # e.g. tts.piper
-    target_player: "" # e.g. media_player.satellite1
+  # Lets the model call speak_reply to dispatch this turn's reply to
+  # tts.primary even when the request didn't arrive via ha_assist, when the
+  # user explicitly asks to hear the answer read aloud.
+  speak_reply_tool: true
 
 web_ui:
   enabled: true

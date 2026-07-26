@@ -27,24 +27,12 @@ func NewDispatcher(cfg config.TTSConfig, haClient HAClient) *Dispatcher {
 }
 
 // Speak sends a complete piece of text to the primary channel (Yandex
-// Station, chunked to its character limit), falling back to Home Assistant's
-// native TTS if the primary channel is unusable and a fallback is configured.
+// Station, chunked to its character limit).
 func (d *Dispatcher) Speak(ctx context.Context, text string) error {
-	if d.cfg.Primary == "yandex_station" && len(d.cfg.YandexStation.Entities) > 0 {
-		err := d.speakYandexStation(ctx, text)
-		if err == nil {
-			return nil
-		}
-		if !d.cfg.HATTS.Enabled {
-			return err
-		}
-		// fall through to the HA TTS fallback below
+	if d.cfg.Primary != "yandex_station" || len(d.cfg.YandexStation.Entities) == 0 {
+		return fmt.Errorf("tts: no usable channel configured (primary=%s)", d.cfg.Primary)
 	}
-
-	if d.cfg.HATTS.Enabled {
-		return d.speakHATTS(ctx, text)
-	}
-	return fmt.Errorf("tts: no usable channel configured (primary=%s, fallback enabled=%v)", d.cfg.Primary, d.cfg.HATTS.Enabled)
+	return d.speakYandexStation(ctx, text)
 }
 
 // speakYandexStation sends text, chunked to the station's character limit,
@@ -102,12 +90,4 @@ func (d *Dispatcher) waitIdle(ctx context.Context, entity string) error {
 			return ctx.Err()
 		}
 	}
-}
-
-func (d *Dispatcher) speakHATTS(ctx context.Context, text string) error {
-	return d.ha.CallService(ctx, "tts", "speak", map[string]any{
-		"entity_id":              d.cfg.HATTS.EntityID,
-		"media_player_entity_id": d.cfg.HATTS.TargetPlayer,
-		"message":                text,
-	})
 }

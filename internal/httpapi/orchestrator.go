@@ -29,6 +29,8 @@ const endConversationToolName = "end_conversation"
 
 const forgetConversationToolName = "forget_conversation"
 
+const speakReplyToolName = "speak_reply"
+
 // InputRequest is the body of POST /api/v1/input — the single entry point
 // for both Home Assistant's thin conversation agent and manual curl/web UI
 // commands, distinguished by Source.
@@ -67,6 +69,7 @@ type Orchestrator struct {
 	hub              *hub.Hub
 	users            *users.Registry // may be nil: falls back to the raw user id in the system prompt
 	memoryCfg        config.MemoryConfig
+	ttsCfg           config.TTSConfig
 	escalationCfg    config.EscalationConfig
 	chunkMaxChars    int
 	defaultUserID    string
@@ -84,6 +87,7 @@ func NewOrchestrator(
 	usersRegistry *users.Registry,
 	agentCfg config.AgentConfig,
 	memoryCfg config.MemoryConfig,
+	ttsCfg config.TTSConfig,
 	escalationCfg config.EscalationConfig,
 	chunkMaxChars int,
 	defaultUserID string,
@@ -97,6 +101,7 @@ func NewOrchestrator(
 		hub:              h,
 		users:            usersRegistry,
 		memoryCfg:        memoryCfg,
+		ttsCfg:           ttsCfg,
 		escalationCfg:    escalationCfg,
 		chunkMaxChars:    chunkMaxChars,
 		defaultUserID:    defaultUserID,

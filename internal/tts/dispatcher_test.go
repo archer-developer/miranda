@@ -64,22 +64,7 @@ func TestDispatcher_SpeaksChunkedTextToEachEntity(t *testing.T) {
 	require.Equal(t, "Первое предложение.", ha.calls[0].data["media_content_id"])
 }
 
-func TestDispatcher_FallsBackToHATTSWhenYandexFails(t *testing.T) {
-	ha := &fakeHA{failDomain: "media_player"}
-	cfg := yandexConfig("media_player.kitchen")
-	cfg.HATTS = config.HATTSConfig{Enabled: true, EntityID: "tts.piper", TargetPlayer: "media_player.satellite1"}
-	d := NewDispatcher(cfg, ha)
-
-	err := d.Speak(context.Background(), "привет")
-	require.NoError(t, err)
-
-	require.Len(t, ha.calls, 1)
-	require.Equal(t, "tts", ha.calls[0].domain)
-	require.Equal(t, "speak", ha.calls[0].service)
-	require.Equal(t, "привет", ha.calls[0].data["message"])
-}
-
-func TestDispatcher_ReturnsErrorWhenYandexFailsAndNoFallback(t *testing.T) {
+func TestDispatcher_ReturnsErrorWhenYandexFails(t *testing.T) {
 	ha := &fakeHA{failDomain: "media_player"}
 	d := NewDispatcher(yandexConfig("media_player.kitchen"), ha)
 
@@ -88,7 +73,7 @@ func TestDispatcher_ReturnsErrorWhenYandexFailsAndNoFallback(t *testing.T) {
 }
 
 func TestDispatcher_ErrorsWhenNoChannelConfigured(t *testing.T) {
-	cfg := config.TTSConfig{Primary: "yandex_station"} // no entities, no fallback
+	cfg := config.TTSConfig{Primary: "yandex_station"} // no entities configured
 	d := NewDispatcher(cfg, &fakeHA{})
 
 	err := d.Speak(context.Background(), "привет")

@@ -193,19 +193,15 @@ type YandexStationConfig struct {
 	IdlePollIntervalMS int      `yaml:"idle_poll_interval_ms"`
 }
 
-// HATTSConfig configures the optional Home Assistant native TTS fallback.
-type HATTSConfig struct {
-	Enabled      bool   `yaml:"enabled"`
-	EntityID     string `yaml:"entity_id"`
-	TargetPlayer string `yaml:"target_player"`
-}
-
-// TTSConfig selects and configures the primary/fallback TTS channels.
+// TTSConfig selects and configures the TTS channel.
 type TTSConfig struct {
 	Primary       string              `yaml:"primary"`
 	YandexStation YandexStationConfig `yaml:"yandex_station"`
-	Fallback      string              `yaml:"fallback"`
-	HATTS         HATTSConfig         `yaml:"ha_tts"`
+	// SpeakReplyTool controls whether the speak_reply tool (see
+	// internal/httpapi) is offered to the model — it lets the model dispatch
+	// this turn's reply to the primary TTS channel even on a source other
+	// than ha_assist, when the user explicitly asks to hear the answer.
+	SpeakReplyTool bool `yaml:"speak_reply_tool"`
 }
 
 // WebUIConfig controls the embedded monitoring dashboard.
@@ -278,10 +274,7 @@ func Default() Config {
 				ChunkMaxChars:      100,
 				IdlePollIntervalMS: 300,
 			},
-			Fallback: "",
-			HATTS: HATTSConfig{
-				Enabled: false,
-			},
+			SpeakReplyTool: true,
 		},
 		Agent: AgentConfig{
 			SystemPrompt: `Тебя зовут Miranda. Ты домашний голосовой ассистент.

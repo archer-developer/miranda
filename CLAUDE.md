@@ -108,17 +108,21 @@ generated (and, via TTS, already spoke).
 
 The reply always goes back over the HTTP response to whoever called
 `POST /api/v1/input` — that's the only output path for the web UI, and for
-any future channel (Telegram bot, mobile app). `req.Source` is threaded
-through `Handle` → `runAgentLoop` → `streamOneTurn` → `speakChunks`
-(`agent_loop.go`) purely to gate one *additional* output: `speakChunks`
-only calls `o.tts.Speak` when `source == users.SourceHAAssist`
-("`ha_assist`", the HA thin conversation client's fixed source value — see
-`internal/users`). That's deliberate, not incidental: `ha_assist` is the
-one channel with a physical speaker to answer through, and HA's own Assist
-pipeline may *also* speak the same reply via its own TTS step — both firing
-for `ha_assist` is expected (see README). Every other source must never
-trigger the shared Yandex Station, or testing via the web UI's debug box
-would make it talk unprompted.
+any future channel (Telegram bot, mobile app). `req.Source` and the current
+turn's `turnControl` are threaded through `Handle` → `runAgentLoop` →
+`streamOneTurn` → `speakChunks` (`agent_loop.go`) purely to gate one
+*additional* output: `speakChunks` only calls `o.tts.Speak` (always
+`tts.primary` — Yandex Station, see `internal/tts`) when
+`source == users.SourceHAAssist` ("`ha_assist`", the HA thin conversation
+client's fixed source value — see `internal/users`) or the `speak_reply`
+tool was called this turn (`control.speakRequested`). `ha_assist` firing is
+deliberate, not incidental: it's the one channel with a physical speaker to
+answer through, and HA's own Assist pipeline may *also* speak the same reply
+via its own TTS step — both firing for `ha_assist` is expected (see
+README). Every other source stays silent unless the model explicitly calls
+`speak_reply` because the user asked to hear the answer — otherwise it must
+never trigger the shared Yandex Station, or testing via the web UI's debug
+box would make it talk unprompted.
 
 ### Session lifecycle
 
@@ -181,6 +185,7 @@ Config flags below live on `config.MemoryConfig` unless otherwise noted.
 | `search_history` | `SearchHistoryTool` | Full-text search the user's *ended* conversations; returns each match's stored `Summary` (not raw messages) — this is what answers "помнишь, мы говорили о...". |
 | `end_conversation` | `EndConversationTool` | Close the current session right now (idle timeout would eventually do this anyway) — triggered by an explicit "start a new conversation" request. |
 | `forget_conversation` | `ForgetConversationTool` | Delete the current conversation entirely, no memory write — triggered by an explicit "forget this / start from scratch" request. |
+| `speak_reply` | `config.TTSConfig.SpeakReplyTool` | Dispatch this turn's reply to `tts.primary` even on a source other than `ha_assist` — triggered by an explicit "read/say that aloud" request (see Response routing above). |
 | `escalate_to_claude` (name configurable) | `config.EscalationConfig.Enabled` | Hand a hard turn to a stronger provider; intercepted at the router level, transparent to the Orchestrator. |
 | MCP tools (e.g. `ha_*`) | `config.MCPConfig.Servers[].Enabled` | Home Assistant and other MCP-exposed device/service actions. |
 

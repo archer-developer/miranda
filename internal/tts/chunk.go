@@ -1,6 +1,6 @@
-// Package tts turns assistant text into speech on the configured channel:
-// Yandex Station (primary, via HA media_player.play_media) or Home
-// Assistant's native TTS (configurable fallback).
+// Package tts turns assistant text into speech via Yandex Station (the
+// primary and only channel, dispatched through HA's
+// media_player.play_media).
 package tts
 
 import "unicode"

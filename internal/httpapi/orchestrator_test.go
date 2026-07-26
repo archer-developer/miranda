@@ -55,19 +55,22 @@ func newTestOrchestratorWithTTS(t *testing.T, provider *llmtest.FakeProvider) (*
 	require.NoError(t, err)
 
 	ha := &fakeHAClient{}
-	dispatcher := tts.NewDispatcher(config.TTSConfig{
+	ttsCfg := config.TTSConfig{
 		Primary: "yandex_station",
 		YandexStation: config.YandexStationConfig{
 			Entities:           []string{"media_player.kitchen"},
 			ChunkMaxChars:      100,
 			IdlePollIntervalMS: 1,
 		},
-	}, ha)
+		SpeakReplyTool: true,
+	}
+	dispatcher := tts.NewDispatcher(ttsCfg, ha)
 
 	o := NewOrchestrator(
 		r, mcp.NewManager(), h, mem, dispatcher, hub.New(100), nil,
 		config.AgentConfig{},
 		config.MemoryConfig{ExplicitTool: true},
+		ttsCfg,
 		config.EscalationConfig{Enabled: true, ToolName: "escalate_to_claude", TargetProvider: provider.Name()},
 		100, "debug",
 	)
@@ -96,6 +99,7 @@ func newTestOrchestrator(t *testing.T, provider *llmtest.FakeProvider, mcpClient
 			ExplicitTool: true, AutoSummarize: false, SearchHistoryTool: true,
 			EndConversationTool: true, ForgetConversationTool: true,
 		},
+		config.TTSConfig{},
 		config.EscalationConfig{Enabled: true, ToolName: "escalate_to_claude", TargetProvider: provider.Name()},
 		100, "debug",
 	)
@@ -177,6 +181,7 @@ func TestOrchestrator_EscalationIsTransparentToOrchestrator(t *testing.T) {
 	o := NewOrchestrator(r, mcp.NewManager(), h, mem, nil, hub.New(100), nil,
 		config.AgentConfig{},
 		config.MemoryConfig{ExplicitTool: true},
+		config.TTSConfig{},
 		config.EscalationConfig{Enabled: true, ToolName: "escalate_to_claude", TargetProvider: "claude"},
 		100, "debug")
 
@@ -326,6 +331,22 @@ func TestOrchestrator_SpeaksViaTTSForHAAssistSource(t *testing.T) {
 
 	// The reply must also have been spoken to the configured Yandex Station —
 	// ha_assist is the one channel with a physical speaker to answer through.
+	require.NotEmpty(t, ha.calls)
+}
+
+func TestOrchestrator_SpeaksViaTTSWhenSpeakReplyToolIsCalledOnNonHASource(t *testing.T) {
+	provider := llmtest.New("local",
+		llmtest.Response{ToolCall: &llm.ToolCall{ID: "call-1", Name: "speak_reply", Arguments: `{}`}},
+		llmtest.Response{Text: "Хорошо, слушай."},
+	)
+	o, ha := newTestOrchestratorWithTTS(t, provider)
+
+	resp, err := o.Handle(context.Background(), InputRequest{Source: "cli", UserID: "alex", Text: "озвучь мне это"})
+	require.NoError(t, err)
+	require.Equal(t, "Хорошо, слушай.", resp.Reply)
+
+	// The user's explicit request must still reach the Yandex Station even
+	// though this turn didn't arrive via ha_assist.
 	require.NotEmpty(t, ha.calls)
 }
 

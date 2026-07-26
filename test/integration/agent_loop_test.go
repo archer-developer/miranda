@@ -61,6 +61,7 @@ func newHarness(t *testing.T, provider *llmtest.FakeProvider, mcpClients ...mcp.
 			ExplicitTool: true, AutoSummarize: false,
 			EndConversationTool: true, ForgetConversationTool: true,
 		},
+		config.TTSConfig{},
 		escalation, 100, "debug",
 	)
 

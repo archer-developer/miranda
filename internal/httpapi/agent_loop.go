@@ -26,6 +26,11 @@ const searchHistoryLimit = 8
 type turnControl struct {
 	endRequested    bool
 	forgetRequested bool
+	// speakRequested is set by the speak_reply tool: the model's signal that
+	// the user explicitly asked to hear this turn's reply aloud, so
+	// speakChunks should dispatch to TTS even on a source other than
+	// ha_assist.
+	speakRequested bool
 }
 
 // resolveConversation either continues the user's currently open
@@ -170,6 +175,16 @@ func (o *Orchestrator) availableTools(ctx context.Context) ([]llm.ToolDef, error
 		})
 	}
 
+	if o.ttsCfg.SpeakReplyTool {
+		tools = append(tools, llm.ToolDef{
+			Name: speakReplyToolName,
+			Description: "Speak this turn's reply out loud, even though the request didn't arrive via the voice " +
+				"pipeline — use only when the user explicitly asks to hear the answer read aloud " +
+				"(e.g. \"озвучь это\", \"скажи вслух\", \"read that out loud\").",
+			Parameters: map[string]any{"type": "object", "properties": map[string]any{}},
+		})
+	}
+
 	if o.escalationCfg.Enabled {
 		tools = append(tools, llm.ToolDef{
 			Name:        o.escalationCfg.ToolName,
@@ -191,7 +206,7 @@ func (o *Orchestrator) runAgentLoop(ctx context.Context, userID, conversationID,
 	var providerUsed string
 
 	for i := 0; i < maxToolIterations; i++ {
-		text, toolCalls, err := o.streamOneTurn(ctx, source, messages, tools, &providerUsed)
+		text, toolCalls, err := o.streamOneTurn(ctx, source, control, messages, tools, &providerUsed)
 		if err != nil {
 			return "", "", err
 		}
@@ -215,7 +230,7 @@ func (o *Orchestrator) runAgentLoop(ctx context.Context, userID, conversationID,
 // streamOneTurn consumes one router.Chat stream: text deltas are pushed
 // through a tts.Accumulator so complete sentences get spoken as soon as
 // they're available, and tool calls are collected for the caller to execute.
-func (o *Orchestrator) streamOneTurn(ctx context.Context, source string, messages []llm.Message, tools []llm.ToolDef, providerUsed *string) (string, []llm.ToolCall, error) {
+func (o *Orchestrator) streamOneTurn(ctx context.Context, source string, control *turnControl, messages []llm.Message, tools []llm.ToolDef, providerUsed *string) (string, []llm.ToolCall, error) {
 	stream, err := o.router.Chat(ctx, llm.ChatRequest{Messages: messages, Tools: tools}, func(name string) { *providerUsed = name })
 	if err != nil {
 		return "", nil, fmt.Errorf("orchestrator: chat: %w", err)
@@ -231,31 +246,33 @@ func (o *Orchestrator) streamOneTurn(ctx context.Context, source string, message
 		}
 		if chunk.TextDelta != "" {
 			fullText += chunk.TextDelta
-			o.speakChunks(ctx, source, acc.Push(chunk.TextDelta))
+			o.speakChunks(ctx, source, control, acc.Push(chunk.TextDelta))
 		}
 		if chunk.ToolCall != nil {
 			toolCalls = append(toolCalls, *chunk.ToolCall)
 		}
 	}
-	o.speakChunks(ctx, source, acc.Flush())
+	o.speakChunks(ctx, source, control, acc.Flush())
 
 	return fullText, toolCalls, nil
 }
 
-// speakChunks dispatches each ready chunk to TTS, but only for turns that
-// arrived via Home Assistant's voice pipeline (source == ha_assist): that's
-// the one channel where the reply also needs to come out of a physical
-// speaker, separate from (and in addition to) the text reply HA's pipeline
-// itself may speak (see README). Every other channel — web UI, a future
-// Telegram bot or mobile app — already has its own output surface (the HTTP
-// response), so dispatching to the shared Yandex Station there would just
-// make it talk at you unprompted. TTS itself is best-effort: a dispatch
+// speakChunks dispatches each ready chunk to tts.primary, but only for turns
+// that either arrived via Home Assistant's voice pipeline (source ==
+// ha_assist: that's the one channel where the reply also needs to come out
+// of a physical speaker, separate from — and in addition to — the text
+// reply HA's pipeline itself may speak, see README) or where the
+// speak_reply tool was called this turn because the user explicitly asked
+// to hear the answer (control.speakRequested). Every other turn must never
+// trigger the shared Yandex Station, or testing via the web UI's debug box
+// would make it talk unprompted. TTS itself is best-effort: a dispatch
 // failure is logged to the hub but never fails the turn — a broken speaker
 // shouldn't stop the assistant from answering.
-func (o *Orchestrator) speakChunks(ctx context.Context, source string, chunks []string) {
+func (o *Orchestrator) speakChunks(ctx context.Context, source string, control *turnControl, chunks []string) {
+	voice := source == users.SourceHAAssist || control.speakRequested
 	for _, chunk := range chunks {
 		o.hub.Publish(hub.Event{Source: "assistant", Message: chunk})
-		if o.tts == nil || source != users.SourceHAAssist {
+		if o.tts == nil || !voice {
 			continue
 		}
 		if err := o.tts.Speak(ctx, chunk); err != nil {
@@ -312,6 +329,11 @@ func (o *Orchestrator) executeTool(ctx context.Context, userID string, tc llm.To
 	if tc.Name == forgetConversationToolName {
 		control.forgetRequested = true
 		return "conversation forgotten"
+	}
+
+	if tc.Name == speakReplyToolName {
+		control.speakRequested = true
+		return "will speak the reply aloud"
 	}
 
 	result, err := o.tools.Call(ctx, tc.Name, tc.Arguments)
