@@ -1,8 +1,10 @@
 package tts
 
 import (
+	"bytes"
 	"context"
 	"fmt"
+	"log/slog"
 	"sync"
 	"testing"
 	"time"
@@ -188,6 +190,37 @@ func TestDispatcher_ProceedsAfterEstimatedSpeechDurationWhenEntityNeverReportsId
 	// Both chunks must have gone out, in order — the dispatcher must not
 	// have hung waiting for "idle" after the first one.
 	require.Equal(t, []string{"Первое предложение.", "Второе предложение."}, ha.calls)
+}
+
+// TestDispatcher_LogsStatusHeartbeatWhileWaiting proves waitIdle's
+// once-a-second status heartbeat actually logs — a plain, fixed-cadence
+// timeline of what the entity reports, independent of the functional
+// (change-triggered) polling logged elsewhere, requested specifically to
+// make a real device's behavior unambiguous when a wait doesn't resolve the
+// way we expect.
+func TestDispatcher_LogsStatusHeartbeatWhileWaiting(t *testing.T) {
+	ha := &stuckPlayingHA{}
+	var buf bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&buf, nil))
+	cfg := config.TTSConfig{
+		Primary: "yandex_station",
+		YandexStation: config.YandexStationConfig{
+			Entities:               []string{"media_player.kitchen"},
+			ChunkMaxChars:          100,
+			IdlePollIntervalMS:     1,
+			PlaybackStartTimeoutMS: 1,
+			SpeechCharsPerSecond:   100000, // keep the estimated-speech-duration wait short
+			SpeechMarginMS:         50,
+		},
+	}
+	d := NewDispatcher(cfg, ha, logger)
+	d.statusLogInterval = 5 * time.Millisecond // real 1s cadence would make this test slow
+
+	err := d.Speak(context.Background(), "привет")
+	require.NoError(t, err)
+
+	require.Contains(t, buf.String(), "tts: status check")
+	require.Contains(t, buf.String(), "state=playing")
 }
 
 // gatedHA lets a test hold the first CallService call open (simulating a

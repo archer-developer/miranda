@@ -30,6 +30,10 @@ type Dispatcher struct {
 	// sem is a size-1 semaphore serializing Speak calls to the shared
 	// speaker(s) — see Speak.
 	sem chan struct{}
+	// statusLogInterval paces the unconditional status-heartbeat log in
+	// waitIdle (see logStatusHeartbeat) — a fixed 1s in production,
+	// overridable by tests so they don't have to run for real seconds.
+	statusLogInterval time.Duration
 }
 
 // NewDispatcher builds a Dispatcher from the agent's TTS config. logger may
@@ -38,7 +42,7 @@ func NewDispatcher(cfg config.TTSConfig, haClient HAClient, logger *slog.Logger)
 	if logger == nil {
 		logger = slog.Default()
 	}
-	return &Dispatcher{cfg: cfg, ha: haClient, logger: logger, sem: make(chan struct{}, 1)}
+	return &Dispatcher{cfg: cfg, ha: haClient, logger: logger, sem: make(chan struct{}, 1), statusLogInterval: time.Second}
 }
 
 // Speak sends a complete piece of text to the primary channel (Yandex
@@ -115,6 +119,26 @@ func (d *Dispatcher) speakYandexStation(ctx context.Context, text string) error 
 // the estimate is only a fallback ceiling for setups where that signal
 // never arrives.
 func (d *Dispatcher) waitIdle(ctx context.Context, entity, chunk string) error {
+	// Unconditional once-a-second heartbeat, independent of the functional
+	// poll interval below (which may be much faster, or may only log on
+	// change) — a plain, fixed-cadence timeline of exactly what the entity
+	// reports for as long as we're waiting on it, for diagnosing setups
+	// like the one that produced this file's other comments: nothing else
+	// here would show you it's *still* stuck on the same state a minute in.
+	// waitIdle joins on doneHeartbeat rather than just signaling stop and
+	// moving on, so the goroutine can never outlive this call (and touch
+	// d.logger/ctx after the caller considers the wait finished).
+	stopHeartbeat := make(chan struct{})
+	doneHeartbeat := make(chan struct{})
+	go func() {
+		defer close(doneHeartbeat)
+		d.logStatusHeartbeat(ctx, entity, stopHeartbeat)
+	}()
+	defer func() {
+		close(stopHeartbeat)
+		<-doneHeartbeat
+	}()
+
 	interval := time.Duration(d.cfg.YandexStation.IdlePollIntervalMS) * time.Millisecond
 	if interval <= 0 {
 		interval = 300 * time.Millisecond
@@ -145,6 +169,33 @@ func (d *Dispatcher) waitIdle(ctx context.Context, entity, chunk string) error {
 		return nil
 	}
 	return err
+}
+
+// logStatusHeartbeat logs entity's current state once every
+// d.statusLogInterval, unconditionally (whether or not it changed), until
+// stop is closed or ctx is done — a plain "yes, still checking, here's what
+// it says right now" timeline running alongside waitIdle's own
+// change-triggered logging.
+func (d *Dispatcher) logStatusHeartbeat(ctx context.Context, entity string, stop <-chan struct{}) {
+	start := time.Now()
+	ticker := time.NewTicker(d.statusLogInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ticker.C:
+			state, err := d.ha.State(ctx, entity)
+			elapsed := time.Since(start).Round(time.Second)
+			if err != nil {
+				d.logger.Warn("tts: status check failed", "entity", entity, "elapsed", elapsed, "error", err)
+				continue
+			}
+			d.logger.Info("tts: status check", "entity", entity, "elapsed", elapsed, "state", state)
+		case <-stop:
+			return
+		case <-ctx.Done():
+			return
+		}
+	}
 }
 
 // estimateSpeechDuration estimates how long the station takes to speak
