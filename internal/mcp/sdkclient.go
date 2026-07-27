@@ -2,9 +2,11 @@ package mcp
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 
+	"github.com/modelcontextprotocol/go-sdk/jsonrpc"
 	sdkmcp "github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/archer-developer/miranda/internal/llm"
@@ -42,11 +44,35 @@ func Connect(ctx context.Context, name, url, token string) (*SDKClient, error) {
 
 func (c *SDKClient) Name() string { return c.name }
 
+// Close implements Client, releasing this session's background keepalive
+// goroutine and its underlying HTTP/SSE connection. Safe to call more than
+// once (ClientSession.Close is idempotent).
+func (c *SDKClient) Close() error {
+	return c.session.Close()
+}
+
+// classifyErr wraps err with ErrDisconnected when it means the
+// session/transport itself is gone, and leaves it unwrapped when it's an
+// application-level RPC error (a *jsonrpc.Error response) — the server
+// answered, so the session is still alive, even though this one call failed.
+// The MCP Go SDK surfaces both cases through the same call signature, so
+// this is the one place that has to tell them apart.
+func classifyErr(err error) error {
+	if err == nil {
+		return nil
+	}
+	var rpcErr *jsonrpc.Error
+	if errors.As(err, &rpcErr) {
+		return err
+	}
+	return fmt.Errorf("%w: %v", ErrDisconnected, err)
+}
+
 // ListTools implements Client.
 func (c *SDKClient) ListTools(ctx context.Context) ([]llm.ToolDef, error) {
 	result, err := c.session.ListTools(ctx, nil)
 	if err != nil {
-		return nil, fmt.Errorf("mcp: list tools on %s: %w", c.name, err)
+		return nil, classifyErr(fmt.Errorf("mcp: list tools on %s: %w", c.name, err))
 	}
 
 	out := make([]llm.ToolDef, 0, len(result.Tools))
@@ -70,7 +96,7 @@ func (c *SDKClient) CallTool(ctx context.Context, name string, argumentsJSON str
 		Arguments: rawJSON(argumentsJSON),
 	})
 	if err != nil {
-		return "", fmt.Errorf("mcp: call %s on %s: %w", name, c.name, err)
+		return "", classifyErr(fmt.Errorf("mcp: call %s on %s: %w", name, c.name, err))
 	}
 
 	var text string

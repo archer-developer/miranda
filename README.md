@@ -280,9 +280,10 @@ separate HA integrations — don't mix them up.
          token_env: "HA_MCP_TOKEN"
          enabled: true
    ```
-   Restart Miranda. A server that fails to connect is logged and skipped
-   rather than blocking startup — check Miranda's logs or the web UI's live
-   log tail if HA's tools aren't showing up.
+   Restart Miranda. A server that fails to connect never blocks startup —
+   it's retried in the background (with backoff) until it comes up, with no
+   restart needed once it does. Check Miranda's logs or the web UI's live log
+   tail if HA's tools aren't showing up.
 5. **(Optional) TTS needs its own HA credentials.** Yandex Station dispatch
    talks to HA's REST API directly (`media_player.play_media`) and needs its
    own token via the `HA_BASE_URL` / `HA_TOKEN` environment variables. You
@@ -351,7 +352,7 @@ several tools in one turn).
 | Config flow shows "cannot_connect" | Wrong base URL, Miranda not running, or a network path issue between HA and Miranda's host. Test with `curl http://<host>:8787/healthz` from the HA host itself. |
 | Assist replies with "Не удалось связаться с Miranda" | Same as above, or Miranda returned a non-200 (check Miranda's logs — a 401 specifically means the bearer token in the integration doesn't match `server.auth_token`). |
 | Miranda's tool list from HA is missing an entity | That entity isn't toggled on under **Settings → Voice Assistants → Expose**. |
-| Miranda logs "mcp: failed to connect, skipping this server" for `ha` | Check the MCP Server integration is added in HA, the URL/port in `config.yaml` is correct, and `HA_MCP_TOKEN` is set and valid. |
+| Miranda logs "mcp: failed to connect, will retry" for `ha` | Check the MCP Server integration is added in HA, the URL/port in `config.yaml` is correct, and `HA_MCP_TOKEN` is set and valid. Miranda keeps retrying in the background, so `ha`'s tools appear automatically once this is fixed — no restart needed. |
 
 ---
 

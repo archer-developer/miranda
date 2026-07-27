@@ -94,3 +94,39 @@ func TestLoad_InvalidYAMLReturnsError(t *testing.T) {
 	_, err := Load(path)
 	require.Error(t, err)
 }
+
+func TestLoad_DuplicateEnabledMCPServerNameReturnsError(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	yamlContent := `
+mcp:
+  servers:
+    - name: ha
+      url: "http://localhost:8123/api/mcp"
+      enabled: true
+    - name: ha
+      url: "http://localhost:9999/api/mcp"
+      enabled: true
+`
+	require.NoError(t, os.WriteFile(path, []byte(yamlContent), 0o644))
+
+	_, err := Load(path)
+	require.Error(t, err)
+}
+
+func TestLoad_DuplicateNameAcrossOneDisabledServerIsFine(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	yamlContent := `
+mcp:
+  servers:
+    - name: ha
+      url: "http://localhost:8123/api/mcp"
+      enabled: true
+    - name: ha
+      url: "http://localhost:9999/api/mcp"
+      enabled: false
+`
+	require.NoError(t, os.WriteFile(path, []byte(yamlContent), 0o644))
+
+	_, err := Load(path)
+	require.NoError(t, err)
+}

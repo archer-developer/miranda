@@ -51,7 +51,7 @@ func newHarness(t *testing.T, provider *llmtest.FakeProvider, mcpClients ...mcp.
 	r, err := router.New([]llm.Provider{provider}, escalation)
 	require.NoError(t, err)
 
-	toolManager := mcp.NewManager(mcpClients...)
+	toolManager := mcp.NewManager(nil, mcpClients...)
 	eventHub := hub.New(200)
 
 	orchestrator := httpapi.NewOrchestrator(

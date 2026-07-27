@@ -117,13 +117,8 @@ func (o *Orchestrator) currentUserName(userID string) string {
 // agent's built-in tools (remember_this, and the escalation tool if enabled
 // — the router intercepts calls to it transparently, so it never reaches
 // executeTool).
-func (o *Orchestrator) availableTools(ctx context.Context) ([]llm.ToolDef, error) {
-	mcpTools, err := o.tools.Tools(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("orchestrator: list MCP tools: %w", err)
-	}
-
-	tools := append([]llm.ToolDef{}, mcpTools...)
+func (o *Orchestrator) availableTools(ctx context.Context) []llm.ToolDef {
+	tools := append([]llm.ToolDef{}, o.tools.Tools(ctx)...)
 
 	if o.memoryCfg.ExplicitTool {
 		tools = append(tools, llm.ToolDef{
@@ -230,7 +225,7 @@ func (o *Orchestrator) availableTools(ctx context.Context) ([]llm.ToolDef, error
 		})
 	}
 
-	return tools, nil
+	return tools
 }
 
 // runAgentLoop drives the model until it produces a final text-only reply:

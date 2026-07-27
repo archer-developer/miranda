@@ -60,6 +60,22 @@ const idleSweepInterval = time.Minute
 // comfortably above the WebAuthn library's own ~60s ceremony timeout.
 const webauthnCeremonyTTL = 2 * time.Minute
 
+// mcpConnectTimeout bounds a single MCP connection attempt (the initial
+// handshake), so a server that accepts the TCP connection but never answers
+// "initialize" can't hang mcp.Manager.KeepConnected's retry loop forever.
+const mcpConnectTimeout = 15 * time.Second
+
+// mcpReconnectInterval is how often mcp.Manager.KeepConnected first retries
+// an MCP server that's currently disconnected — at startup, and again any
+// time mcp.Manager.Tools/Call evicts it after a disconnection. Doubles on
+// each consecutive failure up to mcpMaxReconnectInterval, so an extended
+// outage doesn't cost an indefinite connection attempt every 30s.
+const mcpReconnectInterval = 30 * time.Second
+
+// mcpMaxReconnectInterval caps the backoff mcpReconnectInterval grows into
+// during an extended outage.
+const mcpMaxReconnectInterval = 10 * time.Minute
+
 // dotEnvPath is a .env file in the project root, loaded for local-dev
 // convenience (see internal/envfile) so secrets like ANTHROPIC_API_KEY or
 // HA_MCP_TOKEN don't need to be exported by hand every session. Real
@@ -165,7 +181,14 @@ func run(cfg config.Config, logger *slog.Logger, eventHub *hub.Hub) error {
 	}
 	llmRouter.SetTracer(llmTracer)
 
-	toolManager := connectMCP(cfg.MCP.Servers, logger)
+	// Created here (rather than at its previous spot right before
+	// serveUntilInterrupted) so it can also bound connectMCP's background
+	// reconnect goroutines below — they must stop at shutdown like
+	// everything else, not leak past it.
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	toolManager := connectMCP(ctx, cfg.MCP.Servers, logger)
 
 	dispatcher, ttsAudioHandler := buildTTSDispatcher(cfg.TTS, cfg.Storage, eventHub, logger)
 
@@ -240,9 +263,6 @@ func run(cfg config.Config, logger *slog.Logger, eventHub *hub.Hub) error {
 		})
 	}
 	httpServer := &http.Server{Addr: cfg.Server.HTTPAddr, Handler: server}
-
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer stop()
 
 	go sweepIdleSessions(ctx, orchestrator, cfg.Memory, logger)
 
@@ -319,12 +339,16 @@ func buildProviders(configs []config.LLMProvider) ([]llm.Provider, error) {
 	return providers, nil
 }
 
-// connectMCP connects to every enabled configured MCP server. A server that
-// fails to connect is logged and skipped rather than failing startup — a
-// temporarily unreachable Home Assistant instance shouldn't prevent the
-// agent from starting with its other tool sources.
-func connectMCP(servers []config.MCPServer, logger *slog.Logger) *mcp.Manager {
-	var clients []mcp.Client
+// connectMCP returns a Manager immediately (with no clients yet) and spawns
+// one mcp.Manager.KeepConnected goroutine per enabled server to connect it
+// in the background — startup never blocks on, or fails because of, an
+// unreachable MCP server (a temporarily-down Home Assistant instance, most
+// notably). Each goroutine retries its server for as long as ctx is alive,
+// so a server that's down at startup — or drops later, once
+// mcp.Manager.Tools/Call evicts it after a genuine disconnection — is
+// picked back up with no Miranda restart needed.
+func connectMCP(ctx context.Context, servers []config.MCPServer, logger *slog.Logger) *mcp.Manager {
+	manager := mcp.NewManager(logger)
 	for _, s := range servers {
 		if !s.Enabled {
 			continue
@@ -333,14 +357,13 @@ func connectMCP(servers []config.MCPServer, logger *slog.Logger) *mcp.Manager {
 		if s.TokenEnv != "" {
 			token = os.Getenv(s.TokenEnv)
 		}
-		client, err := mcp.Connect(context.Background(), s.Name, s.URL, token)
-		if err != nil {
-			logger.Warn("mcp: failed to connect, skipping this server", "server", s.Name, "url", s.URL, "error", err)
-			continue
+		s := s
+		connect := func(ctx context.Context) (mcp.Client, error) {
+			return mcp.Connect(ctx, s.Name, s.URL, token)
 		}
-		clients = append(clients, client)
+		go manager.KeepConnected(ctx, s.Name, mcpReconnectInterval, mcpMaxReconnectInterval, mcpConnectTimeout, connect)
 	}
-	return mcp.NewManager(clients...)
+	return manager
 }
 
 // setupTelegram validates config and wires the optional Telegram bot

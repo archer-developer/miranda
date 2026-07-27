@@ -129,7 +129,7 @@ func newTestOrchestratorWithTTS(t *testing.T, provider *llmtest.FakeProvider) (*
 	dispatcher := tts.NewDispatcher(primary, nil, ha, yandexCfg.Entities, hub.New(100), nil)
 
 	o := NewOrchestrator(
-		r, mcp.NewManager(), h, mem, dispatcher, hub.New(100), nil,
+		r, mcp.NewManager(nil), h, mem, dispatcher, hub.New(100), nil,
 		config.AgentConfig{},
 		config.MemoryConfig{ExplicitTool: true},
 		ttsCfg,
@@ -152,7 +152,7 @@ func newTestOrchestrator(t *testing.T, provider *llmtest.FakeProvider, mcpClient
 	mem, err := memory.New(t.TempDir())
 	require.NoError(t, err)
 
-	toolManager := mcp.NewManager(mcpClients...)
+	toolManager := mcp.NewManager(nil, mcpClients...)
 
 	o := NewOrchestrator(
 		r, toolManager, h, mem, nil, hub.New(100), nil,
@@ -240,7 +240,7 @@ func TestOrchestrator_EscalationIsTransparentToOrchestrator(t *testing.T) {
 	mem, err := memory.New(t.TempDir())
 	require.NoError(t, err)
 
-	o := NewOrchestrator(r, mcp.NewManager(), h, mem, nil, hub.New(100), nil,
+	o := NewOrchestrator(r, mcp.NewManager(nil), h, mem, nil, hub.New(100), nil,
 		config.AgentConfig{},
 		config.MemoryConfig{ExplicitTool: true},
 		config.TTSConfig{},
@@ -523,7 +523,7 @@ func newTestOrchestratorWithTelegram(t *testing.T, provider *llmtest.FakeProvide
 	require.NoError(t, err)
 
 	o := NewOrchestrator(
-		r, mcp.NewManager(), h, mem, nil, hub.New(100), registry,
+		r, mcp.NewManager(nil), h, mem, nil, hub.New(100), registry,
 		config.AgentConfig{},
 		config.MemoryConfig{},
 		config.TTSConfig{},

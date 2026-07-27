@@ -551,5 +551,29 @@ func Load(path string) (Config, error) {
 		return cfg, fmt.Errorf("config: parse %s: %w", path, err)
 	}
 
+	if err := validateMCPServerNames(cfg.MCP.Servers); err != nil {
+		return cfg, err
+	}
+
 	return cfg, nil
+}
+
+// validateMCPServerNames rejects two enabled mcp.servers entries sharing a
+// name. Manager namespaces tools by "<server>_" and cmd/miranda spawns one
+// background reconnect goroutine per server keyed on that name — a
+// duplicate (e.g. a copy-pasted block in config.yaml left unrenamed) would
+// race two independent connections against the same Manager slot, silently
+// leaking whichever one loses instead of failing loudly at startup.
+func validateMCPServerNames(servers []MCPServer) error {
+	seen := make(map[string]bool, len(servers))
+	for _, s := range servers {
+		if !s.Enabled {
+			continue
+		}
+		if seen[s.Name] {
+			return fmt.Errorf("config: mcp.servers has more than one enabled server named %q", s.Name)
+		}
+		seen[s.Name] = true
+	}
+	return nil
 }

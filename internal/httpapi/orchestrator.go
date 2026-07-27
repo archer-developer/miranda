@@ -193,10 +193,7 @@ func (o *Orchestrator) Handle(ctx context.Context, req InputRequest) (InputRespo
 	messages := append([]llm.Message{{Role: llm.RoleSystem, Content: systemPrompt}}, priorMessages...)
 	messages = append(messages, llm.Message{Role: llm.RoleUser, Content: req.Text})
 
-	tools, err := o.availableTools(ctx)
-	if err != nil {
-		return InputResponse{}, err
-	}
+	tools := o.availableTools(ctx)
 
 	control := &turnControl{}
 	finalText, providerUsed, err := o.runAgentLoop(ctx, userID, convID, req.Source, messages, tools, control)

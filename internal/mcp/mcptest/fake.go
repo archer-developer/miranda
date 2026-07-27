@@ -14,13 +14,15 @@ import (
 // FakeClient is a Client that serves a fixed set of tools and returns
 // scripted results for calls, recording every call it receives.
 type FakeClient struct {
-	name  string
-	tools []llm.ToolDef
+	name    string
+	tools   []llm.ToolDef
+	listErr error // if set, ListTools fails with this instead of returning tools
 
 	mu      sync.Mutex
 	results map[string]string // tool name -> result to return
 	errs    map[string]error  // tool name -> error to return instead
 	Calls   []Call
+	Closed  bool // set once Close is called, so tests can assert cleanup happened
 }
 
 // Call records one CallTool invocation the FakeClient received.
@@ -51,9 +53,28 @@ func (f *FakeClient) WithError(tool string, err error) *FakeClient {
 	return f
 }
 
+// WithListToolsError makes ListTools fail with err instead of returning this
+// FakeClient's tools — simulates a server that's unreachable or whose
+// session has died.
+func (f *FakeClient) WithListToolsError(err error) *FakeClient {
+	f.listErr = err
+	return f
+}
+
 func (f *FakeClient) Name() string { return f.name }
 
+// Close implements Client. Safe to call more than once, like a real session.
+func (f *FakeClient) Close() error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.Closed = true
+	return nil
+}
+
 func (f *FakeClient) ListTools(ctx context.Context) ([]llm.ToolDef, error) {
+	if f.listErr != nil {
+		return nil, f.listErr
+	}
 	return f.tools, nil
 }
 
