@@ -31,6 +31,7 @@ type FakeProvider struct {
 	script   []Response
 	callIdx  int
 	Requests []llm.ChatRequest
+	tracer   llm.Tracer
 }
 
 // New creates a FakeProvider named name that will return script[i] on the
@@ -42,6 +43,16 @@ func New(name string, script ...Response) *FakeProvider {
 
 func (f *FakeProvider) Name() string { return f.name }
 
+// SetTracer implements the same optional tracing hook the real providers
+// (internal/llm/anthropic, internal/llm/openaicompat) expose, so tests can
+// exercise internal/llm/router.Router's tracer-forwarding without a real
+// SDK — see Chat, which calls it exactly like a real provider would.
+func (f *FakeProvider) SetTracer(t llm.Tracer) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.tracer = t
+}
+
 // Chat implements llm.Provider.
 func (f *FakeProvider) Chat(ctx context.Context, req llm.ChatRequest) (<-chan llm.StreamChunk, error) {
 	f.mu.Lock()
@@ -52,10 +63,22 @@ func (f *FakeProvider) Chat(ctx context.Context, req llm.ChatRequest) (<-chan ll
 	resp := f.script[f.callIdx]
 	f.callIdx++
 	f.Requests = append(f.Requests, req)
+	tracer := f.tracer
 	f.mu.Unlock()
 
 	if resp.Err != nil {
+		if tracer != nil {
+			tracer.Trace(ctx, f.name, fmt.Sprintf("%+v", req), "", resp.Err)
+		}
 		return nil, resp.Err
+	}
+
+	if tracer != nil {
+		response := resp.Text
+		if resp.ToolCall != nil {
+			response += fmt.Sprintf(" tool_call:%s(%s)", resp.ToolCall.Name, resp.ToolCall.Arguments)
+		}
+		tracer.Trace(ctx, f.name, fmt.Sprintf("%+v", req), response, nil)
 	}
 
 	ch := make(chan llm.StreamChunk, 3)

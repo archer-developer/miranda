@@ -134,8 +134,8 @@ func TestRouter_TracesRequestAndResponseWhenTracerSet(t *testing.T) {
 
 	out := buf.String()
 	require.Contains(t, out, "provider=local")
-	require.Contains(t, out, "user: hello")
-	require.Contains(t, out, "text: hi")
+	require.Contains(t, out, "hello")
+	require.Contains(t, out, "hi")
 }
 
 func TestRouter_TracesEscalationAsTwoBlocks(t *testing.T) {
@@ -160,7 +160,7 @@ func TestRouter_TracesEscalationAsTwoBlocks(t *testing.T) {
 	require.Contains(t, out, "provider=local-qwen")
 	require.Contains(t, out, "escalate_to_claude")
 	require.Contains(t, out, "provider=claude")
-	require.Contains(t, out, "text: the answer")
+	require.Contains(t, out, "the answer")
 }
 
 func TestRouter_NoTracerSetIsFine(t *testing.T) {

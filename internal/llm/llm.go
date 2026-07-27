@@ -77,3 +77,19 @@ type Provider interface {
 	// (e.g. auth/connection failure).
 	Chat(ctx context.Context, req ChatRequest) (<-chan StreamChunk, error)
 }
+
+// Tracer receives one record per provider call: the exact request and
+// response payloads, already serialized (typically to JSON) by the
+// Provider that built them — only the Provider knows its own SDK's wire
+// format precisely enough for the trace to be trustworthy. This is what
+// lets a trace capture provider-specific specifics the shared
+// ChatRequest/StreamChunk types can't represent — e.g. Anthropic's own
+// server-side web_search/web_fetch/code_execution tools, which a Provider
+// adds to the real request itself and which never appear in the
+// ChatRequest.Tools the Orchestrator built. response is empty when err is
+// non-nil. Implemented by internal/llmtrace.Logger; a Provider that
+// supports tracing accepts one via an optional SetTracer(Tracer) method,
+// which internal/llm/router.Router forwards to on Router.SetTracer.
+type Tracer interface {
+	Trace(ctx context.Context, provider, request, response string, err error)
+}

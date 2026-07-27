@@ -33,6 +33,7 @@ type Provider struct {
 	maxTokens int64
 	client    anthropic.Client
 	tools     config.AnthropicToolsConfig
+	tracer    llm.Tracer
 }
 
 // New builds a Provider named name for the given Claude model. tools
@@ -54,6 +55,17 @@ func New(name, model, apiKey string, tools config.AnthropicToolsConfig) *Provide
 
 func (p *Provider) Name() string { return p.name }
 
+// SetTracer wires up request/response tracing (see internal/llmtrace) —
+// optional, and left unset (nil) by default so tests and any caller that
+// doesn't care about it don't need to touch this. Unlike tracing built from
+// the provider-agnostic llm.ChatRequest, this Provider serializes its own
+// actual API request/response (see trace), so the trace reflects exactly
+// what went out — including native tools this Provider itself added (see
+// nativeTools) that never appear in req.Tools.
+func (p *Provider) SetTracer(t llm.Tracer) {
+	p.tracer = t
+}
+
 // Chat implements llm.Provider by streaming a Messages API response.
 func (p *Provider) Chat(ctx context.Context, req llm.ChatRequest) (<-chan llm.StreamChunk, error) {
 	system, messages := toAnthropicMessages(req.Messages)
@@ -69,22 +81,28 @@ func (p *Provider) Chat(ctx context.Context, req llm.ChatRequest) (<-chan llm.St
 	stream := p.client.Messages.NewStreaming(ctx, params)
 
 	out := make(chan llm.StreamChunk)
-	go pump(stream, out)
+	go p.pump(ctx, params, stream, out)
 	return out, nil
 }
 
 // pump forwards text deltas as they arrive and uses the SDK's built-in
 // Message.Accumulate to reconstruct the full response, so tool_use blocks
 // (which the API streams as fragmented partial-JSON deltas) only need to be
-// read once, fully assembled, at the end of the stream.
-func pump(stream *ssestream.Stream[anthropic.MessageStreamEventUnion], out chan<- llm.StreamChunk) {
+// read once, fully assembled, at the end of the stream. That same
+// accumulated message — including any server-side tool_use/tool_result
+// blocks Anthropic resolved on its own (web search/fetch, code execution) —
+// is what gets traced, so the trace reflects exactly what the API did, not
+// just the subset the Orchestrator's own tool loop sees.
+func (p *Provider) pump(ctx context.Context, params anthropic.MessageNewParams, stream *ssestream.Stream[anthropic.MessageStreamEventUnion], out chan<- llm.StreamChunk) {
 	defer close(out)
 
 	var message anthropic.Message
 	for stream.Next() {
 		event := stream.Current()
 		if err := message.Accumulate(event); err != nil {
-			out <- llm.StreamChunk{Err: fmt.Errorf("anthropic: accumulate: %w", err)}
+			wrapped := fmt.Errorf("anthropic: accumulate: %w", err)
+			out <- llm.StreamChunk{Err: wrapped}
+			p.trace(ctx, params, nil, wrapped)
 			return
 		}
 		if event.Type == "content_block_delta" && event.Delta.Text != "" {
@@ -92,7 +110,9 @@ func pump(stream *ssestream.Stream[anthropic.MessageStreamEventUnion], out chan<
 		}
 	}
 	if err := stream.Err(); err != nil {
-		out <- llm.StreamChunk{Err: fmt.Errorf("anthropic: stream: %w", err)}
+		wrapped := fmt.Errorf("anthropic: stream: %w", err)
+		out <- llm.StreamChunk{Err: wrapped}
+		p.trace(ctx, params, nil, wrapped)
 		return
 	}
 
@@ -102,7 +122,28 @@ func pump(stream *ssestream.Stream[anthropic.MessageStreamEventUnion], out chan<
 		}
 	}
 
+	p.trace(ctx, params, &message, nil)
 	out <- llm.StreamChunk{Done: true}
+}
+
+// trace serializes exactly what was sent (params, the same value passed to
+// the SDK's own request-building code) and what came back (the fully
+// accumulated message, nil on error) to p.tracer, if one is configured.
+func (p *Provider) trace(ctx context.Context, params anthropic.MessageNewParams, message *anthropic.Message, err error) {
+	if p.tracer == nil {
+		return
+	}
+	reqJSON, marshalErr := json.MarshalIndent(params, "", "  ")
+	if marshalErr != nil {
+		reqJSON = []byte(fmt.Sprintf("(failed to marshal request: %v)", marshalErr))
+	}
+	var respJSON []byte
+	if message != nil {
+		if respJSON, marshalErr = json.MarshalIndent(message, "", "  "); marshalErr != nil {
+			respJSON = []byte(fmt.Sprintf("(failed to marshal response: %v)", marshalErr))
+		}
+	}
+	p.tracer.Trace(ctx, p.name, string(reqJSON), string(respJSON), err)
 }
 
 // toAnthropicMessages splits llm.Message history into Anthropic's separate

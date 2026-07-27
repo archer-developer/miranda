@@ -8,6 +8,7 @@ package openaicompat
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 
 	"github.com/openai/openai-go/v2"
@@ -24,6 +25,7 @@ type Provider struct {
 	name   string
 	model  string
 	client openai.Client
+	tracer llm.Tracer
 }
 
 // New builds a Provider named name, targeting model on the endpoint at
@@ -42,6 +44,15 @@ func New(name, baseURL, model, apiKey string) *Provider {
 
 func (p *Provider) Name() string { return p.name }
 
+// SetTracer wires up request/response tracing (see internal/llmtrace) —
+// optional, and left unset (nil) by default so tests and any caller that
+// doesn't care about it don't need to touch this. This Provider serializes
+// its own actual API request/response (see trace), so the trace reflects
+// exactly what went out and came back for this SDK.
+func (p *Provider) SetTracer(t llm.Tracer) {
+	p.tracer = t
+}
+
 // Chat implements llm.Provider by streaming a Chat Completions response and
 // re-assembling incrementally-streamed tool-call fragments (the API sends a
 // function name/arguments split across many chunks, keyed by tool_call
@@ -56,7 +67,7 @@ func (p *Provider) Chat(ctx context.Context, req llm.ChatRequest) (<-chan llm.St
 	stream := p.client.Chat.Completions.NewStreaming(ctx, params)
 
 	out := make(chan llm.StreamChunk)
-	go pump(stream, out)
+	go p.pump(ctx, params, stream, out)
 	return out, nil
 }
 
@@ -65,8 +76,15 @@ type pendingToolCall struct {
 	id, name, arguments string
 }
 
-func pump(stream *ssestream.Stream[openai.ChatCompletionChunk], out chan<- llm.StreamChunk) {
+// pump forwards text deltas as they arrive and, via the SDK's own
+// ChatCompletionAccumulator, reconstructs the full response for tracing —
+// mirroring what the manually-accumulated pendingToolCall fragments below
+// resolve to, but as the SDK's own response type so the trace reflects
+// exactly what the API returned.
+func (p *Provider) pump(ctx context.Context, params openai.ChatCompletionNewParams, stream *ssestream.Stream[openai.ChatCompletionChunk], out chan<- llm.StreamChunk) {
 	defer close(out)
+
+	var acc openai.ChatCompletionAccumulator
 
 	// Tool calls stream as fragments identified by index; accumulate until
 	// the stream ends, then emit each as one complete llm.ToolCall.
@@ -75,6 +93,7 @@ func pump(stream *ssestream.Stream[openai.ChatCompletionChunk], out chan<- llm.S
 
 	for stream.Next() {
 		chunk := stream.Current()
+		acc.AddChunk(chunk)
 		if len(chunk.Choices) == 0 {
 			continue
 		}
@@ -102,7 +121,9 @@ func pump(stream *ssestream.Stream[openai.ChatCompletionChunk], out chan<- llm.S
 	}
 
 	if err := stream.Err(); err != nil {
-		out <- llm.StreamChunk{Err: fmt.Errorf("openaicompat: stream: %w", err)}
+		wrapped := fmt.Errorf("openaicompat: stream: %w", err)
+		out <- llm.StreamChunk{Err: wrapped}
+		p.trace(ctx, params, nil, wrapped)
 		return
 	}
 
@@ -111,7 +132,28 @@ func pump(stream *ssestream.Stream[openai.ChatCompletionChunk], out chan<- llm.S
 		out <- llm.StreamChunk{ToolCall: &llm.ToolCall{ID: pc.id, Name: pc.name, Arguments: pc.arguments}}
 	}
 
+	p.trace(ctx, params, &acc.ChatCompletion, nil)
 	out <- llm.StreamChunk{Done: true}
+}
+
+// trace serializes exactly what was sent (params) and what came back (the
+// fully accumulated ChatCompletion, nil on error) to p.tracer, if one is
+// configured.
+func (p *Provider) trace(ctx context.Context, params openai.ChatCompletionNewParams, resp *openai.ChatCompletion, err error) {
+	if p.tracer == nil {
+		return
+	}
+	reqJSON, marshalErr := json.MarshalIndent(params, "", "  ")
+	if marshalErr != nil {
+		reqJSON = []byte(fmt.Sprintf("(failed to marshal request: %v)", marshalErr))
+	}
+	var respJSON []byte
+	if resp != nil {
+		if respJSON, marshalErr = json.MarshalIndent(resp, "", "  "); marshalErr != nil {
+			respJSON = []byte(fmt.Sprintf("(failed to marshal response: %v)", marshalErr))
+		}
+	}
+	p.tracer.Trace(ctx, p.name, string(reqJSON), string(respJSON), err)
 }
 
 func toOpenAIMessages(msgs []llm.Message) []openai.ChatCompletionMessageParamUnion {
