@@ -81,6 +81,10 @@ func (h *Handler) handleLoginPage(w http.ResponseWriter, r *http.Request) {
 		AssetVersion:    h.assetVersion,
 	}
 
+	// no-store: same reasoning as handleIndex — the login page is just as
+	// valid a PWA entry point (see login.html's manifest link) and must
+	// never be served stale from cache either.
+	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	_ = h.loginTmpl.Execute(w, data)
 }

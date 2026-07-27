@@ -179,7 +179,20 @@ export function mount(container) {
           <div id="passkeys-list" class="space-y-2"></div>
         </section>
 
-        <form method="POST" action="/logout" class="mt-8">
+        <!-- An installed home-screen PWA has no browser reload button and
+             can sit on an already-loaded shell document indefinitely (iOS
+             tends to resume a suspended WKWebView instance rather than
+             re-fetch "/" on every reopen) — this is the user-visible escape
+             hatch for "I deployed a new build but my phone still shows the
+             old one". location.reload() pairs with the server's own
+             Cache-Control: no-store on "/" (see webui.go's handleIndex) so
+             the fetch it triggers is always guaranteed fresh, not served
+             from the HTTP cache either. -->
+        <button id="force-refresh" type="button" class="mt-8 flex w-full items-center justify-center gap-2 rounded-lg border border-(--color-border) px-4 py-2.5 text-sm font-medium text-(--color-text-muted) transition-colors hover:border-(--color-border-strong) hover:bg-(--color-surface-2) focus-visible:outline-none">
+          ${icon("refresh-cw", "h-4 w-4")}${t("profile_refresh_button", "Refresh app")}
+        </button>
+
+        <form method="POST" action="/logout" class="mt-3">
           <button type="submit" class="flex w-full items-center justify-center gap-2 rounded-lg border border-(--color-border) px-4 py-2.5 text-sm font-medium text-(--color-text-muted) transition-colors hover:border-(--color-danger-border) hover:bg-(--color-danger-bg) hover:text-(--color-danger-text) focus-visible:outline-none">
             ${icon("log-out", "h-4 w-4")}${t("logout_button", "Log out")}
           </button>
@@ -198,6 +211,10 @@ export function mount(container) {
   if (window.MIRANDA_WEBAUTHN_ENABLED && webauthn.isSupported()) {
     mountPasskeys(container);
   }
+
+  container.querySelector("#force-refresh").addEventListener("click", () => {
+    location.reload();
+  });
 }
 
 export function unmount() {}

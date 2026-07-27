@@ -56,7 +56,15 @@
   </a>
 
   <div class="flex h-full flex-col">
-    <header class="relative z-40 border-b border-(--color-border) bg-(--color-bg)/80 backdrop-blur supports-[backdrop-filter]:bg-(--color-bg)/60">
+    <!-- pt-[env(safe-area-inset-top)]: same reasoning as the composer's
+         pb-[env(safe-area-inset-bottom)] in screens/chat.js, but for the
+         other edge — viewport-fit=cover (index.html's <head>) makes the
+         whole document draw under the iOS status bar/notch in a standalone
+         PWA, not just the home-indicator area at the bottom, so the header
+         needs its own inset or its content sits behind the notch. Padding
+         (not margin) so the header's own background/blur still fills the
+         notch area instead of leaving it showing the page background. -->
+    <header class="relative z-40 border-b border-(--color-border) bg-(--color-bg)/80 pt-[env(safe-area-inset-top)] backdrop-blur supports-[backdrop-filter]:bg-(--color-bg)/60">
       <div class="mx-auto flex max-w-7xl items-center justify-between gap-3 px-4 py-3 sm:px-6">
         <a href="#/chat" class="flex items-center gap-2.5 rounded-lg py-1 transition-opacity hover:opacity-80">
           <img src="/static/v{{.AssetVersion}}/brand/icon.svg" alt="" class="h-8 w-8 rounded-full ring-2 ring-(--color-border-strong)" />

@@ -267,6 +267,14 @@ func (h *Handler) handleIndex(w http.ResponseWriter, r *http.Request) {
 		AssetVersion:    h.assetVersion,
 	}
 
+	// no-store: this is the PWA's shell document, served at the fixed "/"
+	// URL an installed home-screen icon always reopens — unlike the
+	// versioned /static/vX/ assets it references, there's no URL change to
+	// bust a cache with, so it must never be cached at all or an installed
+	// app can get stuck on a stale build until the OS evicts it. Pairs with
+	// the "Refresh" button on the profile screen (screens/profile.js), which
+	// calls location.reload() to force this fetch on demand.
+	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	_ = h.indexTmpl.Execute(w, data)
 }

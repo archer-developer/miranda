@@ -52,6 +52,7 @@
   "profile_passkey_nickname_placeholder": "e.g. iPhone",
   "profile_no_passkeys": "No passkeys registered yet.",
   "profile_remove_button": "Remove",
+  "profile_refresh_button": "Refresh app",
   "logout_button": "Log out",
   "login_title": "Sign in to Miranda",
   "login_username_label": "Username",
