@@ -2,6 +2,7 @@
 // screens, and the one persistent WebSocket connection. Native ES modules —
 // no bundler, no build step (see internal/webui's package doc comment).
 import * as ws from "./ws.js";
+import * as chatWs from "./chat-ws.js";
 import * as router from "./router.js";
 import * as nav from "./nav.js";
 import * as theme from "./theme.js";
@@ -23,3 +24,4 @@ router.setDefault("#/chat");
 router.start();
 
 ws.connect();
+chatWs.connect();

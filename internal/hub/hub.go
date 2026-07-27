@@ -15,6 +15,13 @@ type Event struct {
 	Source  string `json:"source"`
 	Message string `json:"message"`
 	Data    any    `json:"data,omitempty"`
+	// UserID scopes an event to one user's chat (see httpapi's ChatEvent /
+	// GET /ws/chat/{username}) — left empty for the app/error/log events
+	// broadcast to every subscriber over /ws/logs regardless of who's
+	// looking, so the Hub itself never needs to know about per-user
+	// scoping: that filtering happens entirely in the WS handler that reads
+	// from Subscribe().
+	UserID string `json:"user_id,omitempty"`
 }
 
 // Hub fans Events out to any number of subscribers and retains the last N
@@ -23,7 +30,7 @@ type Hub struct {
 	mu          sync.Mutex
 	bufferSize  int
 	buffer      []Event
-	subscribers map[chan Event]struct{}
+	subscribers map[chan Event]func(Event) bool
 }
 
 // New creates a Hub that retains up to bufferSize recent events for replay to
@@ -34,13 +41,16 @@ func New(bufferSize int) *Hub {
 	}
 	return &Hub{
 		bufferSize:  bufferSize,
-		subscribers: make(map[chan Event]struct{}),
+		subscribers: make(map[chan Event]func(Event) bool),
 	}
 }
 
-// Publish broadcasts ev to all current subscribers and appends it to the
-// replay buffer. Subscribers with a full channel are skipped rather than
-// blocking the publisher — a slow web UI tab must never stall the agent loop.
+// Publish broadcasts ev to every subscriber whose filter (see Subscribe)
+// accepts it, and appends it to the replay buffer regardless of any filter
+// (the buffer is a shared, unfiltered tail of everything ever published —
+// each Subscribe call re-filters it for its own replay). Subscribers with a
+// full channel are skipped rather than blocking the publisher — a slow web
+// UI tab must never stall the agent loop.
 func (h *Hub) Publish(ev Event) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
@@ -50,7 +60,10 @@ func (h *Hub) Publish(ev Event) {
 		h.buffer = h.buffer[len(h.buffer)-h.bufferSize:]
 	}
 
-	for sub := range h.subscribers {
+	for sub, filter := range h.subscribers {
+		if filter != nil && !filter(ev) {
+			continue
+		}
 		select {
 		case sub <- ev:
 		default:
@@ -59,8 +72,20 @@ func (h *Hub) Publish(ev Event) {
 }
 
 // Subscribe registers a new subscriber and returns its channel plus a replay
-// of currently buffered events. Call the returned unsubscribe func when done.
-func (h *Hub) Subscribe() (ch <-chan Event, replay []Event, unsubscribe func()) {
+// of currently buffered events (filtered the same way, if filter is set).
+// Call the returned unsubscribe func when done.
+//
+// filter, if non-nil, is checked in Publish *before* an event is ever sent
+// to this subscriber's channel — pass one whenever a subscriber only cares
+// about a slice of the hub's traffic (e.g. GET /ws/chat/{username} only
+// wants Source == "chat" events for its own UserID). Without a filter, a
+// subscriber's fixed-size channel (see sizing note below) is shared by
+// every event published anywhere in the app; a burst of traffic the
+// subscriber doesn't even care about can fill it and silently crowd out
+// the events it does, since Publish skips rather than blocks a full
+// channel. Pass nil to receive everything unfiltered (e.g. /ws/logs, which
+// really does want the full firehose).
+func (h *Hub) Subscribe(filter func(Event) bool) (ch <-chan Event, replay []Event, unsubscribe func()) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 
@@ -79,10 +104,13 @@ func (h *Hub) Subscribe() (ch <-chan Event, replay []Event, unsubscribe func()) 
 	// static/js/screens/logs-trace-parser.js) — a dropped line anywhere in
 	// the block meant it could never render at all.
 	sub := make(chan Event, h.bufferSize)
-	h.subscribers[sub] = struct{}{}
+	h.subscribers[sub] = filter
 
-	replay = make([]Event, len(h.buffer))
-	copy(replay, h.buffer)
+	for _, ev := range h.buffer {
+		if filter == nil || filter(ev) {
+			replay = append(replay, ev)
+		}
+	}
 
 	unsub := func() {
 		h.mu.Lock()

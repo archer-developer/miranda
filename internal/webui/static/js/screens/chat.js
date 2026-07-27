@@ -4,8 +4,43 @@
 // rendered as a proper message thread instead of a single reply box.
 import { t } from "../i18n.js";
 import { icon } from "../icons.js";
+import * as chatWs from "../chat-ws.js";
 
-let messagesEl, scrollEl, formEl, textEl, sendBtn;
+let messagesEl, scrollEl, formEl, textEl, sendBtn, unsubscribeWs, unsubscribeReconnect;
+
+// message id (real history.Message.ID, or a "local:" temp key for a
+// not-yet-confirmed optimistic bubble) -> its rendered DOM node. This is
+// what lets a ChatEvent arriving over chat-ws.js — for a turn this tab
+// itself triggered, or one that arrived via HA/Telegram/another tab — be
+// rendered exactly once no matter which of the two (HTTP response, WS
+// event) gets there first; see CLAUDE.md's "Session ownership".
+const rendered = new Map();
+
+// The `rendered` key of the current turn's own optimistic user bubble,
+// while it's still waiting for its real id — set by send(), consumed by
+// upsertMessage() if the WS event for that exact message arrives before
+// the HTTP response does (Orchestrator.Handle publishes it right after
+// AppendMessage, well before the agent loop — and thus the response —
+// finishes), so the WS path re-keys the *same* bubble instead of creating
+// a duplicate one next to it. Only one send() can be in flight at a time
+// (the composer is disabled while sending), so a single slot is enough.
+let pendingUserKey = null;
+
+// Bumped every time clearMessages() runs (conversation_deleted/ended, or a
+// fresh loadHistory()) so a send() whose thread was wiped out from under it
+// mid-flight — because its own turn ended/forgot the conversation, or the
+// screen remounted — knows not to append a now-orphaned reply into an
+// empty-state thread; see send()'s use of it below.
+let renderGeneration = 0;
+
+/** Same "is this a bubble a person should see" rule loadHistory() has
+ * always applied to GET /api/dialogs/{id} rows — tool-call/tool-result
+ * turns (see internal/httpapi's recordAssistantToolCallMessage/
+ * recordToolCall) are recorded and streamed over chat-ws.js too (for a
+ * future debug view), but never rendered as chat bubbles. */
+function isChatBubble(m) {
+  return (m.role === "user" || m.role === "assistant") && Boolean(m.content?.trim());
+}
 
 function formatTime(iso) {
   try {
@@ -105,6 +140,48 @@ function scrollToBottom() {
 
 function clearMessages() {
   messagesEl.innerHTML = "";
+  rendered.clear();
+  pendingUserKey = null;
+  renderGeneration++;
+}
+
+/** Render a message delivered live over chat-ws.js, if it isn't already on
+ * screen — a no-op for an id already in `rendered` (this tab's own HTTP
+ * response beat the WS event, or a duplicate delivery), and for turns
+ * isChatBubble filters out. */
+function upsertMessage(message) {
+  if (rendered.has(message.id) || !isChatBubble(message)) return;
+
+  // This is the live echo of a user message this same tab is still waiting
+  // on a response for — reuse its existing optimistic bubble instead of
+  // adding a second one (see pendingUserKey's doc comment above).
+  if (message.role === "user" && pendingUserKey !== null && rendered.has(pendingUserKey)) {
+    const node = rendered.get(pendingUserKey);
+    rendered.delete(pendingUserKey);
+    rendered.set(message.id, node);
+    pendingUserKey = null;
+    return;
+  }
+
+  messagesEl.querySelector("[data-empty-state]")?.remove();
+  const node = bubble(message.role, message.content, message.created_at);
+  messagesEl.appendChild(node);
+  rendered.set(message.id, node);
+  scrollToBottom();
+}
+
+function onChatEvent(ev) {
+  // The socket carries the raw hub.Event envelope ({source, message, data,
+  // user_id} — see internal/hub.Event); the ChatEvent this screen cares
+  // about is nested under `data`, not at the top level.
+  const chatEvent = ev.data;
+  if (!chatEvent) return;
+  if (chatEvent.type === "message") {
+    upsertMessage(chatEvent.message);
+  } else if (chatEvent.type === "conversation_deleted" || chatEvent.type === "conversation_ended") {
+    clearMessages();
+    messagesEl.appendChild(emptyState());
+  }
 }
 
 async function loadHistory() {
@@ -127,7 +204,7 @@ async function loadHistory() {
     // are recorded for history/logs (see internal/httpapi's
     // recordAssistantToolCallMessage/recordToolCall) but aren't part of
     // the conversation a person reads, so they must not render as bubbles.
-    const chatMessages = messages.filter((m) => (m.role === "user" || m.role === "assistant") && m.content?.trim());
+    const chatMessages = messages.filter(isChatBubble);
 
     clearMessages();
     if (chatMessages.length === 0) {
@@ -135,7 +212,9 @@ async function loadHistory() {
       return;
     }
     for (const m of chatMessages) {
-      messagesEl.appendChild(bubble(m.role, m.content, m.created_at));
+      const node = bubble(m.role, m.content, m.created_at);
+      messagesEl.appendChild(node);
+      rendered.set(m.id, node);
     }
     scrollToBottom();
   } catch {
@@ -155,8 +234,23 @@ function setSending(sending) {
 }
 
 async function send(text) {
+  // Identifies "this thread" for the duration of this call — bumped by
+  // clearMessages() (conversation_deleted/ended arriving live, or a
+  // remount). If it no longer matches once the request settles, this turn's
+  // outcome either already arrived over chat-ws.js before the thread was
+  // cleared, or belongs to a screen state that's since moved on — either
+  // way, writing into the current (unrelated) DOM would be wrong.
+  const myGeneration = renderGeneration;
+
   messagesEl.querySelector("[data-empty-state]")?.remove();
-  messagesEl.appendChild(bubble("user", text));
+  const userNode = bubble("user", text);
+  messagesEl.appendChild(userNode);
+  // Keyed under a temporary id until the response tells us the real
+  // history.Message.ID — see the `rendered`/`pendingUserKey` doc comments
+  // above.
+  const tempKey = `local:${Date.now()}:${Math.random()}`;
+  rendered.set(tempKey, userNode);
+  pendingUserKey = tempKey;
   scrollToBottom();
 
   const thinking = typingIndicator();
@@ -171,14 +265,37 @@ async function send(text) {
       body: JSON.stringify({ source: "web_ui", text }),
     });
     thinking.remove();
+    if (renderGeneration !== myGeneration) {
+      // The thread this bubble belonged to is gone (cleared by a
+      // conversation_deleted/ended event that arrived over chat-ws.js while
+      // this request was still in flight, or a remount) — nothing left to
+      // update.
+      return;
+    }
     if (!res.ok) {
       messagesEl.appendChild(errorBubble(String(res.status), () => send(text)));
     } else {
       const data = await res.json();
-      messagesEl.appendChild(bubble("assistant", data.reply, new Date().toISOString()));
+      if (pendingUserKey === tempKey) {
+        // The WS echo of our own message hasn't arrived (or ever will,
+        // e.g. it raced ahead of a conversation_deleted that already
+        // cleared it) — reconcile it here instead.
+        rendered.delete(tempKey);
+        rendered.set(data.user_message_id, userNode);
+        pendingUserKey = null;
+      }
+      // A chat-ws.js event for the assistant reply can race ahead of this
+      // HTTP response (e.g. a slow/dropped response body) — if it already
+      // rendered the bubble, don't render it a second time.
+      if (!rendered.has(data.assistant_message_id)) {
+        const assistantNode = bubble("assistant", data.reply, new Date().toISOString());
+        messagesEl.appendChild(assistantNode);
+        rendered.set(data.assistant_message_id, assistantNode);
+      }
     }
   } catch (err) {
     thinking.remove();
+    if (renderGeneration !== myGeneration) return;
     messagesEl.appendChild(errorBubble(String(err), () => send(text)));
   } finally {
     setSending(false);
@@ -256,9 +373,22 @@ export function mount(container) {
   textEl.addEventListener("keydown", onKeydown);
   textEl.addEventListener("input", autoResize);
 
+  unsubscribeWs = chatWs.on(onChatEvent);
+  // Re-hydrates history on every reconnect (network blip, laptop sleep,
+  // server restart), not just at mount: handleWSChat deliberately never
+  // replays a backlog (see its doc comment), so this is what recovers
+  // anything published while the socket was down instead of leaving the
+  // tab silently stale until a manual reload.
+  unsubscribeReconnect = chatWs.onReconnect(loadHistory);
   loadHistory();
 }
 
 export function unmount() {
-  // Nothing to tear down — in-flight fetches are safe to let finish.
+  // In-flight fetches are safe to let finish; the WS subscriptions aren't —
+  // chat-ws.js's connection outlives this screen (app.js starts it once,
+  // module-lifetime), so an unmounted screen must stop listening or a
+  // later remount would double-dispatch every event/reconnect through two
+  // handlers.
+  unsubscribeWs?.();
+  unsubscribeReconnect?.();
 }

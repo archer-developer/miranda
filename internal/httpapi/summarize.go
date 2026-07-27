@@ -82,7 +82,11 @@ func (o *Orchestrator) summarizeConversation(ctx context.Context, convID, userID
 		return fmt.Errorf("load messages: %w", err)
 	}
 	if len(messages) == 0 {
-		return o.history.EndConversation(ctx, convID)
+		if err := o.history.EndConversation(ctx, convID); err != nil {
+			return err
+		}
+		o.publishConversationEnded(userID, convID)
+		return nil
 	}
 
 	existing, err := o.memory.Read(userID)
@@ -101,7 +105,19 @@ func (o *Orchestrator) summarizeConversation(ctx context.Context, convID, userID
 		}
 	}
 
-	return o.history.EndConversationWithSummary(ctx, convID, summary)
+	if err := o.history.EndConversationWithSummary(ctx, convID, summary); err != nil {
+		return err
+	}
+	o.publishConversationEnded(userID, convID)
+	return nil
+}
+
+// publishConversationEnded notifies the user's open GET /ws/chat/{username}
+// tab(s) that this conversation just closed (idle sweep or the explicit
+// end_conversation tool) — shared by both summarizeConversation return paths
+// above so neither can end a session without the UI finding out.
+func (o *Orchestrator) publishConversationEnded(userID, convID string) {
+	o.hub.Publish(hub.Event{Source: "chat", UserID: userID, Data: ChatEvent{Type: "conversation_ended", ConversationID: convID}})
 }
 
 // distillConversation asks the LLM router for a conversation recap plus an

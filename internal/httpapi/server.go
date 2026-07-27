@@ -87,6 +87,7 @@ func NewServer(orchestrator *Orchestrator, h *hub.Hub, authToken string, webUI h
 	mux.HandleFunc("GET /healthz", s.handleHealthz)
 	mux.HandleFunc("POST /api/v1/input", s.handleInput)
 	mux.HandleFunc("GET /ws/logs", s.handleWSLogs)
+	mux.HandleFunc("GET /ws/chat/{username}", s.handleWSChat)
 	if webUI != nil {
 		mux.Handle("/", webUI)
 	}
@@ -231,7 +232,7 @@ func (s *Server) handleWSLogs(w http.ResponseWriter, r *http.Request) {
 	}
 	defer func() { _ = conn.CloseNow() }()
 
-	ch, replay, unsubscribe := s.hub.Subscribe()
+	ch, replay, unsubscribe := s.hub.Subscribe(nil)
 	defer unsubscribe()
 
 	ctx := r.Context()
@@ -241,6 +242,73 @@ func (s *Server) handleWSLogs(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	for {
+		select {
+		case ev, ok := <-ch:
+			if !ok {
+				return
+			}
+			if err := wsjson.Write(ctx, conn, ev); err != nil {
+				return
+			}
+		case <-ctx.Done():
+			return
+		}
+	}
+}
+
+// handleWSChat streams one user's own conversation events (ChatEvent, via
+// Orchestrator.publishChatMessage/publishConversationEnded) to a web UI tab
+// in real time, so a reply that arrived over HA/Telegram/another tab shows
+// up without a page reload — see CLAUDE.md's "Session ownership".
+//
+// Unlike handleWSLogs, this requires session-cookie identity specifically
+// (bearer-token auth has no per-user identity to scope to) and the session's
+// own username must match the {username} path segment — otherwise any
+// logged-in household member could read another member's live chat just by
+// changing the URL, the same IDOR handleDialogs/handleDialogMessages already
+// guard against for GET /api/dialogs.
+//
+// The hub's replay buffer is deliberately skipped, even though Subscribe's
+// filter would only surface this user's own chat events from it: it's a
+// single ring buffer shared across every source and every user (bounded by
+// config.WebUI.LogBufferSize), so whatever slice of it happens to still be
+// in memory is not a reliable history — a busy household could evict this
+// user's own chat events from the buffer entirely before they ever connect.
+// The chat screen hydrates full history via GET /api/dialogs/{id} both on
+// mount and on every reconnect (see chat-ws.js's onReconnect/chat.js's
+// loadHistory) — that's the real resync mechanism; this connection only
+// needs to carry updates live from here forward.
+func (s *Server) handleWSChat(w http.ResponseWriter, r *http.Request) {
+	sessionUser, ok := s.authorize(r)
+	if !ok {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+	if sessionUser == "" || sessionUser != r.PathValue("username") {
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
+
+	conn, err := websocket.Accept(w, r, nil)
+	if err != nil {
+		return
+	}
+	defer func() { _ = conn.CloseNow() }()
+
+	// Filtering at Subscribe time (rather than discarding irrelevant events
+	// after they've already been pulled off the channel) means this
+	// connection's bounded channel only ever holds events this user's tab
+	// actually cares about — a burst of unrelated traffic (other users'
+	// chat activity, log/trace lines, this same user's own assistant-text
+	// streaming chunks) can no longer fill it and silently crowd out a chat
+	// event meant for this connection; see hub.Hub.Subscribe's doc comment.
+	ch, _, unsubscribe := s.hub.Subscribe(func(ev hub.Event) bool {
+		return ev.Source == "chat" && ev.UserID == sessionUser
+	})
+	defer unsubscribe()
+
+	ctx := r.Context()
 	for {
 		select {
 		case ev, ok := <-ch:

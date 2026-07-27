@@ -3,6 +3,7 @@ package httpapi
 import (
 	"context"
 	"fmt"
+	"time"
 
 	"github.com/archer-developer/miranda/internal/config"
 	"github.com/archer-developer/miranda/internal/history"
@@ -58,6 +59,29 @@ type InputResponse struct {
 	ConversationID string `json:"conversation_id"`
 	Reply          string `json:"reply"`
 	ProviderUsed   string `json:"provider_used,omitempty"`
+	// UserMessageID/AssistantMessageID are the history.Message.ID values
+	// this turn just recorded — the caller (the web UI's own chat screen)
+	// uses them to reconcile its optimistic render against the same
+	// per-user WS chat stream (GET /ws/chat/{username}, see ChatEvent)
+	// every other channel/tab learns about this turn from, so a message
+	// this tab already rendered from the HTTP response is never rendered a
+	// second time when its ChatEvent arrives.
+	UserMessageID      int64 `json:"user_message_id"`
+	AssistantMessageID int64 `json:"assistant_message_id"`
+}
+
+// ChatEvent is published on internal/hub (Source: "chat", scoped by UserID)
+// every time a conversation is mutated, so GET /ws/chat/{username} can keep
+// every open tab/channel for that user in sync without polling — see
+// CLAUDE.md's "Session ownership" for why this can happen on a channel a
+// given tab never itself talked to (HA, Telegram, another tab).
+type ChatEvent struct {
+	// Type is "message" (a new history.Message was recorded — Message is
+	// set), "conversation_deleted" (forget_conversation), or
+	// "conversation_ended" (end_conversation / the idle sweep).
+	Type           string           `json:"type"`
+	ConversationID string           `json:"conversation_id"`
+	Message        *history.Message `json:"message,omitempty"`
 }
 
 // Orchestrator drives one full agent turn: it loads the user's memory and
@@ -155,9 +179,11 @@ func (o *Orchestrator) Handle(ctx context.Context, req InputRequest) (InputRespo
 		return InputResponse{}, fmt.Errorf("orchestrator: read memory: %w", err)
 	}
 
-	if _, err := o.history.AppendMessage(ctx, convID, "user", req.Text); err != nil {
+	userMsgID, err := o.history.AppendMessage(ctx, convID, "user", req.Text)
+	if err != nil {
 		return InputResponse{}, fmt.Errorf("orchestrator: record user message: %w", err)
 	}
+	o.publishChatMessage(userID, convID, history.Message{ID: userMsgID, ConversationID: convID, Role: "user", Content: req.Text})
 
 	systemPrompt := o.buildSystemPrompt(userID, memContent)
 	if err := o.history.SetSystemPrompt(ctx, convID, systemPrompt); err != nil {
@@ -178,9 +204,11 @@ func (o *Orchestrator) Handle(ctx context.Context, req InputRequest) (InputRespo
 		return InputResponse{}, err
 	}
 
-	if _, err := o.history.AppendMessage(ctx, convID, "assistant", finalText); err != nil {
+	assistantMsgID, err := o.history.AppendMessage(ctx, convID, "assistant", finalText)
+	if err != nil {
 		return InputResponse{}, fmt.Errorf("orchestrator: record assistant message: %w", err)
 	}
+	o.publishChatMessage(userID, convID, history.Message{ID: assistantMsgID, ConversationID: convID, Role: "assistant", Content: finalText})
 
 	// Applied after the reply is recorded (and, via TTS, already spoken) so
 	// an end/forget request never costs the user their answer to this turn.
@@ -191,6 +219,8 @@ func (o *Orchestrator) Handle(ctx context.Context, req InputRequest) (InputRespo
 	case control.forgetRequested:
 		if err := o.history.DeleteConversation(ctx, convID); err != nil {
 			o.hub.Publish(hub.Event{Source: "error", Message: "forget conversation: " + err.Error()})
+		} else {
+			o.hub.Publish(hub.Event{Source: "chat", UserID: userID, Data: ChatEvent{Type: "conversation_deleted", ConversationID: convID}})
 		}
 	case control.endRequested:
 		if err := o.summarizeConversation(ctx, convID, userID); err != nil {
@@ -198,5 +228,23 @@ func (o *Orchestrator) Handle(ctx context.Context, req InputRequest) (InputRespo
 		}
 	}
 
-	return InputResponse{ConversationID: convID, Reply: finalText, ProviderUsed: providerUsed}, nil
+	return InputResponse{
+		ConversationID:     convID,
+		Reply:              finalText,
+		ProviderUsed:       providerUsed,
+		UserMessageID:      userMsgID,
+		AssistantMessageID: assistantMsgID,
+	}, nil
+}
+
+// publishChatMessage broadcasts one recorded history.Message over
+// /ws/logs, tagged Source: "chat" and scoped to userID so
+// handleWSChat can forward it only to that user's GET /ws/chat/{username}
+// connections — see ChatEvent. msg.CreatedAt is set to now rather than
+// re-reading the row back from history: this turn just wrote it, so "now"
+// is accurate enough for a live UI update (the authoritative timestamp is
+// still whatever AppendMessage persisted).
+func (o *Orchestrator) publishChatMessage(userID, convID string, msg history.Message) {
+	msg.CreatedAt = time.Now()
+	o.hub.Publish(hub.Event{Source: "chat", UserID: userID, Data: ChatEvent{Type: "message", ConversationID: convID, Message: &msg}})
 }
