@@ -18,11 +18,11 @@ import (
 	"html/template"
 	"io"
 	"io/fs"
-	"mime"
 	"net/http"
 	"net/url"
 	"strconv"
 	"strings"
+	texttemplate "text/template"
 
 	"github.com/go-webauthn/webauthn/protocol"
 
@@ -32,18 +32,11 @@ import (
 	"github.com/archer-developer/miranda/internal/webauthn"
 )
 
-//go:embed templates/index.html templates/login.html
+//go:embed templates/index.html templates/login.html templates/manifest.webmanifest
 var templatesFS embed.FS
 
 //go:embed static
 var staticFS embed.FS
-
-func init() {
-	// .webmanifest isn't in Go's (or every OS's) built-in mime table, and
-	// without this http.FileServerFS falls back to application/octet-stream,
-	// which some browsers refuse to treat as a valid PWA manifest.
-	_ = mime.AddExtensionType(".webmanifest", "application/manifest+json")
-}
 
 const defaultDialogLimit = 20
 
@@ -81,6 +74,7 @@ type Handler struct {
 	mux             *http.ServeMux
 	indexTmpl       *template.Template
 	loginTmpl       *template.Template
+	manifestTmpl    *texttemplate.Template // text/template, not html/template: the output is JSON, not HTML
 	history         History
 	memory          Memory
 	webauthn        WebAuthnService // nil disables passkey login/registration entirely
@@ -141,6 +135,10 @@ func New(h History, mem Memory, webauthnSvc WebAuthnService, usersRegistry *user
 	if err != nil {
 		return nil, fmt.Errorf("webui: parse login template: %w", err)
 	}
+	manifestTmpl, err := texttemplate.ParseFS(templatesFS, "templates/manifest.webmanifest")
+	if err != nil {
+		return nil, fmt.Errorf("webui: parse manifest template: %w", err)
+	}
 	assetVersion, err := staticAssetVersion(staticFS)
 	if err != nil {
 		return nil, fmt.Errorf("webui: hash static assets: %w", err)
@@ -149,6 +147,7 @@ func New(h History, mem Memory, webauthnSvc WebAuthnService, usersRegistry *user
 	handler := &Handler{
 		indexTmpl:       indexTmpl,
 		loginTmpl:       loginTmpl,
+		manifestTmpl:    manifestTmpl,
 		history:         h,
 		memory:          mem,
 		webauthn:        webauthnSvc,
@@ -164,6 +163,13 @@ func New(h History, mem Memory, webauthnSvc WebAuthnService, usersRegistry *user
 	mux.HandleFunc("POST /logout", handler.handleLogout)
 	mux.HandleFunc("GET /set-lang", handler.handleSetLanguage)
 	mux.Handle("GET /static/", http.FileServerFS(staticFS)) // public: needed to render the login page itself
+	// Registered as a more specific pattern than "/static/" above (same
+	// precedence rule the avatarsDir block below relies on), so this wins
+	// for exactly this one path — templates/manifest.webmanifest is
+	// rendered here instead of served from staticFS so its icon URLs can
+	// embed AssetVersion (see handleManifest and that template's own
+	// comment for why the manifest's own URL still can't be versioned).
+	mux.HandleFunc("GET /static/manifest.webmanifest", handler.handleManifest)
 	// The versioned alias templates actually link to: same content, but at a
 	// path that changes on every build, so it's safe to tell browsers to
 	// cache it forever instead of revalidating on every page load (the
@@ -232,6 +238,16 @@ func cacheForever(next http.Handler) http.Handler {
 		w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
 		next.ServeHTTP(w, r)
 	})
+}
+
+// handleManifest renders the PWA manifest with the current build's
+// AssetVersion baked into its icon URLs, so the icons get the same
+// cache-forever treatment as every other static asset — unlike the
+// manifest's own URL, which must stay fixed (see the route registration
+// comment in New).
+func (h *Handler) handleManifest(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/manifest+json")
+	_ = h.manifestTmpl.Execute(w, manifestData{AssetVersion: h.assetVersion})
 }
 
 func (h *Handler) handleIndex(w http.ResponseWriter, r *http.Request) {

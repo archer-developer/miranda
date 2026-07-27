@@ -2,21 +2,31 @@
 <html lang="{{.Lang}}" class="h-full">
 <head>
   <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <!-- viewport-fit=cover: lets the page extend under the iOS notch/home-
+       indicator instead of Safari letterboxing it there, which is what
+       makes the env(safe-area-inset-*) values below resolve to the real
+       inset instead of 0 — without this, a PWA's own fixed-bottom UI (the
+       chat composer, see styles.css) sits flush against the home indicator
+       when launched standalone. -->
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
   <title>Miranda</title>
+  <meta name="theme-color" id="theme-color-meta" content="#f8fafc" />
   <script>
-    // Sets the .dark class on <html> synchronously, before the stylesheet
-    // below even starts loading, so the page never flashes the wrong theme
-    // for a split second. Deliberately not an ES module (those are always
-    // deferred) and duplicated in login.html (see that template) since the
-    // two pages don't share a layout. Keep STORAGE_KEY in sync with
-    // static/js/theme.js by hand if it ever changes.
+    // Sets the .dark class on <html>, and the theme-color meta tag above,
+    // synchronously before the stylesheet below even starts loading, so the
+    // page (and the browser chrome's own color) never flashes the wrong
+    // theme for a split second. Deliberately not an ES module (those are
+    // always deferred) and duplicated in login.html (see that template)
+    // since the two pages don't share a layout. Keep STORAGE_KEY and the
+    // two hex colors in sync with static/js/theme.js's THEME_COLORS by hand
+    // if either ever changes.
     (function () {
       try {
         var STORAGE_KEY = "miranda-theme";
         var stored = localStorage.getItem(STORAGE_KEY);
         var dark = stored ? stored === "dark" : window.matchMedia("(prefers-color-scheme: dark)").matches;
         document.documentElement.classList.toggle("dark", dark);
+        document.getElementById("theme-color-meta").content = dark ? "#160b2e" : "#f8fafc";
       } catch (e) {
         /* Storage/matchMedia can throw in restricted contexts; falling
            through leaves the light theme (the unconditional default). */
@@ -27,12 +37,13 @@
   <link rel="alternate icon" type="image/png" href="/static/v{{.AssetVersion}}/brand/icon.png" />
   <link rel="stylesheet" href="/static/v{{.AssetVersion}}/css/styles.css" />
 
-  <!-- PWA: install metadata. manifest.webmanifest is served unversioned
-       (see webui.go) because its own icon URLs can't embed the
-       content-derived AssetVersion hash without creating a circular
-       dependency on that hash. -->
+  <!-- PWA: install metadata. manifest.webmanifest itself is served at a
+       fixed, unversioned URL (see webui.go's handleManifest) — an
+       already-installed home-screen shortcut has no page load to pick up a
+       new versioned URL after a future deploy, so the manifest's own
+       address must never change. Its icon URLs inside are still versioned,
+       so a rebuild still cache-busts them like every other static asset. -->
   <link rel="manifest" href="/static/manifest.webmanifest" />
-  <meta name="theme-color" content="#160b2e" />
   <link rel="apple-touch-icon" href="/static/v{{.AssetVersion}}/brand/apple-touch-icon.png" />
   <meta name="apple-mobile-web-app-capable" content="yes" />
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />

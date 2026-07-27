@@ -42,41 +42,46 @@ function setStatus(connected) {
   wsDot.title = wsStatus.textContent;
 }
 
-// Logged at every open/close/error so intermittent drops show up in the
-// browser console with enough detail (close code + reason + how long the
-// connection lasted) to tell a server-side restart apart from a network
-// blip or a proxy/idle timeout — all three look identical from setStatus()
-// alone.
-const RECONNECT_DELAY_MS = 2000;
-let connectedAt = null;
+// Logged at every open/close so intermittent drops show up in the browser
+// console with enough detail (close code + reason + how long the connection
+// lasted) to tell a server-side restart apart from a network blip or a
+// proxy/idle timeout — all three look identical from setStatus() alone.
+// Reconnect backs off exponentially (capped) instead of retrying at a fixed
+// interval forever: during a real outage a fixed 2s retry would otherwise
+// log indefinitely and bury the one transition that matters (down → up) in
+// near-duplicate noise — exactly the opposite of what this logging is for.
+const RECONNECT_BASE_MS = 2000;
+const RECONNECT_MAX_MS = 30000;
+let reconnectDelay = RECONNECT_BASE_MS;
 
 export function connect() {
   const proto = location.protocol === "https:" ? "wss:" : "ws:";
   const ws = new WebSocket(`${proto}//${location.host}/ws/logs`);
+  let openedAt = null; // this connection's own lifetime, not shared across reconnects
 
   ws.onopen = () => {
-    connectedAt = Date.now();
+    openedAt = Date.now();
+    reconnectDelay = RECONNECT_BASE_MS; // a successful connection resets the backoff
     console.info("[ws] connected");
     setStatus(true);
   };
   ws.onclose = (event) => {
-    const upSecs = connectedAt ? ((Date.now() - connectedAt) / 1000).toFixed(1) : "?";
-    connectedAt = null;
+    const upSecs = openedAt ? ((Date.now() - openedAt) / 1000).toFixed(1) : "?";
+    const delay = reconnectDelay;
+    reconnectDelay = Math.min(reconnectDelay * 2, RECONNECT_MAX_MS);
     console.warn(
-      `[ws] closed after ${upSecs}s (code=${event.code} reason=${JSON.stringify(event.reason)} wasClean=${event.wasClean}) — reconnecting in ${RECONNECT_DELAY_MS}ms`,
+      `[ws] closed after ${upSecs}s (code=${event.code} reason=${JSON.stringify(event.reason)} wasClean=${event.wasClean}) — reconnecting in ${delay}ms`,
     );
     setStatus(false);
-    setTimeout(connect, RECONNECT_DELAY_MS);
+    setTimeout(connect, delay);
   };
   // onerror fires alongside (just before) onclose on a failed/dropped
-  // connection, but carries no useful detail of its own (the Event object
-  // has no code/reason) — the close handler above is where the actual
-  // diagnostics are logged. This just forces the close so reconnect isn't
-  // delayed waiting on the socket to notice on its own.
-  ws.onerror = () => {
-    console.warn("[ws] error — closing socket");
-    ws.close();
-  };
+  // connection, but the Event object carries no useful detail of its own
+  // (no code/reason) beyond what onclose already logs above, and the
+  // browser already runs the close sequence on its own after a connection
+  // error — this close() call is a defensive no-op, not worth a second log
+  // line for the same failed attempt.
+  ws.onerror = () => ws.close();
   ws.onmessage = (event) => {
     try {
       dispatch(JSON.parse(event.data));

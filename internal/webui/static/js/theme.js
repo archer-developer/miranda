@@ -17,9 +17,22 @@ import { t } from "./i18n.js";
 
 const STORAGE_KEY = "miranda-theme"; // localStorage value: "light" | "dark"
 
+// Mirrors the two values the pre-paint inline <script> (see the comment
+// above) writes into <meta name="theme-color" id="theme-color-meta">
+// before first paint — kept here too so an explicit toggle (as opposed to
+// the OS-preference default the inline script applies) updates the
+// browser-chrome color immediately instead of leaving it stuck on
+// whichever theme was active at page load.
+const THEME_COLORS = { light: "#f8fafc", dark: "#160b2e" };
+
 /** True if <html> currently carries the .dark class. */
 function isDark() {
   return document.documentElement.classList.contains("dark");
+}
+
+function syncThemeColorMeta(theme) {
+  const meta = document.getElementById("theme-color-meta");
+  if (meta) meta.content = THEME_COLORS[theme];
 }
 
 // The button's icon always reflects the *current* theme (sun while dark is
@@ -40,6 +53,7 @@ function syncButton(button) {
 /** Applies `theme` ("light" | "dark") to <html> and persists it. */
 function applyTheme(theme) {
   document.documentElement.classList.toggle("dark", theme === "dark");
+  syncThemeColorMeta(theme);
   try {
     localStorage.setItem(STORAGE_KEY, theme);
   } catch {
@@ -50,12 +64,15 @@ function applyTheme(theme) {
 }
 
 /**
- * Wires a theme toggle `button` (an icon-only button already present in the
- * template): syncs its icon/label to whatever the pre-paint inline script
- * already applied, then flips the theme on every click. No-ops if `button`
+ * Re-syncs the theme-color meta tag (defensively — the pre-paint inline
+ * script should have already set it correctly), then wires a theme toggle
+ * `button` (an icon-only button already present in the template): syncs its
+ * icon/label to whatever the pre-paint inline script already applied, and
+ * flips the theme on every click. The button-wiring half no-ops if `button`
  * is missing so callers don't need to guard the lookup themselves.
  */
 export function init(button) {
+  syncThemeColorMeta(isDark() ? "dark" : "light");
   if (!button) return;
   syncButton(button);
   button.addEventListener("click", () => {

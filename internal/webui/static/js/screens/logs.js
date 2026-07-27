@@ -69,6 +69,12 @@ function selectTab(source, container) {
 export function mount(container) {
   container.innerHTML = `
     <div class="flex h-full flex-col">
+      <!-- min-h-0 here is load-bearing (see screens/chat.js's #chat-scroll
+           for the same rule spelled out): every flex-column ancestor
+           between a fixed header/tabs block and the #logs-pane's flex-1
+           overflow-y-auto below needs it, or this wrapper grows to fit the
+           pane's content instead of shrinking to the available height, and
+           the pane never actually scrolls. -->
       <div class="mx-auto flex min-h-0 w-full max-w-5xl flex-1 flex-col px-4 py-6 sm:px-6 sm:py-8">
         <div class="flex items-center justify-between gap-3">
           <h1 class="text-2xl font-semibold tracking-tight text-(--color-text)">${t("nav_logs", "Logs")}</h1>

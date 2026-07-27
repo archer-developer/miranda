@@ -211,12 +211,24 @@ export function mount(container) {
   container.innerHTML = `
     <div class="flex h-full flex-col">
       <h1 class="sr-only">${t("nav_chat", "Chat")}</h1>
+      <!-- min-h-0 here (and on every flex-column ancestor between a fixed
+           header and a flex-1 overflow-y-auto pane, see screens/logs.js's
+           scroll wrapper for the same rule) is load-bearing: without it a
+           flex child defaults to min-height:auto and grows to fit its
+           content instead of shrinking to the available space, so
+           overflow-y-auto never actually triggers and the pane just gets
+           clipped by an ancestor's overflow-hidden instead of scrolling. -->
       <div id="chat-scroll" class="scrollbar-thin min-h-0 flex-1 overflow-y-auto">
         <div class="mx-auto flex min-h-full max-w-3xl flex-col justify-end px-4 py-6 sm:px-6">
           <div id="chat-messages" class="flex flex-col gap-4" aria-live="polite" aria-relevant="additions"></div>
         </div>
       </div>
-      <div class="border-t border-(--color-border) bg-(--color-bg)/70">
+      <!-- pb-[env(safe-area-inset-bottom)]: on an installed iOS PWA
+           (viewport-fit=cover in index.html's <head>) this resolves to the
+           home-indicator inset instead of 0, so the composer never sits
+           flush against it; on every other browser it's just 0 and adds
+           nothing. -->
+      <div class="border-t border-(--color-border) bg-(--color-bg)/70 pb-[env(safe-area-inset-bottom)]">
         <form id="chat-form" class="mx-auto flex max-w-3xl items-end gap-2 px-4 py-3 sm:px-6">
           <label for="chat-text" class="sr-only">${t("chat_placeholder", "Message Miranda…")}</label>
           <textarea id="chat-text" rows="1" placeholder="${t("chat_placeholder", "Message Miranda…")}"

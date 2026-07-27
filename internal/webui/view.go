@@ -108,3 +108,9 @@ type loginPageData struct {
 	WebAuthnEnabled bool
 	AssetVersion    string
 }
+
+// manifestData is the (sole) value templates/manifest.webmanifest is
+// rendered with — see Handler.handleManifest.
+type manifestData struct {
+	AssetVersion string
+}
