@@ -10,15 +10,14 @@
 import { connectReconnecting } from "./reconnecting-ws.js";
 
 const listeners = new Set();
-// Fired on every (re)connection, including the very first — a listener
-// registered after connect() already opened (the common case: app.js calls
-// connect() at startup, before chat.js ever mounts and subscribes) simply
-// misses that first firing, which is fine since chat.js's mount() already
-// hydrates history directly for that case. What matters is every *later*
-// reconnect (network blip, laptop sleep, server restart) fires this: since
-// handleWSChat deliberately doesn't replay a backlog (see its doc comment),
-// a subscriber must re-fetch history itself to recover anything published
-// while this socket was down, rather than silently staying stale forever.
+// Fired on every *re*connection — deliberately not the very first connect,
+// since chat.js's mount() already hydrates history itself for that case
+// (see connect()'s `everConnected` guard below). What matters is every
+// *later* reconnect (network blip, laptop sleep, server restart) fires
+// this: since handleWSChat deliberately doesn't replay a backlog (see its
+// doc comment), a subscriber must re-fetch history itself to recover
+// anything published while this socket was down, rather than silently
+// staying stale forever.
 const reconnectListeners = new Set();
 
 function dispatch(ev) {
@@ -31,13 +30,21 @@ export function on(fn) {
   return () => listeners.delete(fn);
 }
 
-/** Subscribe to every (re)connection of this socket. Returns an unsubscribe fn. */
+/** Subscribe to every *re*connection of this socket (not the initial connect — see `everConnected` below). Returns an unsubscribe fn. */
 export function onReconnect(fn) {
   reconnectListeners.add(fn);
   return () => reconnectListeners.delete(fn);
 }
 
 let started = false;
+// Set after the first successful open, so that open is never mistaken for
+// a reconnect — app.js's router.start() mounts chat.js (which subscribes
+// via onReconnect) synchronously, well before this connect() call's
+// WebSocket handshake can possibly complete, so without this guard every
+// initial page load would fire reconnectListeners once for real (mount's
+// own loadHistory()) and once more here, visibly re-clearing and
+// re-rendering the just-loaded thread.
+let everConnected = false;
 
 export function connect() {
   if (started) return; // app.js-lifetime singleton, same as ws.js's connect()
@@ -50,7 +57,10 @@ export function connect() {
   connectReconnecting(`${proto}//${location.host}/ws/chat/${encodeURIComponent(username)}`, {
     onOpen: () => {
       console.info("[chat-ws] connected");
-      for (const fn of reconnectListeners) fn();
+      if (everConnected) {
+        for (const fn of reconnectListeners) fn();
+      }
+      everConnected = true;
     },
     onClose: ({ upSecs, code, reason, wasClean, nextDelayMs }) => {
       console.warn(
