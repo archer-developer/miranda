@@ -13,10 +13,18 @@ import (
 	"github.com/anthropics/anthropic-sdk-go/option"
 	"github.com/anthropics/anthropic-sdk-go/packages/ssestream"
 
+	"github.com/archer-developer/miranda/internal/config"
 	"github.com/archer-developer/miranda/internal/llm"
 )
 
 const defaultMaxTokens = 4096
+
+// codeExecutionCaller identifies this provider's code execution tool
+// version in the AllowedCallers list of the web search/fetch tools, so
+// code running in Anthropic's sandbox is permitted to invoke them as
+// helpers (e.g. fetch a page, then parse/compute over it in code) instead
+// of only being callable directly by the model.
+const codeExecutionCaller = "code_execution_20260521"
 
 // Provider is an llm.Provider backed by the native Anthropic Messages API.
 type Provider struct {
@@ -24,10 +32,13 @@ type Provider struct {
 	model     string
 	maxTokens int64
 	client    anthropic.Client
+	tools     config.AnthropicToolsConfig
 }
 
-// New builds a Provider named name for the given Claude model.
-func New(name, model, apiKey string) *Provider {
+// New builds a Provider named name for the given Claude model. tools
+// enables Claude's own server-executed web search/fetch/code-execution
+// tools on every request from this provider (see config.AnthropicToolsConfig).
+func New(name, model, apiKey string, tools config.AnthropicToolsConfig) *Provider {
 	opts := []option.RequestOption{}
 	if apiKey != "" {
 		opts = append(opts, option.WithAPIKey(apiKey))
@@ -37,6 +48,7 @@ func New(name, model, apiKey string) *Provider {
 		model:     model,
 		maxTokens: defaultMaxTokens,
 		client:    anthropic.NewClient(opts...),
+		tools:     tools,
 	}
 }
 
@@ -51,7 +63,7 @@ func (p *Provider) Chat(ctx context.Context, req llm.ChatRequest) (<-chan llm.St
 		MaxTokens: p.maxTokens,
 		System:    system,
 		Messages:  messages,
-		Tools:     toAnthropicTools(req.Tools),
+		Tools:     p.buildTools(req.Tools),
 	}
 
 	stream := p.client.Messages.NewStreaming(ctx, params)
@@ -146,6 +158,24 @@ func toAnthropicMessages(msgs []llm.Message) ([]anthropic.TextBlockParam, []anth
 	return system, out
 }
 
+// buildTools assembles the full tool list sent on every request: the
+// model-invoked custom tools first (MCP, remember_this, etc. — executed by
+// the Orchestrator's own tool loop), followed by this provider's enabled
+// native Anthropic tools (executed by Anthropic itself; see nativeTools).
+// Anthropic's render order is tools → system → messages, and both halves
+// are identical on every turn of a conversation, so a single cache
+// breakpoint on the very last entry caches the whole list as a shared
+// prefix and avoids re-pricing it on subsequent turns.
+func (p *Provider) buildTools(custom []llm.ToolDef) []anthropic.ToolUnionParam {
+	out := toAnthropicTools(custom)
+	out = append(out, p.nativeTools()...)
+	if len(out) == 0 {
+		return nil
+	}
+	setCacheBreakpoint(&out[len(out)-1])
+	return out
+}
+
 func toAnthropicTools(tools []llm.ToolDef) []anthropic.ToolUnionParam {
 	if len(tools) == 0 {
 		return nil
@@ -163,14 +193,66 @@ func toAnthropicTools(tools []llm.ToolDef) []anthropic.ToolUnionParam {
 			},
 		})
 	}
-
-	// Anthropic's render order is tools → system → messages. A cache breakpoint
-	// on the last tool caches the entire tool list as a shared prefix, so
-	// repeated turns (which always send the same tool definitions) don't pay
-	// input-token cost for them again.
-	out[len(out)-1].OfTool.CacheControl = anthropic.NewCacheControlEphemeralParam()
-
 	return out
+}
+
+// nativeTools builds the Anthropic-executed tools enabled on this provider
+// (config.AnthropicToolsConfig) — unlike everything in toAnthropicTools,
+// the model's use of these never round-trips through the Orchestrator's
+// executeTool; Anthropic resolves them server-side within the same
+// streamed response. This is what lets Claude answer something that needs
+// the live internet (e.g. a current price), which none of Miranda's own
+// tools reach.
+func (p *Provider) nativeTools() []anthropic.ToolUnionParam {
+	var out []anthropic.ToolUnionParam
+
+	// AllowedCallers defaults to "direct" (the model calling the tool
+	// itself). Adding the code execution caller here is what lets code
+	// running in Anthropic's sandbox invoke web search/fetch itself as a
+	// helper — e.g. fetch a page, then parse or compute over it in code —
+	// instead of only being callable by the model directly.
+	callers := []string{"direct"}
+	if p.tools.CodeExecution {
+		callers = append(callers, codeExecutionCaller)
+	}
+
+	if p.tools.WebSearch {
+		out = append(out, anthropic.ToolUnionParam{
+			OfWebSearchTool20260318: &anthropic.WebSearchTool20260318Param{
+				AllowedCallers: callers,
+			},
+		})
+	}
+	if p.tools.WebFetch {
+		out = append(out, anthropic.ToolUnionParam{
+			OfWebFetchTool20260318: &anthropic.WebFetchTool20260318Param{
+				AllowedCallers: callers,
+			},
+		})
+	}
+	if p.tools.CodeExecution {
+		out = append(out, anthropic.ToolUnionParam{
+			OfCodeExecutionTool20260521: &anthropic.CodeExecutionTool20260521Param{},
+		})
+	}
+	return out
+}
+
+// setCacheBreakpoint marks tool as a prompt-cache boundary. The cache
+// control field lives on whichever concrete tool struct is populated
+// inside the union, so this has to switch on it explicitly — there is no
+// single settable field on ToolUnionParam itself.
+func setCacheBreakpoint(tool *anthropic.ToolUnionParam) {
+	switch {
+	case tool.OfTool != nil:
+		tool.OfTool.CacheControl = anthropic.NewCacheControlEphemeralParam()
+	case tool.OfWebSearchTool20260318 != nil:
+		tool.OfWebSearchTool20260318.CacheControl = anthropic.NewCacheControlEphemeralParam()
+	case tool.OfWebFetchTool20260318 != nil:
+		tool.OfWebFetchTool20260318.CacheControl = anthropic.NewCacheControlEphemeralParam()
+	case tool.OfCodeExecutionTool20260521 != nil:
+		tool.OfCodeExecutionTool20260521.CacheControl = anthropic.NewCacheControlEphemeralParam()
+	}
 }
 
 func requiredFields(parameters map[string]any) []string {

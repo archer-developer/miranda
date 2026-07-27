@@ -49,6 +49,20 @@ llm:
       type: anthropic
       model: "claude-sonnet-5"
       api_key_env: "ANTHROPIC_API_KEY"
+      # Claude's own server-executed tools (run by Anthropic itself, not
+      # through Miranda's tool loop). All default to false. This is what
+      # lets Claude answer something needing the live internet, e.g. "what's
+      # the bitcoin price right now" — none of Miranda's own tools
+      # (MCP/HA, remember_this, etc.) reach the open web. web_search is
+      # required for open-ended questions like that one: web_fetch alone can
+      # only read a URL the model was already given (by the user or by a
+      # prior search), it can't discover one itself. Enabling code_execution
+      # alongside them also lets the sandboxed code call web_search/web_fetch
+      # itself as a helper (e.g. fetch a page, then parse/compute over it).
+      anthropic_tools:
+        web_search: true
+        web_fetch: true
+        code_execution: true
   default_provider: local-qwen
   escalation:
     # Lets the primary/local model hand a hard turn off to a stronger model

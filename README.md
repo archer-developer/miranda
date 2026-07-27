@@ -98,6 +98,21 @@ routing, and the opt-in `gemini_tts` provider — see **TTS** below),
 `storage` (SQLite + memory file + TTS audio cache paths), `users` (web UI
 login accounts — see **Web UI** below).
 
+An `anthropic`-type provider can also opt into Claude's own server-executed
+tools via `anthropic_tools` (`web_search`, `web_fetch`, `code_execution` —
+all default to `false`). These run entirely on Anthropic's side, not
+through Miranda's own tool loop, so they're what let Claude answer
+something that needs the live internet (e.g. "какой сейчас курс
+биткоина") — none of Miranda's own tools (MCP/HA, `remember_this`, etc.)
+reach the open web. `web_search` is required for open-ended questions like
+that one: `web_fetch` alone can only read a URL the model was already
+given (by the user, or by a prior search) — it can't discover one itself,
+so enabling `web_fetch` without `web_search` leaves the model unable to
+answer anything it doesn't already have a URL for. Enabling
+`code_execution` alongside them also lets code running in Anthropic's
+sandbox call `web_search`/`web_fetch` itself as a helper (fetch a page,
+then parse or compute over it).
+
 ## TTS
 
 Two providers, selected via `tts.primary` (and an optional `tts.fallback`

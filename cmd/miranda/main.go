@@ -306,7 +306,7 @@ func buildProviders(configs []config.LLMProvider) ([]llm.Provider, error) {
 		}
 		switch c.Type {
 		case "anthropic":
-			providers = append(providers, anthropic.New(c.Name, c.Model, apiKey))
+			providers = append(providers, anthropic.New(c.Name, c.Model, apiKey, c.AnthropicTools))
 		case "openai_compat":
 			providers = append(providers, openaicompat.New(c.Name, c.BaseURL, c.Model, apiKey))
 		default:

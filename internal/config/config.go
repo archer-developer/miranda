@@ -182,6 +182,31 @@ type LLMProvider struct {
 	BaseURL   string `yaml:"base_url,omitempty"`
 	Model     string `yaml:"model"`
 	APIKeyEnv string `yaml:"api_key_env,omitempty"`
+	// AnthropicTools enables Claude's own server-executed tools. Only
+	// meaningful when Type == "anthropic"; ignored otherwise. These run
+	// entirely on Anthropic's side (web fetch/search over the live internet,
+	// code execution in Anthropic's sandbox) rather than through the
+	// Orchestrator's own tool loop, so they're what lets Claude answer
+	// something like "what's the bitcoin price right now" — none of
+	// Miranda's own tools (MCP/HA, remember_this, etc.) reach the open web.
+	AnthropicTools AnthropicToolsConfig `yaml:"anthropic_tools,omitempty"`
+}
+
+// AnthropicToolsConfig toggles which of Claude's native server-side tools
+// (see internal/llm/anthropic) are sent on every request from this
+// provider. All default to false (opt-in) since they let the model reach
+// the open internet or run arbitrary code — leave disabled for providers
+// that shouldn't have that reach.
+type AnthropicToolsConfig struct {
+	// WebSearch lets the model search the live web.
+	WebSearch bool `yaml:"web_search"`
+	// WebFetch lets the model retrieve a specific URL's content directly.
+	WebFetch bool `yaml:"web_fetch"`
+	// CodeExecution runs Python/bash in Anthropic's sandbox. When WebSearch
+	// or WebFetch are also enabled, the sandbox is allowed to call them as
+	// helpers (e.g. fetch a page, then parse/compute over it in code) — see
+	// the AllowedCallers wiring in internal/llm/anthropic.
+	CodeExecution bool `yaml:"code_execution"`
 }
 
 // EscalationConfig configures the explicit escalate_to_claude-style tool that
