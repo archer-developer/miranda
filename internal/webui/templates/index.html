@@ -7,8 +7,11 @@
        makes the env(safe-area-inset-*) values below resolve to the real
        inset instead of 0 — without this, a PWA's own fixed-bottom UI (the
        chat composer, see styles.css) sits flush against the home indicator
-       when launched standalone. -->
-  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+       when launched standalone. maximum-scale=1/user-scalable=no disable
+       pinch-zoom — a deliberate accessibility trade-off (some users rely on
+       pinch-zoom for readability), requested because it kept getting
+       triggered by accident on a touch UI this dense. -->
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover" />
   <title>Miranda</title>
   <meta name="theme-color" id="theme-color-meta" content="#f8fafc" />
   <script>
@@ -57,7 +60,7 @@
 
   <div class="flex h-full flex-col">
     <!-- pt-[env(safe-area-inset-top)]: same reasoning as the composer's
-         pb-[env(safe-area-inset-bottom)] in screens/chat.js, but for the
+         bottom safe-area padding in screens/chat.js, but for the
          other edge — viewport-fit=cover (index.html's <head>) makes the
          whole document draw under the iOS status bar/notch in a standalone
          PWA, not just the home-indicator area at the bottom, so the header

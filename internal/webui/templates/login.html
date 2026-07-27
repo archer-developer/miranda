@@ -2,10 +2,10 @@
 <html lang="{{.Lang}}" class="h-full">
 <head>
   <meta charset="utf-8" />
-  <!-- viewport-fit=cover: see index.html's copy of this tag — needed so
-       env(safe-area-inset-*) resolves to a real inset in the installed PWA
-       instead of 0. -->
-  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <!-- viewport-fit=cover / maximum-scale / user-scalable: see index.html's
+       copy of this tag for both — the safe-area reasoning and the
+       pinch-zoom trade-off apply the same way here. -->
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover" />
   <title>{{.Strings.login_title}} — Miranda</title>
   <meta name="theme-color" id="theme-color-meta" content="#f8fafc" />
   <script>
