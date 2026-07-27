@@ -30,6 +30,27 @@
       }
     })();
   </script>
+  <script>
+    // Sets --app-height on <html> to the real viewport height — see
+    // index.html's copy of this script for the WKWebView cold-launch quirk
+    // it works around.
+    (function () {
+      function setAppHeight() {
+        var h = (window.visualViewport && window.visualViewport.height) || window.innerHeight;
+        document.documentElement.style.setProperty("--app-height", h + "px");
+      }
+      setAppHeight();
+      ["resize", "orientationchange", "scroll"].forEach(function (evt) {
+        window.addEventListener(evt, setAppHeight, { passive: true });
+      });
+      if (window.visualViewport) {
+        window.visualViewport.addEventListener("resize", setAppHeight);
+        window.visualViewport.addEventListener("scroll", setAppHeight);
+      }
+      requestAnimationFrame(setAppHeight);
+      setTimeout(setAppHeight, 300);
+    })();
+  </script>
   <link rel="icon" type="image/svg+xml" href="/static/v{{.AssetVersion}}/brand/icon.svg" />
   <link rel="alternate icon" type="image/png" href="/static/v{{.AssetVersion}}/brand/icon.png" />
   <link rel="stylesheet" href="/static/v{{.AssetVersion}}/css/styles.css" />
@@ -44,10 +65,12 @@
   <meta name="apple-mobile-web-app-title" content="Miranda" />
   <meta name="mobile-web-app-capable" content="yes" />
 </head>
-<!-- min-h-dvh, not min-h-full: see index.html's body for why a
-     percentage-height chain falls short of the real viewport under
-     viewport-fit=cover in standalone PWA mode. -->
-<body class="flex min-h-dvh items-center justify-center bg-(--color-bg) px-4 py-8 text-(--color-text) antialiased">
+<!-- min-h-[var(--app-height,100dvh)], not min-h-full: see index.html's
+     body for why a percentage-height chain falls short of the real
+     viewport under viewport-fit=cover in standalone PWA mode, and why
+     --app-height (set by the inline script above) rather than plain
+     100dvh. -->
+<body class="flex min-h-[var(--app-height,100dvh)] items-center justify-center bg-(--color-bg) px-4 py-8 text-(--color-text) antialiased">
   <!-- No overflow-hidden here: the decorative glow below is `fixed`, so it
        never contributes to the page's scrollable area — and a short
        viewport (e.g. a landscape phone with the keyboard open) must still

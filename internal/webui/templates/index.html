@@ -36,6 +36,35 @@
       }
     })();
   </script>
+  <script>
+    // Sets --app-height on <html> to the real, current viewport height,
+    // synchronously before first paint — a workaround for a WKWebView
+    // standalone-PWA quirk where window.innerHeight/visualViewport.height
+    // (and, transitively, the 100dvh the <body> below falls back to before
+    // this runs) report a too-short value on cold launch that only
+    // self-corrects after the *next* layout pass, which in practice only
+    // happened once the user scrolled — leaving the composer sitting on an
+    // unstyled gap the height of the shortfall until then. Re-measuring on
+    // resize/scroll/visualViewport events keeps it correct after; the
+    // rAF/timeout re-measures below catch WebKit's own self-correction
+    // without waiting on the user to trigger it via a scroll gesture.
+    (function () {
+      function setAppHeight() {
+        var h = (window.visualViewport && window.visualViewport.height) || window.innerHeight;
+        document.documentElement.style.setProperty("--app-height", h + "px");
+      }
+      setAppHeight();
+      ["resize", "orientationchange", "scroll"].forEach(function (evt) {
+        window.addEventListener(evt, setAppHeight, { passive: true });
+      });
+      if (window.visualViewport) {
+        window.visualViewport.addEventListener("resize", setAppHeight);
+        window.visualViewport.addEventListener("scroll", setAppHeight);
+      }
+      requestAnimationFrame(setAppHeight);
+      setTimeout(setAppHeight, 300);
+    })();
+  </script>
   <link rel="icon" type="image/svg+xml" href="/static/v{{.AssetVersion}}/brand/icon.svg" />
   <link rel="alternate icon" type="image/png" href="/static/v{{.AssetVersion}}/brand/icon.png" />
   <link rel="stylesheet" href="/static/v{{.AssetVersion}}/css/styles.css" />
@@ -53,17 +82,20 @@
   <meta name="apple-mobile-web-app-title" content="Miranda" />
   <meta name="mobile-web-app-capable" content="yes" />
 </head>
-<!-- h-dvh (not h-full/height:100%) is load-bearing here: with
-     viewport-fit=cover, WKWebView's percentage-height chain
+<!-- h-[var(--app-height,100dvh)] (not h-full/height:100%) is load-bearing
+     here: with viewport-fit=cover, WKWebView's percentage-height chain
      (html{height:100%} -> body{height:100%} -> the flex div below) resolves
      against a containing block that's short by exactly the top safe-area
      inset in standalone PWA mode — a real WebKit quirk that left the
      composer's own bottom safe-area padding correct but sitting on top of
      an extra unstyled gap the height of the *top* inset, since the whole
-     column of content (header+main) was that much too short. 100dvh, being
-     tied directly to the actual visual viewport rather than propagated
-     through ancestor percentages, doesn't have that gap. -->
-<body class="h-dvh bg-(--color-bg) text-(--color-text) antialiased">
+     column of content (header+main) was that much too short. --app-height
+     (set by the inline script above, falling back to 100dvh before it's run)
+     is tied to a direct JS measurement of the real viewport instead of
+     being propagated through ancestor percentages or CSS's own dvh
+     calculation, so it doesn't have that gap or that calculation's timing
+     quirk. -->
+<body class="h-[var(--app-height,100dvh)] bg-(--color-bg) text-(--color-text) antialiased">
   <a href="#app" class="sr-only focus-visible:not-sr-only focus-visible:fixed focus-visible:left-4 focus-visible:top-4 focus-visible:z-50 focus-visible:rounded-lg focus-visible:bg-(--color-accent) focus-visible:px-4 focus-visible:py-2 focus-visible:text-sm focus-visible:font-medium focus-visible:text-white">
     {{.Strings.skip_to_content}}
   </a>
