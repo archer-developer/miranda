@@ -169,7 +169,7 @@ func (o *Orchestrator) availableTools(ctx context.Context) ([]llm.ToolDef, error
 		tools = append(tools, llm.ToolDef{
 			Name: forgetConversationToolName,
 			Description: "Delete this entire conversation with no memory of it — use when the user explicitly asks " +
-				"to forget this conversation or start completely from scratch (e.g. \"забудь этот диалог\", " +
+				"to forget this conversation or start completely from scratch (e.g. \"забудь\", \"забудь этот диалог\", " +
 				"\"давай с начала\").",
 			Parameters: map[string]any{"type": "object", "properties": map[string]any{}},
 		})
