@@ -52,6 +52,7 @@
   "profile_passkey_nickname_placeholder": "например, iPhone",
   "profile_no_passkeys": "Пока нет привязанных ключей.",
   "profile_remove_button": "Удалить",
+  "profile_remove_confirm_label": "Нажмите ещё раз, чтобы подтвердить удаление",
   "profile_refresh_button": "Обновить приложение",
   "logout_button": "Выйти",
   "login_title": "Вход в Miranda",

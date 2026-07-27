@@ -46,11 +46,47 @@ function passkeyRow(cred, onRemoved) {
 
   const removeBtn = document.createElement("button");
   removeBtn.type = "button";
-  removeBtn.setAttribute("aria-label", `${t("profile_remove_button", "Remove")} ${cred.nickname || cred.id}`);
-  removeBtn.className =
+  const idleLabel = `${t("profile_remove_button", "Remove")} ${cred.nickname || cred.id}`;
+  const idleClass =
     "flex h-11 w-11 shrink-0 items-center justify-center rounded-lg text-(--color-text-faint) transition-colors hover:bg-(--color-danger-bg) hover:text-(--color-danger-icon) focus-visible:outline-none disabled:cursor-not-allowed disabled:opacity-50";
+  const armedClass =
+    "flex h-11 w-11 shrink-0 items-center justify-center rounded-lg bg-(--color-danger-bg) text-(--color-danger-icon) transition-colors focus-visible:outline-none disabled:cursor-not-allowed disabled:opacity-50";
+  removeBtn.setAttribute("aria-label", idleLabel);
+  removeBtn.className = idleClass;
   removeBtn.innerHTML = icon("trash", "h-4 w-4");
+
+  // Deleting a passkey is destructive and irreversible (re-adding means
+  // going through WebAuthn registration again from scratch), so it needs a
+  // confirmation step — but a native confirm() would be a jarring, blocking
+  // browser dialog out of step with every other interaction in this
+  // dashboard (see the toast/accordion patterns elsewhere on this screen),
+  // and there's no modal component in this codebase to reuse instead. A
+  // click-to-arm/click-again-to-confirm toggle on the same button reuses
+  // the existing icon-button, needs no new component, and auto-disarms
+  // (timeout or focus loss) so it can't be confirmed by an unrelated later
+  // click.
+  let armed = false;
+  let armTimer = null;
+
+  function disarm() {
+    armed = false;
+    clearTimeout(armTimer);
+    removeBtn.className = idleClass;
+    removeBtn.setAttribute("aria-label", idleLabel);
+    removeBtn.innerHTML = icon("trash", "h-4 w-4");
+  }
+
   removeBtn.addEventListener("click", async () => {
+    if (!armed) {
+      armed = true;
+      removeBtn.className = armedClass;
+      removeBtn.setAttribute("aria-label", `${t("profile_remove_confirm_label", "Click again to confirm removing")} ${cred.nickname || cred.id}`);
+      removeBtn.innerHTML = icon("check", "h-4 w-4");
+      armTimer = setTimeout(disarm, 3000);
+      return;
+    }
+
+    clearTimeout(armTimer);
     removeBtn.disabled = true;
     try {
       await webauthn.deleteCredential(cred.id);
@@ -59,7 +95,11 @@ function passkeyRow(cred, onRemoved) {
     } catch (err) {
       showToast(`${t("request_failed", "Request failed:")} ${err}`, "error");
       removeBtn.disabled = false;
+      disarm();
     }
+  });
+  removeBtn.addEventListener("focusout", () => {
+    if (armed) disarm();
   });
 
   row.append(left, removeBtn);

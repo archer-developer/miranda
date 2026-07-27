@@ -60,9 +60,15 @@ export function showToast(message, type = "info") {
   el.querySelector(".message-text").textContent = message;
 
   const dismiss = () => {
-    el.style.animation = "none";
-    el.classList.add("animate-fade-in");
-    el.style.animationDirection = "reverse";
+    // Set directly as one inline shorthand rather than mixing an inline
+    // `animation: none` reset with adding the `animate-fade-in` class
+    // afterward — inline style always wins the cascade over a class rule for
+    // the same property, so the earlier reset permanently pinned
+    // animation-name to "none" and the class addition had no effect: the
+    // toast's close button (and the auto-dismiss timer, which calls this
+    // same function) never actually removed the element, since
+    // `animationend` never fired.
+    el.style.animation = "fade-in 160ms ease-out reverse both";
     el.addEventListener("animationend", () => el.remove(), { once: true });
     // Belt-and-suspenders: if animations are disabled (prefers-reduced-motion)
     // animationend still fires (duration collapses to ~0), so this always
