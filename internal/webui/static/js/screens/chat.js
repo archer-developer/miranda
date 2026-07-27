@@ -223,13 +223,17 @@ export function mount(container) {
           <div id="chat-messages" class="flex flex-col gap-4" aria-live="polite" aria-relevant="additions"></div>
         </div>
       </div>
-      <!-- pb-[env(safe-area-inset-bottom)]: on an installed iOS PWA
-           (viewport-fit=cover in index.html's <head>) this resolves to the
-           home-indicator inset instead of 0, so the composer never sits
-           flush against it; on every other browser it's just 0 and adds
-           nothing. -->
-      <div class="border-t border-(--color-border) bg-(--color-bg)/70 pb-[env(safe-area-inset-bottom)]">
-        <form id="chat-form" class="mx-auto flex max-w-3xl items-end gap-2 px-4 py-3 sm:px-6">
+      <div class="border-t border-(--color-border) bg-(--color-bg)/70">
+        <!-- pb-[max(0.75rem,env(safe-area-inset-bottom))]: on an installed
+             iOS PWA (viewport-fit=cover in index.html's <head>) the inset
+             resolves to the home-indicator height instead of 0, so the
+             composer never sits flush against it. max() rather than adding
+             the inset on top of the form's own py-3 — summing the two would
+             double up the gap on notched devices (~46px) instead of just
+             using the larger of "the normal resting padding" and "the
+             physical inset", which is all that's actually needed; in a
+             regular browser tab (inset 0) this is identical to plain py-3. -->
+        <form id="chat-form" class="mx-auto flex max-w-3xl items-end gap-2 px-4 pt-3 pb-[max(0.75rem,env(safe-area-inset-bottom))] sm:px-6">
           <label for="chat-text" class="sr-only">${t("chat_placeholder", "Message Miranda…")}</label>
           <textarea id="chat-text" rows="1" placeholder="${t("chat_placeholder", "Message Miranda…")}"
             class="scrollbar-thin max-h-40 flex-1 resize-none rounded-xl border border-(--color-border-strong) bg-(--color-surface)/60 px-4 py-2.5 text-sm text-(--color-text) transition-colors placeholder:text-(--color-text-faint) hover:border-(--color-text-faint) focus:border-(--color-accent-emphasis) focus:outline-none focus-visible:outline-none"></textarea>
