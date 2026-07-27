@@ -53,7 +53,17 @@
   <meta name="apple-mobile-web-app-title" content="Miranda" />
   <meta name="mobile-web-app-capable" content="yes" />
 </head>
-<body class="h-full bg-(--color-bg) text-(--color-text) antialiased">
+<!-- h-dvh (not h-full/height:100%) is load-bearing here: with
+     viewport-fit=cover, WKWebView's percentage-height chain
+     (html{height:100%} -> body{height:100%} -> the flex div below) resolves
+     against a containing block that's short by exactly the top safe-area
+     inset in standalone PWA mode — a real WebKit quirk that left the
+     composer's own bottom safe-area padding correct but sitting on top of
+     an extra unstyled gap the height of the *top* inset, since the whole
+     column of content (header+main) was that much too short. 100dvh, being
+     tied directly to the actual visual viewport rather than propagated
+     through ancestor percentages, doesn't have that gap. -->
+<body class="h-dvh bg-(--color-bg) text-(--color-text) antialiased">
   <a href="#app" class="sr-only focus-visible:not-sr-only focus-visible:fixed focus-visible:left-4 focus-visible:top-4 focus-visible:z-50 focus-visible:rounded-lg focus-visible:bg-(--color-accent) focus-visible:px-4 focus-visible:py-2 focus-visible:text-sm focus-visible:font-medium focus-visible:text-white">
     {{.Strings.skip_to_content}}
   </a>

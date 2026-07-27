@@ -44,7 +44,10 @@
   <meta name="apple-mobile-web-app-title" content="Miranda" />
   <meta name="mobile-web-app-capable" content="yes" />
 </head>
-<body class="flex min-h-full items-center justify-center bg-(--color-bg) px-4 py-8 text-(--color-text) antialiased">
+<!-- min-h-dvh, not min-h-full: see index.html's body for why a
+     percentage-height chain falls short of the real viewport under
+     viewport-fit=cover in standalone PWA mode. -->
+<body class="flex min-h-dvh items-center justify-center bg-(--color-bg) px-4 py-8 text-(--color-text) antialiased">
   <!-- No overflow-hidden here: the decorative glow below is `fixed`, so it
        never contributes to the page's scrollable area — and a short
        viewport (e.g. a landscape phone with the keyboard open) must still
