@@ -297,6 +297,89 @@
   }
 }
 
+/*
+ * Vendored: json-formatter-js (see
+ * static/js/vendor/json-formatter-js/json-formatter.mjs — the Logs screen's
+ * "LLM trace" tab uses it to render each traced call's request/response as
+ * a foldable JSON tree, see static/js/screens/logs-trace-view.js).
+ *
+ * Importing that module self-injects its own small stylesheet into <head>
+ * with hardcoded, light-mode-only colors (plus an opt-in ".json-formatter-dark"
+ * modifier class the library expects to be added by hand and which never
+ * reacts to Miranda's own theme toggle afterward). Neither fits this
+ * dashboard's dark/light system, so every color it sets is overridden below
+ * with Miranda's own `--color-*` custom properties instead — the preferred
+ * fix per the frontend persona doc, since (unlike the library's own
+ * dark-mode class) these automatically flip with `.dark` on <html>, live,
+ * with no re-render needed.
+ *
+ * Every selector here is scoped under `.trace-json` (the wrapper
+ * logs-trace-view.js renders each tree into) so it's naturally more
+ * specific than the library's own bare `.json-formatter-row` selectors.
+ * Specificity alone isn't quite enough to win, though: Tailwind v4's
+ * `@import "tailwindcss"` puts everything in this file inside named cascade
+ * layers (theme/base/components/utilities — see the `@layer` blocks above),
+ * and the CSS Cascade Layers spec ranks *any* unlayered style — exactly what
+ * the vendored script's self-injected <style> tag is — above *every*
+ * layered style regardless of specificity or source order. So this block is
+ * deliberately left OUTSIDE any `@layer`, unlike the rest of this file: two
+ * unlayered rules are compared by specificity as normal, which is exactly
+ * where the `.trace-json` prefix above does its job. (Don't "fix" this back
+ * into `@layer base` — it would silently stop overriding anything.)
+ *
+ * Colors reuse the same small set of semantic tokens already defined above
+ * (success/warning/accent/faint) rather than inventing a new syntax-highlight
+ * palette — enough visual distinction between value types to scan a large
+ * trace quickly, without adding new hues to the app (see the persona doc:
+ * "restrained colors", "one primary accent").
+ */
+.trace-json .json-formatter-row {
+  font-family: inherit; /* match the monospace already set on the pane, not the library's bare "monospace" */
+  color: var(--color-text);
+}
+.trace-json .json-formatter-row a,
+.trace-json .json-formatter-row a:hover {
+  color: var(--color-accent-emphasis);
+}
+.trace-json .json-formatter-row .json-formatter-string,
+.trace-json .json-formatter-row .json-formatter-stringifiable {
+  color: var(--color-success-text);
+}
+.trace-json .json-formatter-row .json-formatter-number {
+  color: var(--color-accent-emphasis);
+}
+.trace-json .json-formatter-row .json-formatter-boolean {
+  color: var(--color-warning-text);
+}
+.trace-json .json-formatter-row .json-formatter-null,
+.trace-json .json-formatter-row .json-formatter-undefined {
+  color: var(--color-text-faint);
+}
+.trace-json .json-formatter-row .json-formatter-function {
+  color: var(--color-accent-emphasis);
+}
+.trace-json .json-formatter-row .json-formatter-date {
+  background-color: var(--color-surface-2);
+}
+.trace-json .json-formatter-row .json-formatter-url {
+  color: var(--color-accent-emphasis);
+}
+.trace-json .json-formatter-row .json-formatter-bracket {
+  color: var(--color-text-faint);
+}
+.trace-json .json-formatter-row .json-formatter-key {
+  color: var(--color-text-muted);
+}
+.trace-json .json-formatter-row .json-formatter-toggler {
+  color: var(--color-text-faint);
+}
+.trace-json .json-formatter-row > a > .json-formatter-preview-text {
+  color: var(--color-text-faint);
+}
+.trace-json .json-formatter-row .json-formatter-children.json-formatter-empty {
+  color: var(--color-text-faint);
+}
+
 /* Respect the user's OS-level motion preference: collapse every animation
    and transition to effectively instant rather than skip states entirely,
    so layout/visibility logic that depends on a transitionend-style flow

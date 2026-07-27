@@ -64,7 +64,21 @@ func (h *Hub) Subscribe() (ch <-chan Event, replay []Event, unsubscribe func()) 
 	h.mu.Lock()
 	defer h.mu.Unlock()
 
-	sub := make(chan Event, 64)
+	// Sized to match h.bufferSize (config.WebUI.LogBufferSize), not a small
+	// fixed constant: a single internal/llmtrace block publishes every one of
+	// its lines (a large trace can run to hundreds of lines — see
+	// internal/llmtrace/llmtrace.go) from one synchronous Hub.Publish loop,
+	// far faster than the WS handler's Write goroutine can drain them over
+	// the network (see internal/httpapi.Server.handleWSLogs). A too-small
+	// channel used to fill up mid-burst and silently drop the rest of that
+	// same event (Publish's docs above are explicit that a full channel is
+	// skipped, not blocked on) — harmless for a scrolling plain-text pane
+	// missing one line, but fatal for the Logs screen's "LLM trace" tab,
+	// which only recognizes a call as complete once every one of its lines,
+	// including the terminating blank line, has arrived (see
+	// static/js/screens/logs-trace-parser.js) — a dropped line anywhere in
+	// the block meant it could never render at all.
+	sub := make(chan Event, h.bufferSize)
 	h.subscribers[sub] = struct{}{}
 
 	replay = make([]Event, len(h.buffer))

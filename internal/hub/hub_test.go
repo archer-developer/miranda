@@ -38,8 +38,9 @@ func TestPublish_SlowSubscriberDoesNotBlock(t *testing.T) {
 	ch, _, unsubscribe := h.Subscribe()
 	defer unsubscribe()
 
-	// Fill the subscriber's channel buffer (capacity 64) without reading,
-	// then publish once more — Publish must not block on the full channel.
+	// Fill the subscriber's channel buffer (capacity == bufferSize, 10 here
+	// — see Subscribe) well past its limit without reading, then publish
+	// some more — Publish must not block on the full channel.
 	for i := 0; i < 100; i++ {
 		h.Publish(Event{Message: "spam"})
 	}
