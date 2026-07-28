@@ -26,11 +26,6 @@ const searchHistoryLimit = 8
 type turnControl struct {
 	endRequested    bool
 	forgetRequested bool
-	// speakRequested is set by the speak_reply tool: the model's signal that
-	// the user explicitly asked to hear this turn's reply aloud, so
-	// speakChunks should dispatch to TTS even on a source other than
-	// ha_assist.
-	speakRequested bool
 }
 
 // resolveConversation either continues the user's currently open
@@ -173,10 +168,18 @@ func (o *Orchestrator) availableTools(ctx context.Context) []llm.ToolDef {
 	if o.ttsCfg.SpeakReplyTool {
 		tools = append(tools, llm.ToolDef{
 			Name: speakReplyToolName,
-			Description: "Speak this turn's reply out loud, even though the request didn't arrive via the voice " +
-				"pipeline — use only when the user explicitly asks to hear the answer read aloud " +
-				"(e.g. \"озвучь это\", \"скажи вслух\", \"read that out loud\").",
-			Parameters: map[string]any{"type": "object", "properties": map[string]any{}},
+			Description: "Speak text out loud through the physical speaker, even though this request didn't arrive " +
+				"via the voice pipeline — use only when the user explicitly asks to hear something read aloud " +
+				"(e.g. \"озвучь это\", \"скажи вслух\", \"read that out loud\"). Pass the text to speak — normally " +
+				"the same as your written reply, but reworded speech-friendly (no markdown, links, code) if the " +
+				"reply itself wouldn't sound natural read verbatim.",
+			Parameters: map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"text": map[string]any{"type": "string", "description": "the text to speak aloud"},
+				},
+				"required": []string{"text"},
+			},
 		})
 	}
 
@@ -235,7 +238,7 @@ func (o *Orchestrator) runAgentLoop(ctx context.Context, userID, conversationID,
 	var providerUsed string
 
 	for i := 0; i < maxToolIterations; i++ {
-		text, toolCalls, err := o.streamOneTurn(ctx, source, control, messages, tools, &providerUsed)
+		text, toolCalls, err := o.streamOneTurn(ctx, source, messages, tools, &providerUsed)
 		if err != nil {
 			return "", "", err
 		}
@@ -260,25 +263,27 @@ func (o *Orchestrator) runAgentLoop(ctx context.Context, userID, conversationID,
 // through a tts.Accumulator so complete sentences get spoken as soon as
 // they're available, and tool calls are collected for the caller to execute.
 //
-// voiceKnownUpfront captures whether this turn should be spoken *before* the
-// stream has produced anything — true for ha_assist, or when an earlier
-// turn in this same request already called speak_reply. When it's false, we
-// can't speak chunks live as they arrive: a model can place its entire
-// answer in this turn's text and only afterward emit the speak_reply tool
-// call asking for it to be voiced (content blocks stream in the order the
-// model produced them — text, then tool_use — so the tool call is only
-// known once the text is already fully generated). In that case chunks are
-// only published to the hub as they stream, and — if a speak_reply call
-// does show up once the stream ends — the whole turn's text is spoken in
-// one shot afterward, instead of being silently dropped because the voice
-// decision arrived one turn too late.
-func (o *Orchestrator) streamOneTurn(ctx context.Context, source string, control *turnControl, messages []llm.Message, tools []llm.ToolDef, providerUsed *string) (string, []llm.ToolCall, error) {
+// Only ha_assist gets its streamed text spoken live here — that's the one
+// channel where the model's plain reply text is itself the thing to say out
+// loud. Every other source stays silent on this path no matter what the
+// model's text says; the only way those sources ever reach the Yandex
+// Station is the model explicitly calling speak_reply with the text to
+// speak (see executeTool) — a real tool call with a real argument, not a
+// flag inferred from *which* turn happened to contain the model's answer.
+// That sidesteps an entire class of bugs an earlier version of this code
+// had: content blocks stream in the order the model produced them (text,
+// then tool_use), so "speak whatever text this turn already streamed"
+// requires guessing, after the fact, whether a turn's text was the answer
+// or just a throwaway post-tool-call remark — get that guess wrong and the
+// same text can end up spoken twice. Passing the text as the tool's own
+// argument removes the guess entirely.
+func (o *Orchestrator) streamOneTurn(ctx context.Context, source string, messages []llm.Message, tools []llm.ToolDef, providerUsed *string) (string, []llm.ToolCall, error) {
 	stream, err := o.router.Chat(ctx, llm.ChatRequest{Messages: messages, Tools: tools}, func(name string) { *providerUsed = name })
 	if err != nil {
 		return "", nil, fmt.Errorf("orchestrator: chat: %w", err)
 	}
 
-	voiceKnownUpfront := source == users.SourceHAAssist || control.speakRequested
+	speakLive := source == users.SourceHAAssist
 
 	var fullText string
 	var toolCalls []llm.ToolCall
@@ -291,8 +296,8 @@ func (o *Orchestrator) streamOneTurn(ctx context.Context, source string, control
 		if chunk.TextDelta != "" {
 			fullText += chunk.TextDelta
 			ready := acc.Push(chunk.TextDelta)
-			if voiceKnownUpfront {
-				o.speakChunks(ctx, source, control, ready)
+			if speakLive {
+				o.speakChunks(ctx, ready)
 			} else {
 				o.publishChunks(ready)
 			}
@@ -302,48 +307,31 @@ func (o *Orchestrator) streamOneTurn(ctx context.Context, source string, control
 		}
 	}
 	final := acc.Flush()
-	if voiceKnownUpfront {
-		o.speakChunks(ctx, source, control, final)
+	if speakLive {
+		o.speakChunks(ctx, final)
 	} else {
 		o.publishChunks(final)
-	}
-
-	if !voiceKnownUpfront {
-		for _, tc := range toolCalls {
-			if tc.Name == speakReplyToolName {
-				control.speakRequested = true
-				o.speakText(ctx, fullText)
-				break
-			}
-		}
 	}
 
 	return fullText, toolCalls, nil
 }
 
 // publishChunks puts each chunk on the hub as an "assistant" event (chat/log
-// visibility) without any TTS decision — used for text streamed before we
-// yet know whether this turn should be voiced; see streamOneTurn.
+// visibility) without any TTS decision — used for every source other than
+// ha_assist; see streamOneTurn.
 func (o *Orchestrator) publishChunks(chunks []string) {
 	for _, chunk := range chunks {
 		o.hub.Publish(hub.Event{Source: "assistant", Message: chunk})
 	}
 }
 
-// speakChunks publishes each chunk (see publishChunks) and, for turns that
-// either arrived via Home Assistant's voice pipeline (source == ha_assist:
-// that's the one channel where the reply also needs to come out of a
-// physical speaker, separate from — and in addition to — the text reply
-// HA's pipeline itself may speak, see README) or where the speak_reply tool
-// was called this turn because the user explicitly asked to hear the answer
-// (control.speakRequested), also dispatches it to TTS. Every other turn must
-// never trigger the shared Yandex Station, or testing via the web UI's debug
-// box would make it talk unprompted.
-func (o *Orchestrator) speakChunks(ctx context.Context, source string, control *turnControl, chunks []string) {
+// speakChunks publishes each chunk (see publishChunks) and dispatches it to
+// TTS — only ever called for ha_assist turns (see streamOneTurn), the one
+// channel where the reply needs to come out of a physical speaker, separate
+// from — and in addition to — the text reply HA's own pipeline may speak
+// (see README).
+func (o *Orchestrator) speakChunks(ctx context.Context, chunks []string) {
 	o.publishChunks(chunks)
-	if source != users.SourceHAAssist && !control.speakRequested {
-		return
-	}
 	for _, chunk := range chunks {
 		o.speakText(ctx, chunk)
 	}
@@ -413,8 +401,17 @@ func (o *Orchestrator) executeTool(ctx context.Context, userID string, tc llm.To
 	}
 
 	if tc.Name == speakReplyToolName {
-		control.speakRequested = true
-		return "will speak the reply aloud"
+		var args struct {
+			Text string `json:"text"`
+		}
+		if err := json.Unmarshal([]byte(tc.Arguments), &args); err != nil {
+			return fmt.Sprintf("error: invalid arguments: %v", err)
+		}
+		if args.Text == "" {
+			return "error: text is required"
+		}
+		o.speakText(ctx, args.Text)
+		return "spoken"
 	}
 
 	if tc.Name == stopSpeechToolName {

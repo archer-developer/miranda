@@ -118,22 +118,22 @@ future channel (mobile app) that calls it directly. Telegram is the one
 exception: its webhook handler (`internal/httpapi/telegram.go`) calls
 `Orchestrator.Handle` in-process rather than over HTTP, and delivers the
 reply back out through the Telegram Bot API instead — see "Telegram
-channel" below. `req.Source` and the current turn's `turnControl` are
-threaded through `Handle` → `runAgentLoop` →
-`streamOneTurn` → `speakChunks` (`agent_loop.go`) purely to gate one
-*additional* output: `speakChunks` only calls `o.tts.Speak` (`tts.primary`,
-falling back to `tts.fallback` if the primary's quota is exhausted — see
-`internal/tts`) when `source == users.SourceHAAssist` ("`ha_assist`", the HA
-thin conversation client's fixed source value — see `internal/users`) or the
-`speak_reply` tool was called this turn (`control.speakRequested`).
-`ha_assist` firing is deliberate, not incidental: it's the one channel with
-a physical speaker to answer through, and HA's own Assist pipeline may
-*also* speak the same reply via its own TTS step — both firing for
-`ha_assist` is expected (see README). Every other source stays silent
-unless the model explicitly calls `speak_reply` because the user asked to
-hear the answer — otherwise it must never trigger the shared Yandex
-Station, or testing via the web UI's debug box would make it talk
-unprompted.
+channel" below. `req.Source` is threaded through `Handle` → `runAgentLoop` →
+`streamOneTurn` purely to gate one *additional* output: `streamOneTurn`
+speaks a turn's streamed text live via `speakChunks` only when
+`source == users.SourceHAAssist` ("`ha_assist`", the HA thin conversation
+client's fixed source value — see `internal/users`) — that's the one
+channel where the model's plain reply text is itself the thing to say out
+loud, and HA's own Assist pipeline may *also* speak the same reply via its
+own TTS step — both firing for `ha_assist` is expected (see README). Every
+other source never has its streamed reply text spoken this way; the only
+way those sources reach the Yandex Station is the model explicitly calling
+the `speak_reply` tool (`executeTool`) with the exact text to speak as a
+real tool argument — not a flag inferred from *which* turn happened to
+contain the model's answer (an earlier version of this code guessed that
+from `control.speakRequested` and could double-speak when the guess was
+wrong; see git history). Every other source otherwise stays silent, or
+testing via the web UI's debug box would make it talk unprompted.
 
 TTS dispatch is asynchronous: `Dispatcher.Speak` only enqueues text onto a
 background `Player` (`internal/tts/player.go`) and returns immediately —
@@ -237,7 +237,7 @@ Config flags below live on `config.MemoryConfig` unless otherwise noted.
 | `search_history` | `SearchHistoryTool` | Full-text search the user's *ended* conversations; returns each match's stored `Summary` (not raw messages) — this is what answers "помнишь, мы говорили о...". |
 | `end_conversation` | `EndConversationTool` | Close the current session right now (idle timeout would eventually do this anyway) — triggered by an explicit "start a new conversation" request. |
 | `forget_conversation` | `ForgetConversationTool` | Delete the current conversation entirely, no memory write — triggered by an explicit "forget this / start from scratch" request. |
-| `speak_reply` | `config.TTSConfig.SpeakReplyTool` | Dispatch this turn's reply to `tts.primary` even on a source other than `ha_assist` — triggered by an explicit "read/say that aloud" request (see Response routing above). |
+| `speak_reply` | `config.TTSConfig.SpeakReplyTool` | Takes a `text` argument and dispatches exactly that text to `tts.primary`, even on a source other than `ha_assist` — triggered by an explicit "read/say that aloud" request (see Response routing above). Speech-friendly text the model composes itself, not necessarily identical to its written reply. |
 | `stop_speech` | `config.TTSConfig.StopSpeechTool` | Interrupt whatever `tts.primary`/`tts.fallback` is currently speaking or has queued (clears the queue, then `media_player.media_stop`s every configured entity) — triggered by an explicit "stop talking" request. Every `ha_assist` turn also triggers this automatically at turn start (barge-in) — see Response routing above. |
 | `send_telegram` | `config.TelegramConfig.SendMessageTool` | Proactively push a message to a household member's Telegram (current user by default, or a named one) — see Telegram channel above. |
 | `escalate_to_claude` (name configurable) | `config.EscalationConfig.Enabled` | Hand a hard turn to a stronger provider; intercepted at the router level, transparent to the Orchestrator. |

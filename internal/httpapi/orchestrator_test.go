@@ -398,7 +398,7 @@ func TestOrchestrator_SpeaksViaTTSForHAAssistSource(t *testing.T) {
 
 func TestOrchestrator_SpeaksViaTTSWhenSpeakReplyToolIsCalledOnNonHASource(t *testing.T) {
 	provider := llmtest.New("local",
-		llmtest.Response{ToolCall: &llm.ToolCall{ID: "call-1", Name: "speak_reply", Arguments: `{}`}},
+		llmtest.Response{ToolCall: &llm.ToolCall{ID: "call-1", Name: "speak_reply", Arguments: `{"text":"Хорошо, слушай."}`}},
 		llmtest.Response{Text: "Хорошо, слушай."},
 	)
 	o, ha := newTestOrchestratorWithTTS(t, provider)
@@ -412,21 +412,21 @@ func TestOrchestrator_SpeaksViaTTSWhenSpeakReplyToolIsCalledOnNonHASource(t *tes
 	requireEventuallySpoken(t, ha)
 }
 
-// TestOrchestrator_SpeaksTurnsOwnTextWhenItCallsSpeakReplyInTheSameTurn
-// guards against a real production bug: a model can answer the question and
-// call speak_reply in the very same completion (text then tool_use, in that
-// order, as Claude actually streams it) rather than calling speak_reply
-// first and answering afterward. Naively speaking chunks live as they
-// stream would miss this: control.speakRequested only flips once the tool
-// call is executed, which happens after this whole turn's text has already
-// gone by, so every one of its chunks would see voice=false and never reach
-// the Yandex Station — only a short throwaway confirmation from the *next*
-// turn would get spoken, with the actual answer silently dropped.
-func TestOrchestrator_SpeaksTurnsOwnTextWhenItCallsSpeakReplyInTheSameTurn(t *testing.T) {
+// TestOrchestrator_SpeaksExactlyTheTextPassedToSpeakReplyTool guards against
+// a real production bug an earlier version of this code had: speak_reply
+// used to be a bare flag with no arguments, and the orchestrator guessed
+// which turn's streamed text was "the answer" to speak — guess wrong (e.g.
+// the model answers and calls speak_reply in the very same completion) and
+// a later turn's unrelated post-tool-call wrap-up got auto-spoken too,
+// duplicating the reply. Now speak_reply takes the exact text to speak as
+// an explicit argument, so there's nothing to guess: only that argument
+// ever reaches the Yandex Station, exactly once, regardless of what any
+// turn's own reply text says or how many more turns follow.
+func TestOrchestrator_SpeaksExactlyTheTextPassedToSpeakReplyTool(t *testing.T) {
 	provider := llmtest.New("local",
 		llmtest.Response{
 			Text:     "Осень — время урожая и тёплого чая.",
-			ToolCall: &llm.ToolCall{ID: "call-1", Name: "speak_reply", Arguments: `{}`},
+			ToolCall: &llm.ToolCall{ID: "call-1", Name: "speak_reply", Arguments: `{"text":"Скажу словами: наступила осень."}`},
 		},
 		llmtest.Response{Text: "Готово, озвучила!"},
 	)
@@ -437,7 +437,9 @@ func TestOrchestrator_SpeaksTurnsOwnTextWhenItCallsSpeakReplyInTheSameTurn(t *te
 	require.Equal(t, "Готово, озвучила!", resp.Reply)
 
 	requireEventuallySpoken(t, ha)
-	require.Contains(t, ha.Calls(), "Осень — время урожая и тёплого чая.")
+	// Exactly the tool argument's text, exactly once — not the first turn's
+	// written reply, and not the second turn's wrap-up.
+	require.Equal(t, []string{"Скажу словами: наступила осень."}, ha.Calls())
 }
 
 func TestOrchestrator_DoesNotSpeakViaTTSForNonHASources(t *testing.T) {
