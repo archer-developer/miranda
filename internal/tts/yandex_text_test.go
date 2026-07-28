@@ -58,14 +58,11 @@ func yandexConfig(entities ...string) config.YandexStationConfig {
 	}
 }
 
-func TestTextProvider_SpeaksChunkedTextToEachEntity(t *testing.T) {
+func TestTextProvider_BroadcastsChunksToAllEntitiesInParallel(t *testing.T) {
 	ha := &fakeHA{}
 	cfg := yandexConfig("media_player.kitchen", "media_player.bedroom")
-	// Small enough that the two sentences don't both fit in one chunk —
-	// chunking is always maximally greedy (see Accumulator's doc comment),
-	// so a limit generous enough for both would merge them into a single
-	// chunk instead of exercising the "one call per chunk per entity" path
-	// this test is for.
+	// Small enough to force two chunks — see Accumulator's doc comment for
+	// why chunking is maximally greedy and a generous limit would merge them.
 	cfg.ChunkMaxChars = 25
 	p := NewTextProvider(cfg, ha, nil)
 
@@ -74,10 +71,19 @@ func TestTextProvider_SpeaksChunkedTextToEachEntity(t *testing.T) {
 
 	calls := ha.Calls()
 	require.Len(t, calls, 4) // 2 chunks x 2 entities
-	require.Equal(t, "media_player", calls[0].domain)
-	require.Equal(t, "play_media", calls[0].service)
-	require.Equal(t, "text", calls[0].data["media_content_type"])
-	require.Equal(t, "Первое предложение.", calls[0].data["media_content_id"])
+	for _, c := range calls {
+		require.Equal(t, "media_player", c.domain)
+		require.Equal(t, "play_media", c.service)
+		require.Equal(t, "text", c.data["media_content_type"])
+	}
+
+	// Both entities must receive chunk 1 before either receives chunk 2:
+	// the first two calls (in any order) must both carry the first chunk.
+	chunkOf := func(c call) string { return c.data["media_content_id"].(string) }
+	require.Equal(t, chunkOf(calls[0]), chunkOf(calls[1]),
+		"both entities should receive the first chunk before any entity receives the second")
+	require.Equal(t, "Первое предложение.", chunkOf(calls[0]))
+	require.Equal(t, "Второе предложение.", chunkOf(calls[2]))
 }
 
 func TestTextProvider_ReturnsErrorWhenYandexFails(t *testing.T) {
