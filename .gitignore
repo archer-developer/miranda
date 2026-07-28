@@ -6,7 +6,7 @@
 !/data/storage/.gitkeep
 /data/memory/*.md
 !/data/memory/.gitkeep
-/config/config.yaml
+/config/*.yaml
 /.env
 /logs/
 .DS_Store

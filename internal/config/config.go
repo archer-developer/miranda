@@ -536,19 +536,28 @@ func Default() Config {
 // yaml.Unmarshal only overwrites fields present in the document, so starting
 // from a fully-populated default struct gives us a cheap partial merge
 // without a separate deep-merge step.
-func Load(path string) (Config, error) {
+//
+// Multiple paths are applied in order, each one layered over the result of
+// the previous, so the config can be split into per-topic files (e.g.
+// llm.yaml, tts.yaml, users.yaml). A missing file is silently skipped —
+// only the files that exist need to be provided. Note that slices (users,
+// mcp.servers) are replaced in full by whichever file last defines them, so
+// each slice should live in exactly one file.
+func Load(paths ...string) (Config, error) {
 	cfg := Default()
 
-	data, err := os.ReadFile(path)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return cfg, nil
+	for _, path := range paths {
+		data, err := os.ReadFile(path)
+		if err != nil {
+			if os.IsNotExist(err) {
+				continue
+			}
+			return cfg, fmt.Errorf("config: read %s: %w", path, err)
 		}
-		return cfg, fmt.Errorf("config: read %s: %w", path, err)
-	}
 
-	if err := yaml.Unmarshal(data, &cfg); err != nil {
-		return cfg, fmt.Errorf("config: parse %s: %w", path, err)
+		if err := yaml.Unmarshal(data, &cfg); err != nil {
+			return cfg, fmt.Errorf("config: parse %s: %w", path, err)
+		}
 	}
 
 	if err := validateMCPServerNames(cfg.MCP.Servers); err != nil {

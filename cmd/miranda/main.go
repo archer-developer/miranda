@@ -93,12 +93,17 @@ func main() {
 		bootstrap.Warn("failed to load .env, continuing with the process environment as-is", "error", err)
 	}
 
-	configPath := "config/config.yaml"
-	if v := os.Getenv("MIRANDA_CONFIG"); v != "" {
-		configPath = v
+	configDir := "config"
+	if v := os.Getenv("MIRANDA_CONFIG_DIR"); v != "" {
+		configDir = v
+	}
+	configPaths, err := filepath.Glob(filepath.Join(configDir, "*.yaml"))
+	if err != nil {
+		bootstrap.Error("fatal", "error", err)
+		os.Exit(1)
 	}
 
-	cfg, err := config.Load(configPath)
+	cfg, err := config.Load(configPaths...)
 	if err != nil {
 		bootstrap.Error("fatal", "error", err)
 		os.Exit(1)
