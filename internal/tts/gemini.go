@@ -132,8 +132,17 @@ func (p *geminiProvider) Speak(ctx context.Context, text string) error {
 
 	go func() {
 		defer close(ch)
-		for _, chunk := range Chunk(text, p.cfg.ChunkMaxChars) {
+		for i, chunk := range Chunk(text, p.cfg.ChunkMaxChars) {
+			synthStart := time.Now()
 			url, duration, err := p.synthesize(ctx, chunk)
+			if err == nil {
+				p.logger.Info("tts: gemini: chunk synthesized",
+					"index", i,
+					"chunk_chars", len([]rune(chunk)),
+					"synth_ms", time.Since(synthStart).Milliseconds(),
+					"audio_ms", duration.Milliseconds(),
+				)
+			}
 			select {
 			case ch <- synthesized{url, duration, err}:
 			case <-ctx.Done():
@@ -142,11 +151,17 @@ func (p *geminiProvider) Speak(ctx context.Context, text string) error {
 		}
 	}()
 
+	i := 0
 	for result := range ch {
 		if result.err != nil {
 			return result.err
 		}
 		for _, entity := range p.stationCfg.Entities {
+			p.logger.Info("tts: gemini: playing chunk",
+				"index", i,
+				"audio_ms", result.duration.Milliseconds(),
+				"entity", entity,
+			)
 			// media_content_type's value doesn't matter to AlexxIT/YandexStation
 			// for URL playback — confirmed both by reading its source
 			// (async_play_media dispatches on "http(s):// in media_id", not on
@@ -159,6 +174,7 @@ func (p *geminiProvider) Speak(ctx context.Context, text string) error {
 				return err
 			}
 		}
+		i++
 	}
 	return ctx.Err()
 }
