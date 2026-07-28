@@ -99,6 +99,12 @@ func NewGeminiProvider(cfg config.GeminiTTSConfig, stationCfg config.YandexStati
 // request per sentence, since each chunk here is a real, quota-limited
 // Gemini API call), synthesizing (or reusing a cached rendering of) each
 // chunk and playing it on every configured Yandex Station entity in turn.
+//
+// Synthesis and playback are pipelined: a background goroutine synthesizes
+// chunk N+1 while chunk N is still playing, since both operations hit
+// separate services (Gemini API and Yandex Station) and there is no reason
+// to make them sequential. A channel buffer of 1 keeps the synthesizer
+// exactly one chunk ahead of the player.
 func (p *geminiProvider) Speak(ctx context.Context, text string) error {
 	if len(p.stationCfg.Entities) == 0 {
 		return fmt.Errorf("tts: gemini_tts: no yandex_station entities configured to play audio through")
@@ -107,10 +113,38 @@ func (p *geminiProvider) Speak(ctx context.Context, text string) error {
 		return fmt.Errorf("tts: gemini_tts: public_base_url is not configured, the station has no way to fetch synthesized audio")
 	}
 
-	for _, chunk := range Chunk(text, p.cfg.ChunkMaxChars) {
-		url, duration, err := p.synthesize(ctx, chunk)
-		if err != nil {
-			return err
+	// A derived context lets us cancel the synthesizer goroutine on any early
+	// return (playback error, parent cancellation, or synthesis error already
+	// forwarded to the player) without leaking the goroutine.
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	type synthesized struct {
+		url      string
+		duration time.Duration
+		err      error
+	}
+
+	// Buffer of 1: the synthesizer can complete chunk N+1 and park it here
+	// while the player is still finishing chunk N, then immediately start
+	// chunk N+2, staying one step ahead without unbounded pre-synthesis.
+	ch := make(chan synthesized, 1)
+
+	go func() {
+		defer close(ch)
+		for _, chunk := range Chunk(text, p.cfg.ChunkMaxChars) {
+			url, duration, err := p.synthesize(ctx, chunk)
+			select {
+			case ch <- synthesized{url, duration, err}:
+			case <-ctx.Done():
+				return
+			}
+		}
+	}()
+
+	for result := range ch {
+		if result.err != nil {
+			return result.err
 		}
 		for _, entity := range p.stationCfg.Entities {
 			// media_content_type's value doesn't matter to AlexxIT/YandexStation
@@ -121,12 +155,12 @@ func (p *geminiProvider) Speak(ctx context.Context, text string) error {
 			// with our .wav streamUrl. "music" is kept only because it reads
 			// clearly in logs — playAndSleep, not this value, is what makes
 			// playback timing correct (see its doc comment).
-			if err := p.station.playAndSleep(ctx, entity, url, "music", duration); err != nil {
+			if err := p.station.playAndSleep(ctx, entity, result.url, "music", result.duration); err != nil {
 				return err
 			}
 		}
 	}
-	return nil
+	return ctx.Err()
 }
 
 // synthesize returns the public URL of chunk's rendered audio and its exact
