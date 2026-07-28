@@ -50,6 +50,20 @@ func (s *Store) Read(userID string) (string, error) {
 	return string(data), nil
 }
 
+// ReadShared returns the content of shared.md — household-wide facts injected
+// into every user's system prompt before their personal memory. Returns "" if
+// the file doesn't exist yet (not an error; it's optional).
+func (s *Store) ReadShared() (string, error) {
+	data, err := os.ReadFile(filepath.Join(s.dir, "shared.md"))
+	if err != nil {
+		if os.IsNotExist(err) {
+			return "", nil
+		}
+		return "", fmt.Errorf("memory: read shared: %w", err)
+	}
+	return string(data), nil
+}
+
 // Remember appends fact under a "## Remembered" section, timestamped. This
 // is the explicit remember_this tool's write path: additive, never rewrites
 // existing content, so it can't lose information even if called from a

@@ -174,6 +174,10 @@ func (o *Orchestrator) Handle(ctx context.Context, req InputRequest) (InputRespo
 	// with a specific dialog.
 	ctx = llmtrace.WithConversationID(ctx, convID)
 
+	sharedMem, err := o.memory.ReadShared()
+	if err != nil {
+		return InputResponse{}, fmt.Errorf("orchestrator: read shared memory: %w", err)
+	}
 	memContent, err := o.memory.Read(userID)
 	if err != nil {
 		return InputResponse{}, fmt.Errorf("orchestrator: read memory: %w", err)
@@ -185,7 +189,7 @@ func (o *Orchestrator) Handle(ctx context.Context, req InputRequest) (InputRespo
 	}
 	o.publishChatMessage(userID, convID, history.Message{ID: userMsgID, ConversationID: convID, Role: "user", Content: req.Text})
 
-	systemPrompt := o.buildSystemPrompt(userID, memContent)
+	systemPrompt := o.buildSystemPrompt(userID, sharedMem, memContent)
 	if err := o.history.SetSystemPrompt(ctx, convID, systemPrompt); err != nil {
 		return InputResponse{}, fmt.Errorf("orchestrator: set system prompt: %w", err)
 	}

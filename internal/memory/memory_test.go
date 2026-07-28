@@ -1,6 +1,7 @@
 package memory
 
 import (
+	"os"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -13,6 +14,27 @@ func TestRead_MissingUserReturnsEmpty(t *testing.T) {
 	content, err := s.Read("nobody")
 	require.NoError(t, err)
 	require.Empty(t, content)
+}
+
+func TestReadShared_MissingFileReturnsEmpty(t *testing.T) {
+	s, err := New(t.TempDir())
+	require.NoError(t, err)
+
+	content, err := s.ReadShared()
+	require.NoError(t, err)
+	require.Empty(t, content)
+}
+
+func TestReadShared_ReturnsSharedFileContent(t *testing.T) {
+	dir := t.TempDir()
+	s, err := New(dir)
+	require.NoError(t, err)
+
+	require.NoError(t, os.WriteFile(dir+"/shared.md", []byte("## Household\n- has two cats\n"), 0o644))
+
+	content, err := s.ReadShared()
+	require.NoError(t, err)
+	require.Equal(t, "## Household\n- has two cats\n", content)
 }
 
 func TestRemember_AppendsUnderRememberedSection(t *testing.T) {

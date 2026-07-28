@@ -77,18 +77,22 @@ func (o *Orchestrator) resolveConversation(ctx context.Context, userID, source s
 }
 
 // buildSystemPrompt combines the base persona prompt with who is currently
-// speaking and the user's distilled long-term memory, so both are available
-// on every turn without re-deriving them from raw history. Without the
-// speaker identity, the model has no way to tell which of the household it
-// is talking to in a given conversation — it can only guess from what gets
-// said, which is exactly the kind of thing that should never need guessing.
-func (o *Orchestrator) buildSystemPrompt(userID, memory string) string {
+// speaking and long-term memory, so both are available on every turn without
+// re-deriving them from raw history. sharedMemory is household-wide facts
+// injected first (from shared.md); userMemory is the per-user file that
+// follows. Without the speaker identity, the model has no way to tell which
+// of the household it is talking to — it can only guess from what gets said,
+// which is exactly the kind of thing that should never need guessing.
+func (o *Orchestrator) buildSystemPrompt(userID, sharedMemory, userMemory string) string {
 	prompt := o.baseSystemPrompt
 	if name := o.currentUserName(userID); name != "" {
 		prompt += "\n\nСейчас с тобой разговаривает: " + name + "."
 	}
-	if memory != "" {
-		prompt += "\n\nWhat you remember about this user:\n" + memory
+	if sharedMemory != "" {
+		prompt += "\n\nShared household memory:\n" + sharedMemory
+	}
+	if userMemory != "" {
+		prompt += "\n\nWhat you remember about this user:\n" + userMemory
 	}
 	return prompt
 }
