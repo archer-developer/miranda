@@ -174,14 +174,26 @@ type LoggingConfig struct {
 	MaxAgeDays int `yaml:"max_age_days"`
 }
 
-// LLMProvider describes one configured model backend, either an
-// OpenAI-compatible endpoint (local or hosted) or native Anthropic.
+// LLMProvider describes one configured model backend: OpenAI-compatible
+// (local or hosted), native Anthropic, or native Gemini.
 type LLMProvider struct {
-	Name      string `yaml:"name"`
-	Type      string `yaml:"type"` // "openai_compat" | "anthropic"
-	BaseURL   string `yaml:"base_url,omitempty"`
-	Model     string `yaml:"model"`
-	APIKeyEnv string `yaml:"api_key_env,omitempty"`
+	Name    string `yaml:"name"`
+	Type    string `yaml:"type"` // "openai_compat" | "anthropic" | "gemini"
+	BaseURL string `yaml:"base_url,omitempty"`
+	Model   string `yaml:"model"`
+
+	// APIKeyEnvs lists environment variable names, each expected to hold
+	// one API key (never the key itself — same *_env convention as every
+	// other secret in this codebase). All three provider types share this
+	// one field for schema consistency, but only "gemini" actually rotates
+	// across more than one entry (internal/llm/gemini cycles through every
+	// resolved key on a quota/server error — see GeminiRotationConfig).
+	// "anthropic" and "openai_compat" use only APIKeyEnvs[0]: those SDKs
+	// take a single credential per client and aren't being changed to
+	// rotate — extra entries beyond the first are silently ignored for
+	// those two types (see cmd/miranda/main.go's firstAPIKey).
+	APIKeyEnvs []string `yaml:"api_key_envs,omitempty"`
+
 	// AnthropicTools enables Claude's own server-executed tools. Only
 	// meaningful when Type == "anthropic"; ignored otherwise. These run
 	// entirely on Anthropic's side (web fetch/search over the live internet,
@@ -190,6 +202,22 @@ type LLMProvider struct {
 	// something like "what's the bitcoin price right now" — none of
 	// Miranda's own tools (MCP/HA, remember_this, etc.) reach the open web.
 	AnthropicTools AnthropicToolsConfig `yaml:"anthropic_tools,omitempty"`
+	// GeminiTools enables Gemini's own server-executed tools. Only
+	// meaningful when Type == "gemini"; ignored otherwise — see
+	// GeminiToolsConfig.
+	GeminiTools GeminiToolsConfig `yaml:"gemini_tools,omitempty"`
+	// GeminiRotation tunes this provider's key-rotation behavior. Only
+	// meaningful when Type == "gemini"; the zero value falls back to
+	// internal/llm/gemini's built-in defaults (1 cycle, no cooldown).
+	GeminiRotation GeminiRotationConfig `yaml:"gemini_rotation,omitempty"`
+
+	// Escalation lets this specific provider hand a hard turn off to
+	// another configured provider by calling a tool. Lives on each provider
+	// (rather than once globally) so a chain — e.g. a cheap model escalates
+	// to a stronger one, which escalates to Claude — can have each hop pick
+	// its own target/tool name independently. See internal/llm/router for
+	// how a chain of these gets walked hop by hop.
+	Escalation EscalationConfig `yaml:"escalation,omitempty"`
 }
 
 // AnthropicToolsConfig toggles which of Claude's native server-side tools
@@ -209,20 +237,70 @@ type AnthropicToolsConfig struct {
 	CodeExecution bool `yaml:"code_execution"`
 }
 
-// EscalationConfig configures the explicit escalate_to_claude-style tool that
-// lets a cheap/local model hand off a hard turn to a stronger provider.
+// GeminiToolsConfig toggles Gemini's own native server-side tools sent on
+// every request from this provider (see internal/llm/gemini) — mirrors
+// AnthropicToolsConfig's opt-in-only shape (all default to false).
+type GeminiToolsConfig struct {
+	// GoogleSearch enables Grounding with Google Search — analogous to
+	// AnthropicToolsConfig.WebSearch.
+	//
+	// There is deliberately no CodeExecution field here, unlike
+	// AnthropicToolsConfig: Gemini's code-execution tool
+	// (genai.ToolCodeExecution) only works on Vertex AI, not the plain
+	// Gemini Developer API key this provider type uses — confirmed via the
+	// SDK's own source comments, consistently applied across ~98 other
+	// genuinely-Vertex-only fields. See internal/llm/gemini.nativeTools's
+	// doc comment for the full reasoning, including why a working-looking
+	// public example doesn't actually contradict this.
+	GoogleSearch bool `yaml:"google_search"`
+	// ContextCaching is not implemented yet — internal/llm/gemini.New
+	// rejects startup if this is true. Gemini's CachedContent is an
+	// explicit, separately-managed resource (create/reference/invalidate),
+	// structurally unlike Anthropic's per-request cache_control breakpoint,
+	// and needs its own design pass (cache-key strategy, invalidation
+	// trigger, TTL policy) that doesn't belong bolted onto this field.
+	ContextCaching bool `yaml:"context_caching"`
+}
+
+// GeminiRotationConfig tunes internal/llm/gemini's key-rotation — same
+// shape/reasoning as GeminiTTSConfig's QuotaCooldownSeconds/
+// MaxQuotaRetryCycles, but this adapter's rotation trigger is broader
+// (quota AND server errors — see internal/llm/gemini.isRetryable) than
+// TTS's quota-only rotation.
+type GeminiRotationConfig struct {
+	CooldownSeconds int `yaml:"cooldown_seconds"`
+	MaxRetryCycles  int `yaml:"max_retry_cycles"`
+}
+
+// EscalationConfig configures the explicit escalation tool that lets one
+// provider hand a hard turn off to another. Lives on each LLMProvider (see
+// its doc comment) rather than as a single global setting, so a chain of
+// providers can each pick their own target/tool name.
 type EscalationConfig struct {
-	Enabled        bool   `yaml:"enabled"`
-	ToolName       string `yaml:"tool_name"`
+	Enabled  bool   `yaml:"enabled"`
+	ToolName string `yaml:"tool_name"`
+	// Description overrides the escalation tool's description shown to the
+	// model — the default is a generic "too complex/ambiguous/high-stakes"
+	// prompt. Set this when a provider has a concrete, known-missing
+	// capability worth calling out explicitly, e.g. a Gemini provider (no
+	// working code-execution tool on the plain Developer API — see
+	// internal/llm/gemini.nativeTools) naming that specifically, so the
+	// model reliably escalates for it instead of attempting an answer it
+	// has no way to actually compute.
+	Description    string `yaml:"description,omitempty"`
 	TargetProvider string `yaml:"target_provider"`
 }
 
-// LLMConfig is the ordered provider fallback chain plus escalation settings.
+// LLMConfig is the ordered provider fallback chain.
 type LLMConfig struct {
-	// Providers is tried in order on error/timeout of the previous one.
-	Providers       []LLMProvider    `yaml:"providers"`
-	DefaultProvider string           `yaml:"default_provider"`
-	Escalation      EscalationConfig `yaml:"escalation"`
+	// Providers is tried in order on error/timeout of the previous one,
+	// unless DefaultProvider names one to try first instead.
+	Providers []LLMProvider `yaml:"providers"`
+	// DefaultProvider names which configured provider is tried first in the
+	// fallback chain, independent of Providers' list order — router.New
+	// moves this name to the front of its internal order. Empty means "use
+	// Providers' list order as-is" (first entry wins).
+	DefaultProvider string `yaml:"default_provider"`
 }
 
 // MemoryConfig controls how per-user markdown memory gets updated and how
@@ -415,11 +493,6 @@ func Default() Config {
 		LLM: LLMConfig{
 			Providers:       nil,
 			DefaultProvider: "",
-			Escalation: EscalationConfig{
-				Enabled:        true,
-				ToolName:       "escalate_to_claude",
-				TargetProvider: "claude",
-			},
 		},
 		Memory: MemoryConfig{
 			AutoSummarize:             true,

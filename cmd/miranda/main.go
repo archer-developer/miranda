@@ -27,6 +27,7 @@ import (
 	"github.com/archer-developer/miranda/internal/hub"
 	"github.com/archer-developer/miranda/internal/llm"
 	"github.com/archer-developer/miranda/internal/llm/anthropic"
+	"github.com/archer-developer/miranda/internal/llm/gemini"
 	"github.com/archer-developer/miranda/internal/llm/openaicompat"
 	"github.com/archer-developer/miranda/internal/llm/router"
 	"github.com/archer-developer/miranda/internal/llmtrace"
@@ -176,22 +177,22 @@ func run(cfg config.Config, logger *slog.Logger, eventHub *hub.Hub) error {
 		return err
 	}
 
-	providers, err := buildProviders(cfg.LLM.Providers)
+	// Created here (rather than at its previous spot right before
+	// serveUntilInterrupted) so it can also bound buildProviders' gemini.New
+	// calls and connectMCP's background reconnect goroutines below — they
+	// must stop at shutdown like everything else, not leak past it.
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	providers, err := buildProviders(ctx, cfg.LLM.Providers, logger)
 	if err != nil {
 		return err
 	}
-	llmRouter, err := router.New(providers, cfg.LLM.Escalation)
+	llmRouter, err := router.New(providers, buildEscalations(cfg.LLM.Providers), cfg.LLM.DefaultProvider)
 	if err != nil {
 		return err
 	}
 	llmRouter.SetTracer(llmTracer)
-
-	// Created here (rather than at its previous spot right before
-	// serveUntilInterrupted) so it can also bound connectMCP's background
-	// reconnect goroutines below — they must stop at shutdown like
-	// everything else, not leak past it.
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer stop()
 
 	toolManager := connectMCP(ctx, cfg.MCP.Servers, logger)
 
@@ -240,7 +241,7 @@ func run(cfg config.Config, logger *slog.Logger, eventHub *hub.Hub) error {
 	defaultUserID := "debug"
 	orchestrator := httpapi.NewOrchestrator(
 		llmRouter, toolManager, historyStore, memoryStore, dispatcher, eventHub, usersRegistry,
-		cfg.Agent, cfg.Memory, cfg.TTS, cfg.LLM.Escalation, ttsChunkMaxChars(cfg.TTS), defaultUserID,
+		cfg.Agent, cfg.Memory, cfg.TTS, ttsChunkMaxChars(cfg.TTS), defaultUserID,
 	)
 	if cfg.Telegram.Enabled {
 		orchestrator.SetTelegram(telegram.NewSender(tgClient, tgChats), cfg.Telegram)
@@ -321,19 +322,24 @@ func serveUntilInterrupted(ctx context.Context, httpServer *http.Server, logger 
 }
 
 // buildProviders instantiates one llm.Provider per configured entry, in
-// order — that order becomes the router's fallback chain.
-func buildProviders(configs []config.LLMProvider) ([]llm.Provider, error) {
+// order — that order becomes the router's fallback chain (unless
+// LLMConfig.DefaultProvider reorders it, see router.New). ctx bounds
+// gemini.New's client construction, which needs a real request-scoped
+// context the same way connectMCP's background goroutines do.
+func buildProviders(ctx context.Context, configs []config.LLMProvider, logger *slog.Logger) ([]llm.Provider, error) {
 	var providers []llm.Provider
 	for _, c := range configs {
-		apiKey := ""
-		if c.APIKeyEnv != "" {
-			apiKey = os.Getenv(c.APIKeyEnv)
-		}
 		switch c.Type {
 		case "anthropic":
-			providers = append(providers, anthropic.New(c.Name, c.Model, apiKey, c.AnthropicTools))
+			providers = append(providers, anthropic.New(c.Name, c.Model, firstAPIKey(c.APIKeyEnvs), c.AnthropicTools))
 		case "openai_compat":
-			providers = append(providers, openaicompat.New(c.Name, c.BaseURL, c.Model, apiKey))
+			providers = append(providers, openaicompat.New(c.Name, c.BaseURL, c.Model, firstAPIKey(c.APIKeyEnvs)))
+		case "gemini":
+			p, err := gemini.New(ctx, c.Name, c.Model, c.APIKeyEnvs, c.GeminiTools, c.GeminiRotation, logger)
+			if err != nil {
+				return nil, fmt.Errorf("main: build gemini provider %q: %w", c.Name, err)
+			}
+			providers = append(providers, p)
 		default:
 			return nil, fmt.Errorf("main: unknown llm provider type %q for provider %q", c.Type, c.Name)
 		}
@@ -342,6 +348,31 @@ func buildProviders(configs []config.LLMProvider) ([]llm.Provider, error) {
 		return nil, fmt.Errorf("main: no llm.providers configured in config.yaml")
 	}
 	return providers, nil
+}
+
+// firstAPIKey resolves the first non-empty env var in envs. anthropic/
+// openai_compat providers take a single credential — APIKeyEnvs is a list
+// on config.LLMProvider only for schema consistency with gemini's
+// multi-key rotation (see that field's doc comment); any entries beyond
+// the first are ignored for those two provider types.
+func firstAPIKey(envs []string) string {
+	for _, e := range envs {
+		if v := os.Getenv(e); v != "" {
+			return v
+		}
+	}
+	return ""
+}
+
+// buildEscalations extracts each provider's own EscalationConfig, keyed by
+// name, for router.New — see config.LLMProvider.Escalation's doc comment
+// for why this moved off a single global LLMConfig.Escalation.
+func buildEscalations(configs []config.LLMProvider) map[string]config.EscalationConfig {
+	m := make(map[string]config.EscalationConfig, len(configs))
+	for _, c := range configs {
+		m[c.Name] = c.Escalation
+	}
+	return m
 }
 
 // connectMCP returns a Manager immediately (with no clients yet) and spawns

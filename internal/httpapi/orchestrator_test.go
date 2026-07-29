@@ -99,7 +99,7 @@ func requireNeverSpoken(t *testing.T, ha *fakeHAClient) {
 func newTestOrchestratorWithTTS(t *testing.T, provider *llmtest.FakeProvider) (*Orchestrator, *fakeHAClient) {
 	t.Helper()
 
-	r, err := router.New([]llm.Provider{provider}, config.EscalationConfig{Enabled: true, ToolName: "escalate_to_claude", TargetProvider: provider.Name()})
+	r, err := router.New([]llm.Provider{provider}, selfEscalation(provider.Name()), "")
 	require.NoError(t, err)
 
 	h, err := history.Open(filepath.Join(t.TempDir(), "miranda.db"))
@@ -133,16 +133,27 @@ func newTestOrchestratorWithTTS(t *testing.T, provider *llmtest.FakeProvider) (*
 		config.AgentConfig{},
 		config.MemoryConfig{ExplicitTool: true},
 		ttsCfg,
-		config.EscalationConfig{Enabled: true, ToolName: "escalate_to_claude", TargetProvider: provider.Name()},
 		100, "debug",
 	)
 	return o, ha
 }
 
+// selfEscalation gives providerName an escalation config that targets
+// itself — these tests don't exercise real escalation (see
+// TestOrchestrator_EscalationIsTransparentToOrchestrator for that), but
+// still need the escalate_to_claude tool to be visible to the FakeProvider
+// the same way a real deployment's default provider would see its own
+// configured escalation tool (see config.LLMProvider.Escalation).
+func selfEscalation(providerName string) map[string]config.EscalationConfig {
+	return map[string]config.EscalationConfig{
+		providerName: {Enabled: true, ToolName: "escalate_to_claude", TargetProvider: providerName},
+	}
+}
+
 func newTestOrchestrator(t *testing.T, provider *llmtest.FakeProvider, mcpClients ...mcp.Client) (*Orchestrator, *history.Store, *memory.Store) {
 	t.Helper()
 
-	r, err := router.New([]llm.Provider{provider}, config.EscalationConfig{Enabled: true, ToolName: "escalate_to_claude", TargetProvider: provider.Name()})
+	r, err := router.New([]llm.Provider{provider}, selfEscalation(provider.Name()), "")
 	require.NoError(t, err)
 
 	h, err := history.Open(filepath.Join(t.TempDir(), "miranda.db"))
@@ -162,7 +173,6 @@ func newTestOrchestrator(t *testing.T, provider *llmtest.FakeProvider, mcpClient
 			EndConversationTool: true, ForgetConversationTool: true,
 		},
 		config.TTSConfig{},
-		config.EscalationConfig{Enabled: true, ToolName: "escalate_to_claude", TargetProvider: provider.Name()},
 		100, "debug",
 	)
 	return o, h, mem
@@ -229,9 +239,10 @@ func TestOrchestrator_EscalationIsTransparentToOrchestrator(t *testing.T) {
 	})
 	claude := llmtest.New("claude", llmtest.Response{Text: "Развёрнутый ответ от Клода."})
 
-	r, err := router.New([]llm.Provider{local, claude}, config.EscalationConfig{
-		Enabled: true, ToolName: "escalate_to_claude", TargetProvider: "claude",
-	})
+	escalations := map[string]config.EscalationConfig{
+		"local-qwen": {Enabled: true, ToolName: "escalate_to_claude", TargetProvider: "claude"},
+	}
+	r, err := router.New([]llm.Provider{local, claude}, escalations, "")
 	require.NoError(t, err)
 
 	h, err := history.Open(filepath.Join(t.TempDir(), "miranda.db"))
@@ -244,7 +255,6 @@ func TestOrchestrator_EscalationIsTransparentToOrchestrator(t *testing.T) {
 		config.AgentConfig{},
 		config.MemoryConfig{ExplicitTool: true},
 		config.TTSConfig{},
-		config.EscalationConfig{Enabled: true, ToolName: "escalate_to_claude", TargetProvider: "claude"},
 		100, "debug")
 
 	resp, err := o.Handle(context.Background(), InputRequest{Source: "cli", UserID: "alex", Text: "сложный вопрос"})
@@ -514,7 +524,7 @@ func newTestOrchestratorWithTelegram(t *testing.T, provider *llmtest.FakeProvide
 	require.NoError(t, err)
 	sender := telegram.NewSender(telegram.NewWithAPIBase("test-token", fakeAPI.URL), chats)
 
-	r, err := router.New([]llm.Provider{provider}, config.EscalationConfig{Enabled: true, ToolName: "escalate_to_claude", TargetProvider: provider.Name()})
+	r, err := router.New([]llm.Provider{provider}, selfEscalation(provider.Name()), "")
 	require.NoError(t, err)
 
 	h, err := history.Open(filepath.Join(t.TempDir(), "miranda.db"))
@@ -529,7 +539,6 @@ func newTestOrchestratorWithTelegram(t *testing.T, provider *llmtest.FakeProvide
 		config.AgentConfig{},
 		config.MemoryConfig{},
 		config.TTSConfig{},
-		config.EscalationConfig{Enabled: true, ToolName: "escalate_to_claude", TargetProvider: provider.Name()},
 		100, "debug",
 	)
 	o.SetTelegram(sender, config.TelegramConfig{SendMessageTool: true})

@@ -24,13 +24,13 @@ func drainText(t *testing.T, ch <-chan llm.StreamChunk) string {
 	return text
 }
 
-func noEscalation() config.EscalationConfig {
-	return config.EscalationConfig{Enabled: false}
+func noEscalations() map[string]config.EscalationConfig {
+	return nil
 }
 
 func TestRouter_UsesFirstHealthyProvider(t *testing.T) {
 	primary := llmtest.New("local", llmtest.Response{Text: "hi from local"})
-	r, err := New([]llm.Provider{primary}, noEscalation())
+	r, err := New([]llm.Provider{primary}, noEscalations(), "")
 	require.NoError(t, err)
 
 	var used string
@@ -43,7 +43,7 @@ func TestRouter_UsesFirstHealthyProvider(t *testing.T) {
 func TestRouter_FallsBackOnConnectionError(t *testing.T) {
 	broken := llmtest.New("broken", llmtest.Response{Err: errors.New("connection refused")})
 	backup := llmtest.New("backup", llmtest.Response{Text: "hi from backup"})
-	r, err := New([]llm.Provider{broken, backup}, noEscalation())
+	r, err := New([]llm.Provider{broken, backup}, noEscalations(), "")
 	require.NoError(t, err)
 
 	var used string
@@ -56,18 +56,36 @@ func TestRouter_FallsBackOnConnectionError(t *testing.T) {
 func TestRouter_AllProvidersFailReturnsError(t *testing.T) {
 	broken1 := llmtest.New("broken1", llmtest.Response{Err: errors.New("down")})
 	broken2 := llmtest.New("broken2", llmtest.Response{Err: errors.New("down too")})
-	r, err := New([]llm.Provider{broken1, broken2}, noEscalation())
+	r, err := New([]llm.Provider{broken1, broken2}, noEscalations(), "")
 	require.NoError(t, err)
 
 	_, err = r.Chat(context.Background(), llm.ChatRequest{}, nil)
 	require.Error(t, err)
 }
 
+func TestRouter_DefaultProviderMovedToFront(t *testing.T) {
+	a := llmtest.New("a", llmtest.Response{Text: "from a"})
+	b := llmtest.New("b", llmtest.Response{Text: "from b"})
+	c := llmtest.New("c", llmtest.Response{Text: "from c"})
+	r, err := New([]llm.Provider{a, b, c}, noEscalations(), "c")
+	require.NoError(t, err)
+
+	var used string
+	ch, err := r.Chat(context.Background(), llm.ChatRequest{}, func(name string) { used = name })
+	require.NoError(t, err)
+	require.Equal(t, "from c", drainText(t, ch))
+	require.Equal(t, "c", used)
+}
+
+func TestRouter_UnknownDefaultProviderErrors(t *testing.T) {
+	a := llmtest.New("a", llmtest.Response{Text: "from a"})
+	_, err := New([]llm.Provider{a}, noEscalations(), "does-not-exist")
+	require.Error(t, err)
+}
+
 func TestRouter_EscalatesToTargetProviderOnToolCall(t *testing.T) {
-	escalation := config.EscalationConfig{
-		Enabled:        true,
-		ToolName:       "escalate_to_claude",
-		TargetProvider: "claude",
+	escalations := map[string]config.EscalationConfig{
+		"local-qwen": {Enabled: true, ToolName: "escalate_to_claude", TargetProvider: "claude"},
 	}
 
 	local := llmtest.New("local-qwen", llmtest.Response{
@@ -75,7 +93,7 @@ func TestRouter_EscalatesToTargetProviderOnToolCall(t *testing.T) {
 	})
 	claude := llmtest.New("claude", llmtest.Response{Text: "the sophisticated answer"})
 
-	r, err := New([]llm.Provider{local, claude}, escalation)
+	r, err := New([]llm.Provider{local, claude}, escalations, "")
 	require.NoError(t, err)
 
 	var used string
@@ -98,12 +116,174 @@ func TestRouter_EscalatesToTargetProviderOnToolCall(t *testing.T) {
 	require.Equal(t, "call-1", msgs[2].ToolCallID)
 }
 
+func TestRouter_ChainedEscalation_TwoHops(t *testing.T) {
+	escalations := map[string]config.EscalationConfig{
+		"lite":   {Enabled: true, ToolName: "escalate_to_strong", TargetProvider: "strong"},
+		"strong": {Enabled: true, ToolName: "escalate_to_claude", TargetProvider: "claude"},
+	}
+
+	lite := llmtest.New("lite", llmtest.Response{
+		ToolCall: &llm.ToolCall{ID: "call-1", Name: "escalate_to_strong"},
+	})
+	strong := llmtest.New("strong", llmtest.Response{
+		ToolCall: &llm.ToolCall{ID: "call-2", Name: "escalate_to_claude"},
+	})
+	claude := llmtest.New("claude", llmtest.Response{Text: "the final answer"})
+
+	r, err := New([]llm.Provider{lite, strong, claude}, escalations, "")
+	require.NoError(t, err)
+
+	var used string
+	callCount := 0
+	ch, err := r.Chat(context.Background(), llm.ChatRequest{
+		Messages: []llm.Message{{Role: llm.RoleUser, Content: "a very hard question"}},
+	}, func(name string) { used = name; callCount++ })
+	require.NoError(t, err)
+	require.Equal(t, "the final answer", drainText(t, ch))
+	require.Equal(t, "claude", used)
+	require.Equal(t, 1, callCount, "onProviderUsed must fire exactly once across the whole chain")
+
+	require.Len(t, strong.Requests, 1)
+	require.Len(t, claude.Requests, 1)
+}
+
+func TestRouter_EscalationCycleDetected(t *testing.T) {
+	escalations := map[string]config.EscalationConfig{
+		"a": {Enabled: true, ToolName: "escalate_to_b", TargetProvider: "b"},
+		"b": {Enabled: true, ToolName: "escalate_to_a", TargetProvider: "a"},
+	}
+
+	a := llmtest.New("a", llmtest.Response{ToolCall: &llm.ToolCall{ID: "call-1", Name: "escalate_to_b"}})
+	b := llmtest.New("b", llmtest.Response{ToolCall: &llm.ToolCall{ID: "call-2", Name: "escalate_to_a"}})
+
+	r, err := New([]llm.Provider{a, b}, escalations, "")
+	require.NoError(t, err)
+
+	ch, err := r.Chat(context.Background(), llm.ChatRequest{}, nil)
+	require.NoError(t, err)
+
+	var gotErr error
+	for chunk := range ch {
+		if chunk.Err != nil {
+			gotErr = chunk.Err
+		}
+	}
+	require.Error(t, gotErr)
+	require.Contains(t, gotErr.Error(), "cycle")
+}
+
+func TestRouter_EscalationHopCapEnforced(t *testing.T) {
+	// A straight-line chain of 8 providers, each escalating to the next —
+	// exceeds maxEscalationHops (6) without ever revisiting a provider, so
+	// this exercises the hop cap specifically, not the cycle guard.
+	escalations := map[string]config.EscalationConfig{}
+	var providers []llm.Provider
+	for i := 0; i < 8; i++ {
+		name := providerName(i)
+		if i < 7 {
+			escalations[name] = config.EscalationConfig{Enabled: true, ToolName: "escalate", TargetProvider: providerName(i + 1)}
+			providers = append(providers, llmtest.New(name, llmtest.Response{ToolCall: &llm.ToolCall{ID: name + "-call", Name: "escalate"}}))
+		} else {
+			providers = append(providers, llmtest.New(name, llmtest.Response{Text: "unreachable"}))
+		}
+	}
+
+	r, err := New(providers, escalations, "")
+	require.NoError(t, err)
+
+	ch, err := r.Chat(context.Background(), llm.ChatRequest{}, nil)
+	require.NoError(t, err)
+
+	var gotErr error
+	for chunk := range ch {
+		if chunk.Err != nil {
+			gotErr = chunk.Err
+		}
+	}
+	require.Error(t, gotErr)
+	require.Contains(t, gotErr.Error(), "hops")
+}
+
+func providerName(i int) string {
+	return string(rune('a' + i))
+}
+
+func TestRouter_EachHopSeesOnlyItsOwnEscalationTool(t *testing.T) {
+	escalations := map[string]config.EscalationConfig{
+		"lite":   {Enabled: true, ToolName: "escalate_to_strong", TargetProvider: "strong"},
+		"strong": {Enabled: true, ToolName: "escalate_to_claude", TargetProvider: "claude"},
+	}
+
+	lite := llmtest.New("lite", llmtest.Response{
+		ToolCall: &llm.ToolCall{ID: "call-1", Name: "escalate_to_strong"},
+	})
+	strong := llmtest.New("strong", llmtest.Response{
+		ToolCall: &llm.ToolCall{ID: "call-2", Name: "escalate_to_claude"},
+	})
+	claude := llmtest.New("claude", llmtest.Response{Text: "done"})
+
+	r, err := New([]llm.Provider{lite, strong, claude}, escalations, "")
+	require.NoError(t, err)
+
+	ch, err := r.Chat(context.Background(), llm.ChatRequest{}, nil)
+	require.NoError(t, err)
+	drainText(t, ch)
+
+	require.Len(t, lite.Requests, 1)
+	liteTools := toolNames(lite.Requests[0].Tools)
+	require.Contains(t, liteTools, "escalate_to_strong")
+	require.NotContains(t, liteTools, "escalate_to_claude")
+
+	require.Len(t, strong.Requests, 1)
+	strongTools := toolNames(strong.Requests[0].Tools)
+	require.Contains(t, strongTools, "escalate_to_claude")
+	require.NotContains(t, strongTools, "escalate_to_strong")
+}
+
+func TestRouter_EscalationToolUsesCustomDescriptionWhenSet(t *testing.T) {
+	customDesc := "escalate for anything requiring code execution, which you don't have"
+	escalations := map[string]config.EscalationConfig{
+		"gemini-lite": {Enabled: true, ToolName: "escalate_to_claude", TargetProvider: "claude", Description: customDesc},
+		"generic":     {Enabled: true, ToolName: "escalate_to_claude", TargetProvider: "claude"},
+	}
+
+	geminiLite := llmtest.New("gemini-lite", llmtest.Response{Text: "hi"})
+	generic := llmtest.New("generic", llmtest.Response{Text: "hi"})
+	claude := llmtest.New("claude", llmtest.Response{Text: "hi"})
+
+	r, err := New([]llm.Provider{geminiLite, claude}, escalations, "")
+	require.NoError(t, err)
+	ch, err := r.Chat(context.Background(), llm.ChatRequest{}, nil)
+	require.NoError(t, err)
+	drainText(t, ch)
+	require.Len(t, geminiLite.Requests, 1)
+	require.Equal(t, customDesc, geminiLite.Requests[0].Tools[0].Description)
+
+	r2, err := New([]llm.Provider{generic, claude}, escalations, "")
+	require.NoError(t, err)
+	ch2, err := r2.Chat(context.Background(), llm.ChatRequest{}, nil)
+	require.NoError(t, err)
+	drainText(t, ch2)
+	require.Len(t, generic.Requests, 1)
+	require.Equal(t, defaultEscalationDescription, generic.Requests[0].Tools[0].Description)
+}
+
+func toolNames(tools []llm.ToolDef) []string {
+	var names []string
+	for _, t := range tools {
+		names = append(names, t.Name)
+	}
+	return names
+}
+
 func TestRouter_EscalationTargetNotConfiguredReturnsErrChunk(t *testing.T) {
-	escalation := config.EscalationConfig{Enabled: true, ToolName: "escalate_to_claude", TargetProvider: "claude"}
+	escalations := map[string]config.EscalationConfig{
+		"local-qwen": {Enabled: true, ToolName: "escalate_to_claude", TargetProvider: "claude"},
+	}
 	local := llmtest.New("local-qwen", llmtest.Response{
 		ToolCall: &llm.ToolCall{ID: "call-1", Name: "escalate_to_claude"},
 	})
-	r, err := New([]llm.Provider{local}, escalation)
+	r, err := New([]llm.Provider{local}, escalations, "")
 	require.NoError(t, err)
 
 	ch, err := r.Chat(context.Background(), llm.ChatRequest{}, nil)
@@ -120,7 +300,7 @@ func TestRouter_EscalationTargetNotConfiguredReturnsErrChunk(t *testing.T) {
 
 func TestRouter_TracesRequestAndResponseWhenTracerSet(t *testing.T) {
 	provider := llmtest.New("local", llmtest.Response{Text: "hi"})
-	r, err := New([]llm.Provider{provider}, noEscalation())
+	r, err := New([]llm.Provider{provider}, noEscalations(), "")
 	require.NoError(t, err)
 
 	var buf bytes.Buffer
@@ -139,12 +319,14 @@ func TestRouter_TracesRequestAndResponseWhenTracerSet(t *testing.T) {
 }
 
 func TestRouter_TracesEscalationAsTwoBlocks(t *testing.T) {
-	escalation := config.EscalationConfig{Enabled: true, ToolName: "escalate_to_claude", TargetProvider: "claude"}
+	escalations := map[string]config.EscalationConfig{
+		"local-qwen": {Enabled: true, ToolName: "escalate_to_claude", TargetProvider: "claude"},
+	}
 	local := llmtest.New("local-qwen", llmtest.Response{
 		ToolCall: &llm.ToolCall{ID: "call-1", Name: "escalate_to_claude", Arguments: `{"reason":"hard"}`},
 	})
 	claude := llmtest.New("claude", llmtest.Response{Text: "the answer"})
-	r, err := New([]llm.Provider{local, claude}, escalation)
+	r, err := New([]llm.Provider{local, claude}, escalations, "")
 	require.NoError(t, err)
 
 	var buf bytes.Buffer
@@ -165,7 +347,7 @@ func TestRouter_TracesEscalationAsTwoBlocks(t *testing.T) {
 
 func TestRouter_NoTracerSetIsFine(t *testing.T) {
 	provider := llmtest.New("local", llmtest.Response{Text: "hi"})
-	r, err := New([]llm.Provider{provider}, noEscalation())
+	r, err := New([]llm.Provider{provider}, noEscalations(), "")
 	require.NoError(t, err)
 
 	ch, err := r.Chat(context.Background(), llm.ChatRequest{}, nil)

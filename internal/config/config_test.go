@@ -35,7 +35,7 @@ tts:
 	require.Equal(t, "./data/miranda.db", cfg.Storage.SQLitePath)
 	require.Equal(t, 300, cfg.TTS.YandexStation.IdlePollIntervalMS)
 	require.True(t, cfg.Memory.AutoSummarize)
-	require.Equal(t, "escalate_to_claude", cfg.LLM.Escalation.ToolName)
+	require.Equal(t, "", cfg.LLM.DefaultProvider)
 }
 
 func TestDefault_TTSDefaultsToYandexStationTextWithGeminiOptIn(t *testing.T) {

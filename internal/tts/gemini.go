@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/archer-developer/miranda/internal/config"
+	"github.com/archer-developer/miranda/internal/keyrotation"
 )
 
 // geminiAPIBaseURL is Gemini's public API host. It's a var, not a const, so
@@ -240,42 +241,45 @@ func estimatedDurationFromChars(chars int) time.Duration {
 // retries the whole key list again, up to MaxQuotaRetryCycles total passes —
 // most free-tier Gemini quota windows are per-minute, so a short cooldown
 // often recovers a key that failed moments ago. Once every cycle is
-// exhausted, it returns ErrQuotaExceeded.
+// exhausted, it returns ErrQuotaExceeded. The cycle/cooldown loop itself is
+// internal/keyrotation.Run — shared with internal/llm/gemini's chat
+// provider, which needs the identical shape but a broader (quota-or-5xx)
+// retryability rule; only that predicate and what one attempt does differ
+// between the two callers.
 //
 // Any non-quota error (auth, network, malformed request) returns
 // immediately without rotating keys or retrying: cycling keys can't fix a
 // request that's simply wrong, and there's no reason to burn the cooldown
 // delay on an error a retry will just reproduce.
 func (p *geminiProvider) callGemini(ctx context.Context, text string) ([]byte, error) {
-	cycles := p.cfg.MaxQuotaRetryCycles
-	if cycles <= 0 {
-		cycles = 1
+	var pcm []byte
+	cfg := keyrotation.Config{
+		Cycles:   p.cfg.MaxQuotaRetryCycles,
+		Cooldown: time.Duration(p.cfg.QuotaCooldownSeconds) * time.Second,
 	}
-	cooldown := time.Duration(p.cfg.QuotaCooldownSeconds) * time.Second
-
-	var lastErr error
-	for cycle := 0; cycle < cycles; cycle++ {
-		for i, key := range p.apiKeys {
-			pcm, err := p.requestOnce(ctx, i, key, text)
-			if err == nil {
-				return pcm, nil
+	err := keyrotation.Run(ctx, p.logger, "tts: gemini", len(p.apiKeys), cfg,
+		func(err error) bool { return errors.Is(err, errKeyQuotaExceeded) },
+		func(ctx context.Context, i int) error {
+			result, err := p.requestOnce(ctx, i, p.apiKeys[i], text)
+			if err != nil {
+				return err
 			}
-			if !errors.Is(err, errKeyQuotaExceeded) {
-				return nil, err
-			}
-			lastErr = err
+			pcm = result
+			return nil
+		},
+	)
+	if err != nil {
+		// Run wraps the exhaustion case with %w around the last attempt's
+		// error, so errKeyQuotaExceeded (if that's what every key failed
+		// with) survives the wrap — translate it to the exported sentinel
+		// callers actually check for. Any other error (a non-retryable
+		// failure Run returned immediately, unwrapped) passes through as-is.
+		if errors.Is(err, errKeyQuotaExceeded) {
+			return nil, fmt.Errorf("%w: %v", ErrQuotaExceeded, err)
 		}
-		if cycle < cycles-1 {
-			p.logger.Info("tts: gemini: all keys exhausted this pass, cooling down before retry",
-				"cycle", cycle+1, "of_cycles", cycles, "cooldown", cooldown)
-			select {
-			case <-time.After(cooldown):
-			case <-ctx.Done():
-				return nil, ctx.Err()
-			}
-		}
+		return nil, err
 	}
-	return nil, fmt.Errorf("%w: all %d configured key(s) exhausted across %d cycle(s): %v", ErrQuotaExceeded, len(p.apiKeys), cycles, lastErr)
+	return pcm, nil
 }
 
 // requestOnce makes exactly one generateContent call with one API key and

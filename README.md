@@ -72,8 +72,8 @@ one-time server setup (`loginctl enable-linger`) it depends on.
 Copy `config/config.example.yaml` to `config/config.yaml` and edit it — every
 field has a built-in default (see `internal/config/config.go`), so you only
 need to override what differs. Secrets (API keys, tokens) are never put in
-the file directly: each provider/server entry names an environment variable
-(`api_key_env`, `token_env`) to read at startup instead.
+the file directly: each provider/server entry names one or more environment
+variables (`api_key_envs`, `token_env`) to read at startup instead.
 
 ```bash
 cp config/config.example.yaml config/config.yaml
@@ -92,11 +92,17 @@ cp .env.example .env
 
 Key sections: `llm.providers` (the fallback chain — one entry per model
 backend, `type: openai_compat` for any OpenAI Chat Completions compatible
-server — Ollama, vLLM, LM Studio, OpenRouter — or `type: anthropic` for
-Claude), `mcp.servers` (tool sources, see below), `tts` (Yandex Station
-routing, and the opt-in `gemini_tts` provider — see **TTS** below),
-`storage` (SQLite + memory file + TTS audio cache paths), `users` (web UI
-login accounts — see **Web UI** below).
+server — Ollama, vLLM, LM Studio, OpenRouter — `type: anthropic` for
+Claude, or `type: gemini` for native Gemini), `mcp.servers` (tool sources,
+see below), `tts` (Yandex Station routing, and the opt-in `gemini_tts`
+provider — see **TTS** below), `storage` (SQLite + memory file + TTS audio
+cache paths), `users` (web UI login accounts — see **Web UI** below).
+`llm.default_provider`, if set, is honored regardless of `providers`' own
+list order — the router moves that provider to the front of the fallback
+chain; leave it empty to just use list order as-is (first entry is the
+default). Every provider type takes `api_key_envs` (a list of environment
+variable names), but only `gemini` actually rotates across more than the
+first entry — see below.
 
 An `anthropic`-type provider can also opt into Claude's own server-executed
 tools via `anthropic_tools` (`web_search`, `web_fetch`, `code_execution` —
@@ -112,6 +118,64 @@ answer anything it doesn't already have a URL for. Enabling
 `code_execution` alongside them also lets code running in Anthropic's
 sandbox call `web_search`/`web_fetch` itself as a helper (fetch a page,
 then parse or compute over it).
+
+A `gemini`-type provider (`internal/llm/gemini`, on the official
+`google.golang.org/genai` SDK) is the native equivalent for Google's
+models — full function-calling support combined with Grounding with
+Google Search in one request, unlike routing Gemini through the
+`openai_compat` shim. Its own native tools live under `gemini_tools`
+(currently just `google_search`, same opt-in shape as `anthropic_tools`'s
+flags; `context_caching` exists as a config field but isn't implemented
+yet — `gemini.New` refuses to start if it's set to `true`, rather than
+silently ignoring it). Unlike Claude, there's no `code_execution` option
+here: Gemini's code-execution tool only works on Vertex AI (GCP-project
+billing/auth), not the plain API-key-based Gemini Developer API this
+provider type targets — confirmed against the `google.golang.org/genai`
+SDK's own source, which marks it (consistently with every other
+genuinely-Vertex-only field in that package) as unsupported outside
+Vertex AI on the `generateContent`/`streamGenerateContent` API this
+provider calls. `api_key_envs` is where this provider
+type actually matters as a list: free-tier Gemini keys have a low
+per-key quota, so `internal/llm/gemini` rotates across every resolved key
+on a quota error (HTTP 429 / `RESOURCE_EXHAUSTED`) **or a 5xx server
+error** — broader than `gemini_tts`'s quota-only rotation (see **TTS**
+below), since a conversational turn can't afford to drop the whole turn on
+a transient upstream failure the way one TTS chunk request can.
+`gemini_rotation.cooldown_seconds`/`max_retry_cycles` tune that behavior,
+mirroring `gemini_tts`'s equivalent fields.
+
+Manually verified against the live API (real free-tier keys): plain text
+turns, tool calling, and multi-turn tool-result follow-ups all work.
+Multi-turn tool calling required a real fix, not just design: Gemini
+returns each function-call `Part` with a `thoughtSignature` that **must**
+be echoed back verbatim on the next turn's replayed call, or the API
+returns a hard 400 — not just "degraded quality" as some of the SDK's own
+doc comments elsewhere might suggest. This is why `llm.ToolCall` and
+`history.ToolCallRef` both carry a generic `ProviderMetadata` field
+(opaque, base64 when binary) — `internal/llm/gemini` is the only current
+user, but the field is provider-agnostic so history storage doesn't
+special-case Gemini. Grounding with Google Search is wired and
+structurally correct (confirmed via the SDK's own types), but its free-tier
+quota is separate from and much tighter than plain generateContent calls —
+verify it works before relying on it, the same as the deploy-specific `tts`
+caveats below.
+
+Each provider entry also carries its own `escalation` block (`enabled`,
+`tool_name`, `target_provider`, optional `description`) — not one global
+setting — so a chain of providers can each pick their own hand-off target
+and the model sees only the tool for whichever provider is currently
+handling the turn. This is what makes a graduated ladder possible: a cheap
+model escalates to a stronger one, which escalates to Claude, instead of
+every hard turn skipping straight to the most expensive model. See
+`config/llm.yaml` for a worked 3-tier example (`gemini-3.5-flash-lite` →
+`gemini-3.6-flash` → Claude), including `description` overrides on both
+Gemini tiers that explicitly name code execution as an escalation
+trigger — since neither Gemini tier has a working code-execution tool (see
+above), calling it out by name in the tool's own description is what makes
+the model reliably hand off for it, rather than leaving that to the
+generic "too complex" wording to somehow imply. The router walks a chain
+of any depth (capped at a small hop limit purely to catch a misconfigured
+cycle, not to limit a legitimate ladder).
 
 ## TTS
 
@@ -429,7 +493,8 @@ internal/hub/           in-process log/event broadcast for the web UI
 internal/llm/           provider-agnostic chat interface
   openaicompat/           client on the official openai-go SDK (any OpenAI-compatible backend)
   anthropic/              client on the official anthropic-sdk-go SDK
-  router/                 fallback chain + escalate_to_claude handoff
+  gemini/                 client on the official google.golang.org/genai SDK, multi-key rotation
+  router/                 fallback chain + per-provider, chained escalation handoff
 internal/mcp/            MCP Client/Manager abstraction, multi-server tool-name prefixing
 internal/history/        SQLite (pure-Go, no cgo) dialog log with FTS5 search
 internal/memory/         per-user markdown long-term memory

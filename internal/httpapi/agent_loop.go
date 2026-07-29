@@ -66,7 +66,7 @@ func (o *Orchestrator) resolveConversation(ctx context.Context, userID, source s
 		case "assistant":
 			msg := llm.Message{Role: llm.RoleAssistant, Content: m.Content}
 			for _, tc := range m.ToolCalls {
-				msg.ToolCalls = append(msg.ToolCalls, llm.ToolCall{ID: tc.ID, Name: tc.Name, Arguments: tc.Arguments})
+				msg.ToolCalls = append(msg.ToolCalls, llm.ToolCall{ID: tc.ID, Name: tc.Name, Arguments: tc.Arguments, ProviderMetadata: tc.ProviderMetadata})
 			}
 			messages = append(messages, msg)
 		case "tool":
@@ -113,9 +113,14 @@ func (o *Orchestrator) currentUserName(userID string) string {
 }
 
 // availableTools combines every connected MCP server's tools with the
-// agent's built-in tools (remember_this, and the escalation tool if enabled
-// — the router intercepts calls to it transparently, so it never reaches
-// executeTool).
+// agent's built-in tools (remember_this, etc.). The escalation tool is NOT
+// added here: since each provider in the router's fallback/escalation chain
+// can configure its own escalation target and tool name (see
+// config.LLMProvider.Escalation), only the Router knows which one applies
+// to whichever provider is active at a given hop — it appends that
+// provider's own escalation ToolDef to this base list right before each
+// Chat() call (see internal/llm/router.requestFor), and intercepts calls to
+// it transparently, so it never reaches executeTool.
 func (o *Orchestrator) availableTools(ctx context.Context) []llm.ToolDef {
 	tools := append([]llm.ToolDef{}, o.tools.Tools(ctx)...)
 
@@ -217,17 +222,6 @@ func (o *Orchestrator) availableTools(ctx context.Context) []llm.ToolDef {
 					},
 				},
 				"required": []string{"text"},
-			},
-		})
-	}
-
-	if o.escalationCfg.Enabled {
-		tools = append(tools, llm.ToolDef{
-			Name:        o.escalationCfg.ToolName,
-			Description: "Hand this turn off to a more capable model when the request is too complex, ambiguous, or high-stakes for you to handle well.",
-			Parameters: map[string]any{
-				"type":       "object",
-				"properties": map[string]any{"reason": map[string]any{"type": "string"}},
 			},
 		})
 	}
@@ -467,7 +461,7 @@ func (o *Orchestrator) executeTool(ctx context.Context, userID string, tc llm.To
 func (o *Orchestrator) recordAssistantToolCallMessage(ctx context.Context, userID, conversationID, text string, toolCalls []llm.ToolCall) {
 	refs := make([]history.ToolCallRef, len(toolCalls))
 	for i, tc := range toolCalls {
-		refs[i] = history.ToolCallRef{ID: tc.ID, Name: tc.Name, Arguments: tc.Arguments}
+		refs[i] = history.ToolCallRef{ID: tc.ID, Name: tc.Name, Arguments: tc.Arguments, ProviderMetadata: tc.ProviderMetadata}
 	}
 	msgID, err := o.history.AppendAssistantMessage(ctx, conversationID, text, refs)
 	if err != nil {

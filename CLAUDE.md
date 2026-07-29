@@ -227,6 +227,53 @@ flowchart LR
     msg -.->|kept in sync via triggers| fts
 ```
 
+### LLM providers and escalation
+
+`config.LLMConfig.Providers` is an ordered fallback chain
+(`internal/llm/router.Router` tries each in list order on a connection
+failure) — `type: openai_compat` (any OpenAI Chat Completions-compatible
+backend), `type: anthropic` (native Claude, `internal/llm/anthropic`), or
+`type: gemini` (native Gemini, `internal/llm/gemini`, on
+`google.golang.org/genai`). `LLMConfig.DefaultProvider`, if set, is what's
+actually honored as "default" — `router.New` moves it to the front of the
+fallback order regardless of `Providers`' own list position (this field
+existed before but had no effect until this was wired up; don't assume
+list order alone determines the default).
+
+Each provider entry carries its own `Escalation EscalationConfig`
+(`enabled`, `tool_name`, `target_provider`, optional `description`) — not a
+single global setting — so a chain of providers can each pick their own
+hand-off target/tool name, e.g. a cheap default model escalates to a
+stronger one, which escalates to Claude for genuinely hard turns, instead
+of every hard turn skipping straight to the most expensive model (see
+`config/llm.yaml` for a worked 3-tier example). `description` overrides
+the escalation tool's default "too complex/ambiguous/high-stakes" wording
+(`router.defaultEscalationDescription`) — worth setting when a provider has
+a concrete, known-missing capability, e.g. `config/llm.yaml`'s Gemini tiers
+name code execution explicitly (neither has a working code-execution tool
+against the plain Gemini Developer API — see `internal/llm/gemini` below),
+since a generic "too hard" prompt doesn't reliably make the model connect
+"I can't run code" to "escalate." `Router` owns building and injecting the *active*
+provider's own escalation `ToolDef` right before each `Chat()` call — not
+`Orchestrator.availableTools`, which only builds the shared base tool list
+common to every provider — which is what lets each hop in a chain see only
+its own escalation tool, not every provider's. `Router.Chat` walks the
+resulting chain to any depth (a small hop cap exists purely to catch a
+misconfigured cycle — two providers escalating to each other — not to
+limit a legitimate deep ladder).
+
+`type: gemini` is also where `api_key_envs` matters as a real list: Gemini
+free-tier keys have a low per-key quota, so `internal/llm/gemini` rotates
+across every resolved key on a quota error (HTTP 429/`RESOURCE_EXHAUSTED`)
+**or a 5xx server error**. This is broader than `gemini_tts`'s rotation
+(quota-only — see `internal/tts/gemini.go`), because a conversational turn
+can't afford to drop the whole turn on a transient upstream failure the
+way one TTS chunk request can fail loudly; don't "fix" this back to match
+TTS's narrower behavior if you're touching either. `anthropic`/
+`openai_compat` providers also accept `api_key_envs` (kept for config-
+schema consistency with `gemini`) but only ever use the first entry —
+those SDKs take a single credential per client, not a rotation pool.
+
 ### Tools available to the model
 
 Config flags below live on `config.MemoryConfig` unless otherwise noted.
@@ -240,7 +287,7 @@ Config flags below live on `config.MemoryConfig` unless otherwise noted.
 | `speak_reply` | `config.TTSConfig.SpeakReplyTool` | Takes a `text` argument and dispatches exactly that text to `tts.primary`, even on a source other than `ha_assist` — triggered by an explicit "read/say that aloud" request (see Response routing above). Speech-friendly text the model composes itself, not necessarily identical to its written reply. |
 | `stop_speech` | `config.TTSConfig.StopSpeechTool` | Interrupt whatever `tts.primary`/`tts.fallback` is currently speaking or has queued (clears the queue, then `media_player.media_stop`s every configured entity) — triggered by an explicit "stop talking" request. Every `ha_assist` turn also triggers this automatically at turn start (barge-in) — see Response routing above. |
 | `send_telegram` | `config.TelegramConfig.SendMessageTool` | Proactively push a message to a household member's Telegram (current user by default, or a named one) — see Telegram channel above. |
-| `escalate_to_claude` (name configurable) | `config.EscalationConfig.Enabled` | Hand a hard turn to a stronger provider; intercepted at the router level, transparent to the Orchestrator. |
+| Escalation tool (name configurable per provider) | `config.LLMProvider.Escalation.Enabled` | Hand a hard turn off to that provider's own configured target; intercepted at the router level, transparent to the Orchestrator. See "LLM providers and escalation" above — each provider in the chain has its own target/tool name, and a chain can be more than one hop deep. |
 | MCP tools (e.g. `ha_*`) | `config.MCPConfig.Servers[].Enabled` | Home Assistant and other MCP-exposed device/service actions. |
 
 ### Web UI surface
@@ -264,7 +311,7 @@ Two size-rotated files under `config.Logging.Dir` (`./logs` by default; see
 - `llm.log` — a request/response trace written by `internal/llm/router`
   (`Router.SetTracer`, formatted by `internal/llmtrace`), independent of
   which provider handled the turn. Every single provider call (including
-  both legs of an escalation handoff) gets one block: the exact system
+  every hop of an escalation chain, not just one) gets one block: the exact system
   prompt, message history, and tool names sent, and the model's final
   text/tool calls or error — tagged with `conversation=<id>` (threaded
   through `ctx` via `llmtrace.WithConversationID`, set once

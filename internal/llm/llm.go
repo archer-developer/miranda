@@ -20,6 +20,15 @@ type ToolCall struct {
 	ID        string // provider-assigned id, echoed back in the tool result message
 	Name      string
 	Arguments string // raw JSON arguments, as emitted by the model
+	// ProviderMetadata is an opaque, provider-specific blob (base64-encoded
+	// if the provider's own data is binary) that must be echoed back
+	// verbatim on a later turn for providers that require it — e.g.
+	// Gemini's "thought signature" on a function-call part (see
+	// internal/llm/gemini's toLLMToolCall/toGeminiContents): omitting it on
+	// a later turn's replayed tool call is a hard 400 from the API, not
+	// just degraded quality. Empty and unused by providers that don't need
+	// this (Anthropic, OpenAI-compat).
+	ProviderMetadata string
 }
 
 // Message is one turn in the conversation sent to/received from a Provider.

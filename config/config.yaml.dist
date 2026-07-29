@@ -38,17 +38,28 @@ logging:
 
 llm:
   # Tried in this order: first is normal/default, later ones are the
-  # reliability fallback chain if an earlier provider errors or times out.
+  # reliability fallback chain if an earlier provider errors or times out —
+  # unless default_provider below names one to move to the front instead.
   providers:
     - name: local-qwen
       type: openai_compat # any OpenAI Chat Completions compatible backend
       base_url: "http://localhost:11434/v1" # e.g. Ollama, vLLM, LM Studio, OpenRouter
       model: "qwen2.5:14b"
-      api_key_env: "" # env var name holding the API key, if the backend needs one
+      api_key_envs: [] # env var name(s) holding the API key, if the backend needs one
+      # Lets the primary/local model hand a hard turn off to a stronger
+      # model by calling this tool itself, instead of every turn paying for
+      # the expensive model. Each provider configures its own escalation
+      # target/tool name, so a chain (e.g. local -> gemini -> claude) can
+      # have each hop pick a progressively stronger target — see
+      # config/llm.yaml for a worked 3-tier example.
+      escalation:
+        enabled: true
+        tool_name: "escalate_to_claude"
+        target_provider: claude
     - name: claude
       type: anthropic
       model: "claude-sonnet-5"
-      api_key_env: "ANTHROPIC_API_KEY"
+      api_key_envs: ["ANTHROPIC_API_KEY"]
       # Claude's own server-executed tools (run by Anthropic itself, not
       # through Miranda's tool loop). All default to false. This is what
       # lets Claude answer something needing the live internet, e.g. "what's
@@ -63,14 +74,20 @@ llm:
         web_search: true
         web_fetch: true
         code_execution: true
+      # No escalation block — top of this chain, nowhere further to hand
+      # off to. The zero-value (disabled) EscalationConfig is correct here.
+  # Honored regardless of the providers list's own order (router.New moves
+  # this name to the front of the fallback chain) — empty means "use the
+  # list order above as-is".
   default_provider: local-qwen
-  escalation:
-    # Lets the primary/local model hand a hard turn off to a stronger model
-    # by calling this tool itself, instead of every turn paying for the
-    # expensive model.
-    enabled: true
-    tool_name: "escalate_to_claude"
-    target_provider: claude
+  # A native Gemini provider (type: gemini) is also available — see
+  # config/llm.yaml for a worked example, including its own multi-key
+  # rotation (api_key_envs takes several env var names; unlike anthropic/
+  # openai_compat, which only ever use the first, Gemini actually rotates
+  # across all of them on a quota or server error) and native
+  # gemini_tools.google_search (Grounding with Google Search — Gemini's
+  # code-execution tool is Vertex AI-only and not offered here, unlike
+  # Claude's anthropic_tools.code_execution above).
 
 memory:
   # End-of-session LLM summarization pass that merges durable facts into

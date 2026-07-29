@@ -47,8 +47,15 @@ func newHarness(t *testing.T, provider *llmtest.FakeProvider, mcpClients ...mcp.
 	memoryStore, err := memory.New(t.TempDir())
 	require.NoError(t, err)
 
-	escalation := config.EscalationConfig{Enabled: true, ToolName: "escalate_to_claude", TargetProvider: provider.Name()}
-	r, err := router.New([]llm.Provider{provider}, escalation)
+	// This test doesn't exercise real escalation, but still gives the
+	// provider an escalation config that targets itself, so the
+	// escalate_to_claude tool is visible in its Requests the same way a
+	// real deployment's configured provider would see its own (see
+	// config.LLMProvider.Escalation).
+	escalations := map[string]config.EscalationConfig{
+		provider.Name(): {Enabled: true, ToolName: "escalate_to_claude", TargetProvider: provider.Name()},
+	}
+	r, err := router.New([]llm.Provider{provider}, escalations, "")
 	require.NoError(t, err)
 
 	toolManager := mcp.NewManager(nil, mcpClients...)
@@ -62,7 +69,7 @@ func newHarness(t *testing.T, provider *llmtest.FakeProvider, mcpClients ...mcp.
 			EndConversationTool: true, ForgetConversationTool: true,
 		},
 		config.TTSConfig{},
-		escalation, 100, "debug",
+		100, "debug",
 	)
 
 	server := httpapi.NewServer(orchestrator, eventHub, "", nil, nil, nil, nil)

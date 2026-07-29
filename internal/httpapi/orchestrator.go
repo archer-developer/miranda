@@ -99,7 +99,6 @@ type Orchestrator struct {
 	users            *users.Registry // may be nil: falls back to the raw user id in the system prompt
 	memoryCfg        config.MemoryConfig
 	ttsCfg           config.TTSConfig
-	escalationCfg    config.EscalationConfig
 	chunkMaxChars    int
 	defaultUserID    string
 	baseSystemPrompt string
@@ -129,7 +128,6 @@ func NewOrchestrator(
 	agentCfg config.AgentConfig,
 	memoryCfg config.MemoryConfig,
 	ttsCfg config.TTSConfig,
-	escalationCfg config.EscalationConfig,
 	chunkMaxChars int,
 	defaultUserID string,
 ) *Orchestrator {
@@ -143,7 +141,6 @@ func NewOrchestrator(
 		users:            usersRegistry,
 		memoryCfg:        memoryCfg,
 		ttsCfg:           ttsCfg,
-		escalationCfg:    escalationCfg,
 		chunkMaxChars:    chunkMaxChars,
 		defaultUserID:    defaultUserID,
 		baseSystemPrompt: agentCfg.SystemPrompt,

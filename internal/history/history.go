@@ -46,6 +46,13 @@ type ToolCallRef struct {
 	ID        string `json:"id"`
 	Name      string `json:"name"`
 	Arguments string `json:"arguments"`
+	// ProviderMetadata mirrors llm.ToolCall.ProviderMetadata — an opaque,
+	// provider-specific blob (e.g. Gemini's thought signature) that must
+	// survive a stored conversation being replayed on a later turn, or a
+	// provider that requires it will hard-error on that replay. Omitted
+	// (empty string) for providers that don't set it; stored here as a
+	// plain JSON string field, so old rows without it decode fine.
+	ProviderMetadata string `json:"provider_metadata,omitempty"`
 }
 
 // Conversation is one stored dialog session.

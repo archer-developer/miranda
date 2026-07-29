@@ -1,8 +1,10 @@
 // Package router selects among configured llm.Providers: it retries an
 // ordered fallback chain when a provider is unreachable, and transparently
-// reroutes a turn to the escalation target when the active provider invokes
-// the configured escalation tool (e.g. a small local model calling
-// escalate_to_claude on a hard question).
+// reroutes a turn to a provider's own configured escalation target when
+// that provider invokes its escalation tool (e.g. a small local model
+// calling escalate_to_gemini_strong on a hard question) — walking a chain
+// of these hop by hop, since each provider can configure its own target
+// (see config.LLMProvider.Escalation).
 package router
 
 import (
@@ -13,16 +15,29 @@ import (
 	"github.com/archer-developer/miranda/internal/llm"
 )
 
+// maxEscalationHops caps how many hops one turn's escalation chain can walk
+// — a real ladder is 2-3 hops deep (e.g. a cheap model escalates to a
+// stronger one, which escalates to Claude); this exists purely to stop a
+// misconfigured cycle (A escalates to B, B escalates back to A) from
+// looping forever, not to cap a legitimate deep chain.
+const maxEscalationHops = 6
+
 // Router dispatches chat turns to the configured llm.Providers.
 type Router struct {
-	providers  map[string]llm.Provider
-	order      []string // fallback chain, in the order providers were configured
-	escalation config.EscalationConfig
+	providers   map[string]llm.Provider
+	order       []string                           // fallback chain, in the order providers were configured (or reordered by defaultProvider)
+	escalations map[string]config.EscalationConfig // keyed by provider name; a name absent (or present with Enabled: false) has no escalation
 }
 
 // New builds a Router over providers, tried in the given slice order for
-// reliability fallback (first provider is the normal/default one).
-func New(providers []llm.Provider, escalation config.EscalationConfig) (*Router, error) {
+// reliability fallback, and escalations (one config.EscalationConfig per
+// provider name, typically built from the same []config.LLMProvider used to
+// construct providers — see cmd/miranda/main.go's buildEscalations).
+// defaultProvider, if non-empty, is moved to the front of the fallback
+// order — config.LLMConfig.DefaultProvider is the source of truth for
+// "default", not Providers' list position. Errors if defaultProvider is
+// set but doesn't match any configured provider's Name().
+func New(providers []llm.Provider, escalations map[string]config.EscalationConfig, defaultProvider string) (*Router, error) {
 	if len(providers) == 0 {
 		return nil, fmt.Errorf("router: no providers configured")
 	}
@@ -34,16 +49,37 @@ func New(providers []llm.Provider, escalation config.EscalationConfig) (*Router,
 		order = append(order, p.Name())
 	}
 
-	return &Router{providers: m, order: order, escalation: escalation}, nil
+	if defaultProvider != "" {
+		if _, ok := m[defaultProvider]; !ok {
+			return nil, fmt.Errorf("router: default_provider %q not found among configured providers", defaultProvider)
+		}
+		order = moveToFront(order, defaultProvider)
+	}
+
+	return &Router{providers: m, order: order, escalations: escalations}, nil
+}
+
+// moveToFront returns order with name moved to index 0, preserving the
+// relative order of everything else — the rest of order becomes the
+// fallback chain behind the explicit default.
+func moveToFront(order []string, name string) []string {
+	out := make([]string, 0, len(order))
+	out = append(out, name)
+	for _, n := range order {
+		if n != name {
+			out = append(out, n)
+		}
+	}
+	return out
 }
 
 // traceable is implemented by providers that accept a request/response
 // tracer directly (see llm.Tracer). Each Provider owns producing its own
 // trace content — the exact request/response it built for its own SDK (see
-// internal/llm/anthropic, internal/llm/openaicompat) — rather than the
-// Router formatting one from the provider-agnostic ChatRequest, which
-// can't represent provider-specific specifics like Anthropic's own
-// server-side web_search/web_fetch/code_execution tools.
+// internal/llm/anthropic, internal/llm/openaicompat, internal/llm/gemini)
+// rather than the Router formatting one from the provider-agnostic
+// ChatRequest, which can't represent provider-specific specifics like
+// Anthropic's own server-side web_search/web_fetch/code_execution tools.
 type traceable interface {
 	SetTracer(t llm.Tracer)
 }
@@ -60,11 +96,51 @@ func (r *Router) SetTracer(tracer llm.Tracer) {
 	}
 }
 
+// defaultEscalationDescription is used when a provider's EscalationConfig
+// doesn't set its own Description — generic enough for any provider, but
+// see that field's doc comment for when a provider-specific one (e.g.
+// naming a concrete missing capability like code execution) is worth
+// setting instead.
+const defaultEscalationDescription = "Hand this turn off to a more capable model when the request is too complex, ambiguous, or high-stakes for you to handle well."
+
+// escalationToolDef builds the llm.ToolDef the active provider sees for its
+// own configured escalation target. Built here, not by the Orchestrator,
+// because each provider's escalation config can now differ (see
+// config.LLMProvider.Escalation) and the Orchestrator has no per-provider
+// visibility into which one is currently active at any given hop.
+func escalationToolDef(esc config.EscalationConfig) llm.ToolDef {
+	description := esc.Description
+	if description == "" {
+		description = defaultEscalationDescription
+	}
+	return llm.ToolDef{
+		Name:        esc.ToolName,
+		Description: description,
+		Parameters: map[string]any{
+			"type":       "object",
+			"properties": map[string]any{"reason": map[string]any{"type": "string"}},
+		},
+	}
+}
+
+// requestFor returns req with esc's own escalation tool appended, if
+// enabled — req itself (the base tool list) is never mutated, so each hop
+// starts from the same base and only its own tool differs.
+func requestFor(req llm.ChatRequest, esc config.EscalationConfig) llm.ChatRequest {
+	if !esc.Enabled {
+		return req
+	}
+	out := req
+	out.Tools = append(append([]llm.ToolDef{}, req.Tools...), escalationToolDef(esc))
+	return out
+}
+
 // Chat runs req through the fallback chain and, if escalation triggers,
-// reroutes to the escalation target mid-stream. onProviderUsed, if non-nil,
-// is called exactly once with the name of the provider whose text ultimately
-// reached the caller — used for the API's provider_used field and for log
-// events published to the hub.
+// reroutes to the escalation target mid-stream — walking a chain of any
+// depth (see deliver/escalate). onProviderUsed, if non-nil, is called
+// exactly once with the name of the provider whose text ultimately reached
+// the caller — used for the API's provider_used field and for log events
+// published to the hub.
 func (r *Router) Chat(ctx context.Context, req llm.ChatRequest, onProviderUsed func(name string)) (<-chan llm.StreamChunk, error) {
 	stream, providerName, err := r.startChat(ctx, req)
 	if err != nil {
@@ -72,16 +148,31 @@ func (r *Router) Chat(ctx context.Context, req llm.ChatRequest, onProviderUsed f
 	}
 
 	out := make(chan llm.StreamChunk)
-	go r.pump(ctx, req, stream, providerName, out, onProviderUsed)
+	report := newOnceReporter(onProviderUsed)
+	go r.pump(ctx, req, stream, providerName, out, report, map[string]bool{providerName: true})
 	return out, nil
 }
 
+// newOnceReporter wraps onProviderUsed (may be nil) so it fires at most
+// once regardless of how many escalation hops one turn walks.
+func newOnceReporter(onProviderUsed func(string)) func(string) {
+	var reported bool
+	return func(name string) {
+		if !reported && onProviderUsed != nil {
+			onProviderUsed(name)
+			reported = true
+		}
+	}
+}
+
 // startChat tries each provider in order until one accepts the request,
-// implementing reliability fallback for connection/auth failures.
+// implementing reliability fallback for connection/auth failures. Each
+// candidate sees its own configured escalation tool appended to req.Tools
+// (see requestFor), not a global one.
 func (r *Router) startChat(ctx context.Context, req llm.ChatRequest) (<-chan llm.StreamChunk, string, error) {
 	var lastErr error
 	for _, name := range r.order {
-		stream, err := r.providers[name].Chat(ctx, req)
+		stream, err := r.providers[name].Chat(ctx, requestFor(req, r.escalations[name]))
 		if err != nil {
 			lastErr = fmt.Errorf("%s: %w", name, err)
 			continue
@@ -91,31 +182,34 @@ func (r *Router) startChat(ctx context.Context, req llm.ChatRequest) (<-chan llm
 	return nil, "", fmt.Errorf("router: all providers failed: %w", lastErr)
 }
 
-// pump forwards chunks from the active provider's stream to out, intercepting
-// a call to the escalation tool to reroute the rest of the turn to the
-// escalation target provider instead of surfacing that tool call to the
-// caller. Tracing is not this function's concern: each Provider traces its
-// own call internally (see SetTracer above) as soon as its own stream
-// finishes, before pump ever sees the chunks.
-func (r *Router) pump(ctx context.Context, req llm.ChatRequest, stream <-chan llm.StreamChunk, providerName string, out chan<- llm.StreamChunk, onProviderUsed func(string)) {
+// pump is the entry point for one Chat() call's whole output: it closes out
+// exactly once, when the entire chain (initial call plus any escalation
+// hops) finishes — deliver is the recursive part escalate calls back into,
+// which must never close out itself.
+func (r *Router) pump(ctx context.Context, req llm.ChatRequest, stream <-chan llm.StreamChunk, providerName string, out chan<- llm.StreamChunk, report func(string), visited map[string]bool) {
 	defer close(out)
+	r.deliver(ctx, req, stream, providerName, out, report, visited)
+}
 
-	reported := false
-	report := func(name string) {
-		if !reported && onProviderUsed != nil {
-			onProviderUsed(name)
-			reported = true
-		}
-	}
-
+// deliver forwards chunks from the active provider's stream to out,
+// intercepting a call to THAT provider's own configured escalation tool
+// (r.escalations[providerName]) and recursing into escalate for the next
+// hop instead of surfacing the tool call to the caller. Every hop's stream
+// is examined the same way, which is what makes a chain of any depth work
+// generically — not just the first hop, unlike the old flat single-hop
+// forward. Tracing is not this function's concern: each Provider traces its
+// own call internally (see SetTracer above) as soon as its own stream
+// finishes, before deliver ever sees the chunks.
+func (r *Router) deliver(ctx context.Context, req llm.ChatRequest, stream <-chan llm.StreamChunk, providerName string, out chan<- llm.StreamChunk, report func(string), visited map[string]bool) {
+	esc := r.escalations[providerName]
 	for chunk := range stream {
 		if chunk.Err != nil {
 			out <- chunk
 			return
 		}
 
-		if chunk.ToolCall != nil && r.escalation.Enabled && chunk.ToolCall.Name == r.escalation.ToolName {
-			r.escalate(ctx, req, *chunk.ToolCall, out, report)
+		if chunk.ToolCall != nil && esc.Enabled && chunk.ToolCall.Name == esc.ToolName {
+			r.escalate(ctx, req, *chunk.ToolCall, esc, out, report, visited)
 			return
 		}
 
@@ -126,32 +220,47 @@ func (r *Router) pump(ctx context.Context, req llm.ChatRequest, stream <-chan ll
 	}
 }
 
-// escalate re-issues the conversation to the escalation target provider,
-// with a synthetic tool result acknowledging the handoff, and forwards its
-// stream as the rest of this turn's output. The target's own Chat call
-// traces itself, the same as any other call to it.
-func (r *Router) escalate(ctx context.Context, req llm.ChatRequest, call llm.ToolCall, out chan<- llm.StreamChunk, report func(string)) {
-	target, ok := r.providers[r.escalation.TargetProvider]
+// escalate re-issues the conversation (base req plus a synthetic tool-call/
+// tool-result turn acknowledging the handoff) to esc's target provider, and
+// hands its stream to deliver for the NEXT hop — recursing through the same
+// interception logic rather than forwarding raw, so the target's own
+// escalation tool call (if it has one configured) is caught too. Guards
+// against runaway/cyclic chains with both a hop cap and a per-turn visited
+// set (a provider appearing twice in one chain is always a
+// misconfiguration — a legitimate ladder is a straight line, never a
+// cycle). The hop count is exactly len(visited): Chat seeds visited with
+// the one initial provider, and every call here that survives both guards
+// adds exactly one new entry before recursing — so there's no separate hop
+// counter to carry (and risk desyncing from visited) as a parameter.
+func (r *Router) escalate(ctx context.Context, req llm.ChatRequest, call llm.ToolCall, esc config.EscalationConfig, out chan<- llm.StreamChunk, report func(string), visited map[string]bool) {
+	if len(visited) >= maxEscalationHops {
+		out <- llm.StreamChunk{Err: fmt.Errorf("router: escalation chain exceeded %d hops (target %q) — check for a configuration cycle", maxEscalationHops, esc.TargetProvider)}
+		return
+	}
+	if visited[esc.TargetProvider] {
+		out <- llm.StreamChunk{Err: fmt.Errorf("router: escalation cycle detected: %q already appeared earlier in this turn's chain", esc.TargetProvider)}
+		return
+	}
+	target, ok := r.providers[esc.TargetProvider]
 	if !ok {
-		err := fmt.Errorf("router: escalation target %q not configured", r.escalation.TargetProvider)
-		out <- llm.StreamChunk{Err: err}
+		out <- llm.StreamChunk{Err: fmt.Errorf("router: escalation target %q not configured", esc.TargetProvider)}
 		return
 	}
 
 	escReq := appendEscalationTurn(req, call)
-	escStream, err := target.Chat(ctx, escReq)
+	escStream, err := target.Chat(ctx, requestFor(escReq, r.escalations[target.Name()]))
 	if err != nil {
-		wrapped := fmt.Errorf("router: escalation to %s failed: %w", target.Name(), err)
-		out <- llm.StreamChunk{Err: wrapped}
+		out <- llm.StreamChunk{Err: fmt.Errorf("router: escalation to %s failed: %w", target.Name(), err)}
 		return
 	}
 
-	for c := range escStream {
-		if c.Done {
-			report(target.Name())
-		}
-		out <- c
+	nextVisited := make(map[string]bool, len(visited)+1)
+	for k := range visited {
+		nextVisited[k] = true
 	}
+	nextVisited[target.Name()] = true
+
+	r.deliver(ctx, escReq, escStream, target.Name(), out, report, nextVisited)
 }
 
 // appendEscalationTurn appends the assistant's escalation tool call and a
