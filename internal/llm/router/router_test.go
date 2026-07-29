@@ -116,6 +116,74 @@ func TestRouter_EscalatesToTargetProviderOnToolCall(t *testing.T) {
 	require.Equal(t, "call-1", msgs[2].ToolCallID)
 }
 
+func TestRouter_EscalatesToTargetProviderOnStreamError(t *testing.T) {
+	// Models a real provider's actual failure shape (see llmtest.Response's
+	// StreamErr doc comment) — e.g. a Gemini provider whose keyrotation
+	// loop exhausted every key across every retry cycle — as opposed to
+	// TestRouter_FallsBackOnConnectionError's synchronous Chat error, which
+	// no real provider implementation ever produces.
+	escalations := map[string]config.EscalationConfig{
+		"gemini-strong": {Enabled: true, ToolName: "escalate_to_claude", TargetProvider: "claude"},
+	}
+
+	quotaExhausted := errors.New("gemini: all 3 configured key(s) exhausted across 3 cycle(s): RESOURCE_EXHAUSTED")
+	strong := llmtest.New("gemini-strong", llmtest.Response{StreamErr: quotaExhausted})
+	claude := llmtest.New("claude", llmtest.Response{Text: "BTC is around $60k"})
+
+	r, err := New([]llm.Provider{strong, claude}, escalations, "")
+	require.NoError(t, err)
+
+	var used string
+	ch, err := r.Chat(context.Background(), llm.ChatRequest{
+		Messages: []llm.Message{{Role: llm.RoleUser, Content: "what's the price of BTC"}},
+	}, func(name string) { used = name })
+	require.NoError(t, err)
+	require.Equal(t, "BTC is around $60k", drainText(t, ch))
+	require.Equal(t, "claude", used)
+
+	// The target still sees the original turn plus a synthetic
+	// tool-call/tool-result pair, same as an explicit escalation, so it has
+	// full context despite the handoff not coming from a real tool call.
+	require.Len(t, claude.Requests, 1)
+	msgs := claude.Requests[0].Messages
+	require.Len(t, msgs, 3)
+	require.Equal(t, llm.RoleAssistant, msgs[1].Role)
+	require.Equal(t, "escalate_to_claude", msgs[1].ToolCalls[0].Name)
+}
+
+func TestRouter_StreamErrorEscalationDoesNotReescalateToVisitedProvider(t *testing.T) {
+	// gemini-strong is reached via an explicit tool-call escalation from
+	// gemini-lite, then itself hard-fails. Its escalation target is
+	// gemini-lite again (a misconfiguration, but one that must not be
+	// masked as a generic "cycle detected" error) — since gemini-lite is
+	// already in this turn's visited set, the original stream error must
+	// surface rather than bouncing back.
+	escalations := map[string]config.EscalationConfig{
+		"gemini-lite":   {Enabled: true, ToolName: "escalate_to_strong", TargetProvider: "gemini-strong"},
+		"gemini-strong": {Enabled: true, ToolName: "escalate_to_lite", TargetProvider: "gemini-lite"},
+	}
+
+	lite := llmtest.New("gemini-lite", llmtest.Response{
+		ToolCall: &llm.ToolCall{ID: "call-1", Name: "escalate_to_strong"},
+	})
+	quotaExhausted := errors.New("quota exhausted")
+	strong := llmtest.New("gemini-strong", llmtest.Response{StreamErr: quotaExhausted})
+
+	r, err := New([]llm.Provider{lite, strong}, escalations, "")
+	require.NoError(t, err)
+
+	ch, err := r.Chat(context.Background(), llm.ChatRequest{}, nil)
+	require.NoError(t, err)
+
+	var gotErr error
+	for chunk := range ch {
+		if chunk.Err != nil {
+			gotErr = chunk.Err
+		}
+	}
+	require.ErrorIs(t, gotErr, quotaExhausted)
+}
+
 func TestRouter_ChainedEscalation_TwoHops(t *testing.T) {
 	escalations := map[string]config.EscalationConfig{
 		"lite":   {Enabled: true, ToolName: "escalate_to_strong", TargetProvider: "strong"},

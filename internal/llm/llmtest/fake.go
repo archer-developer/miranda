@@ -19,6 +19,15 @@ type Response struct {
 	ToolCall *llm.ToolCall
 	// Err, if set, is returned as an immediate error from Chat (nothing streamed).
 	Err error
+	// StreamErr, if set, is delivered as a StreamChunk.Err from an
+	// otherwise-successful Chat call — unlike Err, this models how every
+	// real provider (internal/llm/anthropic, internal/llm/gemini,
+	// internal/llm/openaicompat) actually reports a failure: Chat itself
+	// returns (stream, nil) and streams the error later from its pump
+	// goroutine, e.g. after internal/keyrotation exhausts every configured
+	// API key across every retry cycle. Router.deliver's escalation-on-error
+	// path only ever sees this shape in production, not Err.
+	StreamErr error
 }
 
 // FakeProvider replays a fixed script of Responses, one per call to Chat, and
@@ -78,7 +87,14 @@ func (f *FakeProvider) Chat(ctx context.Context, req llm.ChatRequest) (<-chan ll
 		if resp.ToolCall != nil {
 			response += fmt.Sprintf(" tool_call:%s(%s)", resp.ToolCall.Name, resp.ToolCall.Arguments)
 		}
-		tracer.Trace(ctx, f.name, fmt.Sprintf("%+v", req), response, nil)
+		tracer.Trace(ctx, f.name, fmt.Sprintf("%+v", req), response, resp.StreamErr)
+	}
+
+	if resp.StreamErr != nil {
+		ch := make(chan llm.StreamChunk, 1)
+		ch <- llm.StreamChunk{Err: resp.StreamErr}
+		close(ch)
+		return ch, nil
 	}
 
 	ch := make(chan llm.StreamChunk, 3)

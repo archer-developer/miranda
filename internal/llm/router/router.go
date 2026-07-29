@@ -4,7 +4,13 @@
 // that provider invokes its escalation tool (e.g. a small local model
 // calling escalate_to_gemini_strong on a hard question) — walking a chain
 // of these hop by hop, since each provider can configure its own target
-// (see config.LLMProvider.Escalation).
+// (see config.LLMProvider.Escalation). A provider that hard-fails mid-turn
+// (e.g. a Gemini provider that exhausted every configured API key's quota
+// across every retry cycle before streaming a single chunk — see
+// internal/llm/gemini and internal/keyrotation) triggers that same
+// escalation target too, not just an explicit tool call (see deliver's use
+// of escalateOnError) — a provider outage shouldn't fail a turn a
+// configured stronger fallback could still answer.
 package router
 
 import (
@@ -204,6 +210,20 @@ func (r *Router) deliver(ctx context.Context, req llm.ChatRequest, stream <-chan
 	esc := r.escalations[providerName]
 	for chunk := range stream {
 		if chunk.Err != nil {
+			// A hard failure (e.g. a quota-exhausted Gemini provider that
+			// burned through every configured key and retry cycle before
+			// producing a single chunk) is treated the same as this
+			// provider explicitly asking to escalate — same target, same
+			// hop-cap/cycle guards in escalate — so a provider outage
+			// doesn't fail turns a configured stronger fallback could
+			// still answer. Only tried once per target (visited): if it's
+			// already been visited this turn, escalating again would just
+			// trade this real error for escalate's own cycle-detected one,
+			// so fall through and surface the original failure instead.
+			if esc.Enabled && !visited[esc.TargetProvider] {
+				r.escalateOnError(ctx, req, chunk.Err, esc, out, report, visited)
+				return
+			}
 			out <- chunk
 			return
 		}
@@ -261,6 +281,20 @@ func (r *Router) escalate(ctx context.Context, req llm.ChatRequest, call llm.Too
 	nextVisited[target.Name()] = true
 
 	r.deliver(ctx, escReq, escStream, target.Name(), out, report, nextVisited)
+}
+
+// escalateOnError is deliver's counterpart to an explicit escalation tool
+// call, for a provider that hard-failed instead: it synthesizes a tool
+// call/result turn just like a real one (so the target sees a consistent
+// history, and escalate's own hop-cap/cycle guards apply identically) with
+// providerErr's message standing in for the model's own stated reason.
+func (r *Router) escalateOnError(ctx context.Context, req llm.ChatRequest, providerErr error, esc config.EscalationConfig, out chan<- llm.StreamChunk, report func(string), visited map[string]bool) {
+	call := llm.ToolCall{
+		ID:        "error-escalation",
+		Name:      esc.ToolName,
+		Arguments: fmt.Sprintf(`{"reason":"previous provider failed: %s"}`, providerErr.Error()),
+	}
+	r.escalate(ctx, req, call, esc, out, report, visited)
 }
 
 // appendEscalationTurn appends the assistant's escalation tool call and a

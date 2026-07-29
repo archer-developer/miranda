@@ -265,15 +265,23 @@ async function send(text) {
       body: JSON.stringify({ source: "web_ui", text }),
     });
     thinking.remove();
-    if (renderGeneration !== myGeneration) {
+    if (!res.ok) {
+      // Shown even if renderGeneration has since moved on (e.g. a WS
+      // reconnect — network blip, laptop sleep, backgrounded tab — ran
+      // loadHistory() while this request was still stuck retrying
+      // upstream, which can take minutes; see internal/llm/router's
+      // escalation-on-error and internal/keyrotation's retry cycles). A
+      // failed turn produces no chat-ws.js reply to fall back on, so
+      // dropping the error here would leave the user with no sign the
+      // message was ever lost — worse than an error bubble landing in a
+      // thread that's moved on.
+      messagesEl.querySelector("[data-empty-state]")?.remove();
+      messagesEl.appendChild(errorBubble(String(res.status), () => send(text)));
+    } else if (renderGeneration !== myGeneration) {
       // The thread this bubble belonged to is gone (cleared by a
       // conversation_deleted/ended event that arrived over chat-ws.js while
       // this request was still in flight, or a remount) — nothing left to
       // update.
-      return;
-    }
-    if (!res.ok) {
-      messagesEl.appendChild(errorBubble(String(res.status), () => send(text)));
     } else {
       const data = await res.json();
       if (pendingUserKey === tempKey) {
@@ -295,7 +303,10 @@ async function send(text) {
     }
   } catch (err) {
     thinking.remove();
-    if (renderGeneration !== myGeneration) return;
+    // Same reasoning as the !res.ok branch above: shown regardless of a
+    // stale renderGeneration, since a network failure has no chat-ws.js
+    // reply that could arrive instead.
+    messagesEl.querySelector("[data-empty-state]")?.remove();
     messagesEl.appendChild(errorBubble(String(err), () => send(text)));
   } finally {
     setSending(false);
