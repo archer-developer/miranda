@@ -44,6 +44,47 @@ func TestCreateAndListForUser_RoundTripsScopedPerUser(t *testing.T) {
 	require.Nil(t, tasksAnna[0].RunAt)
 }
 
+// TestCreate_RoundTripsAnOffsetParsedRunAt exercises exactly what
+// create_scheduled_task's dispatch produces from a client-supplied RFC3339
+// run_at like "2026-07-31T09:01:00+03:00": time.Parse gives back a
+// time.Time whose Location is an unnamed fixed offset, not UTC or a named
+// zone. On at least one real platform (linux/amd64, confirmed against a
+// production deploy) modernc.org/sqlite's default t.String() write format
+// renders that as "... +0300 +0300" — a string its own read-side parser
+// can't recognize, so a later Scan fails with "unsupported Scan, storing
+// driver.Value type string into type *time.Time". Create/Reschedule/
+// DueTasks normalize to UTC specifically to avoid this; this test pins that
+// behavior so a future edit can't accidentally drop the .UTC() call and
+// reintroduce a bug that a macOS dev machine's Go runtime happens not to
+// reproduce (it renders the same unnamed offset as parseable "+03" instead).
+func TestCreate_RoundTripsAnOffsetParsedRunAt(t *testing.T) {
+	ctx := context.Background()
+	s := openTestStore(t)
+
+	runAt, err := time.Parse(time.RFC3339, "2026-07-31T09:01:00+03:00")
+	require.NoError(t, err)
+
+	id, err := s.Create(ctx, Task{UserID: "alex", Prompt: "напомни", RunAt: &runAt, NextRunAt: runAt})
+	require.NoError(t, err)
+
+	tasks, err := s.ListForUser(ctx, "alex")
+	require.NoError(t, err)
+	require.Len(t, tasks, 1)
+	require.Equal(t, id, tasks[0].ID)
+	require.True(t, runAt.Equal(tasks[0].NextRunAt), "next_run_at must round-trip to the same instant")
+	require.NotNil(t, tasks[0].RunAt)
+	require.True(t, runAt.Equal(*tasks[0].RunAt), "run_at must round-trip to the same instant")
+
+	due, err := s.DueTasks(ctx, runAt.Add(time.Second))
+	require.NoError(t, err)
+	require.Len(t, due, 1, "DueTasks must find it once its offset-derived next_run_at has passed")
+
+	require.NoError(t, s.Reschedule(ctx, id, runAt.Add(24*time.Hour)))
+	tasks, err = s.ListForUser(ctx, "alex")
+	require.NoError(t, err)
+	require.True(t, runAt.Add(24*time.Hour).Equal(tasks[0].NextRunAt))
+}
+
 func TestListForUser_OrderedByNextRunAt(t *testing.T) {
 	ctx := context.Background()
 	s := openTestStore(t)

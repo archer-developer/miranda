@@ -109,7 +109,7 @@ func (s *Store) Create(ctx context.Context, task Task) (string, error) {
 	id := uuid.NewString()
 	if _, err := s.db.ExecContext(ctx,
 		`INSERT INTO scheduled_tasks (id, user_id, prompt, cron_expr, run_at, next_run_at) VALUES (?, ?, ?, ?, ?, ?)`,
-		id, task.UserID, task.Prompt, nullString(task.CronExpr), nullTime(task.RunAt), task.NextRunAt,
+		id, task.UserID, task.Prompt, nullString(task.CronExpr), nullTime(task.RunAt), utc(task.NextRunAt),
 	); err != nil {
 		return "", fmt.Errorf("schedule: create task: %w", err)
 	}
@@ -134,7 +134,7 @@ func (s *Store) ListForUser(ctx context.Context, userID string) ([]Task, error) 
 func (s *Store) DueTasks(ctx context.Context, now time.Time) ([]Task, error) {
 	rows, err := s.db.QueryContext(ctx,
 		`SELECT id, user_id, prompt, cron_expr, run_at, next_run_at, created_at, last_fired_at
-		 FROM scheduled_tasks WHERE next_run_at <= ? ORDER BY next_run_at ASC`, now)
+		 FROM scheduled_tasks WHERE next_run_at <= ? ORDER BY next_run_at ASC`, utc(now))
 	if err != nil {
 		return nil, fmt.Errorf("schedule: query due tasks: %w", err)
 	}
@@ -178,7 +178,7 @@ func (s *Store) DeleteFired(ctx context.Context, id string) error {
 func (s *Store) Reschedule(ctx context.Context, id string, nextRunAt time.Time) error {
 	if _, err := s.db.ExecContext(ctx,
 		`UPDATE scheduled_tasks SET next_run_at = ?, last_fired_at = CURRENT_TIMESTAMP WHERE id = ?`,
-		nextRunAt, id,
+		utc(nextRunAt), id,
 	); err != nil {
 		return fmt.Errorf("schedule: reschedule task: %w", err)
 	}
@@ -214,5 +214,21 @@ func nullTime(t *time.Time) sql.NullTime {
 	if t == nil {
 		return sql.NullTime{}
 	}
-	return sql.NullTime{Time: *t, Valid: true}
+	return sql.NullTime{Time: utc(*t), Valid: true}
+}
+
+// utc normalizes t before it's ever bound as a query parameter.
+// modernc.org/sqlite serializes a time.Time parameter via t.String(), and
+// reads it back by re-parsing that same text — but a time.Time whose
+// Location is an unnamed offset (e.g. one produced by time.Parse(RFC3339,
+// ...) on an offset like "+03:00", as create_scheduled_task's run_at
+// argument is) makes t.String() print the numeric offset twice with no
+// letter-based zone abbreviation (e.g. "2026-07-31 09:01:00 +0300 +0300")
+// — a string the driver's own read-back parser can't recognize, so it
+// silently hands database/sql the raw text instead of a parsed time.Time,
+// which then fails to Scan into *time.Time/sql.NullTime. UTC always has a
+// proper "UTC" abbreviation, so it round-trips correctly regardless of
+// which zone the caller's time.Time originally carried.
+func utc(t time.Time) time.Time {
+	return t.UTC()
 }
