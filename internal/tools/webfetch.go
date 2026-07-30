@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
+	"time"
 
 	"github.com/archer-developer/miranda/internal/llm"
 	"github.com/archer-developer/miranda/internal/tavily"
@@ -26,15 +28,22 @@ const maxFetchContentChars = 8000
 // key, and one failure mode (see internal/tavily.Client.Extract).
 type WebFetchTool struct {
 	client *tavily.Client
+	logger *slog.Logger
 	// def is computed once in NewWebFetch rather than rebuilt on every
 	// Def() call — see WebSearchTool.def's doc comment for why.
 	def llm.ToolDef
 }
 
-// NewWebFetch builds a WebFetchTool.
-func NewWebFetch(client *tavily.Client) *WebFetchTool {
+// NewWebFetch builds a WebFetchTool. logger is used at debug level only
+// (see Call) — the URL requested and a summary of what came back — nil
+// falls back to slog.Default(), same convention as NewWebSearch.
+func NewWebFetch(client *tavily.Client, logger *slog.Logger) *WebFetchTool {
+	if logger == nil {
+		logger = slog.Default()
+	}
 	return &WebFetchTool{
 		client: client,
+		logger: logger,
 		def: llm.ToolDef{
 			Name: WebFetchToolName,
 			Description: "Fetch the text content of a specific URL — a link the user gave you, or one from a " +
@@ -69,8 +78,12 @@ func (t *WebFetchTool) Call(ctx context.Context, argumentsJSON string) (string, 
 		return "", fmt.Errorf("url is required")
 	}
 
+	start := time.Now()
+	t.logger.Debug("web_fetch: request", "url", args.URL)
+
 	resp, err := t.client.Extract(ctx, args.URL)
 	if err != nil {
+		t.logger.Debug("web_fetch: failed", "url", args.URL, "duration_ms", time.Since(start).Milliseconds(), "error", err)
 		return "", err
 	}
 	if len(resp.Results) == 0 {
@@ -78,12 +91,18 @@ func (t *WebFetchTool) Call(ctx context.Context, argumentsJSON string) (string, 
 		if len(resp.FailedResults) > 0 {
 			reason = resp.FailedResults[0].Error
 		}
+		t.logger.Debug("web_fetch: no content", "url", args.URL, "duration_ms", time.Since(start).Milliseconds(), "reason", reason)
 		return "", fmt.Errorf("could not fetch %s: %s", args.URL, reason)
 	}
 
 	content := resp.Results[0].RawContent
-	if runes := []rune(content); len(runes) > maxFetchContentChars {
+	runes := []rune(content)
+	fetchedChars := len(runes)
+	truncated := fetchedChars > maxFetchContentChars
+	if truncated {
 		content = string(runes[:maxFetchContentChars]) + "\n... (truncated)"
 	}
+	t.logger.Debug("web_fetch: response", "url", args.URL, "duration_ms", time.Since(start).Milliseconds(),
+		"fetched_chars", fetchedChars, "truncated", truncated)
 	return content, nil
 }

@@ -1,8 +1,10 @@
 package tools
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"log/slog"
 	"net/http"
 	"strings"
 	"testing"
@@ -13,7 +15,7 @@ import (
 )
 
 func TestWebFetchTool_Def(t *testing.T) {
-	tool := NewWebFetch(tavily.New(""))
+	tool := NewWebFetch(tavily.New(""), nil)
 	def := tool.Def()
 	require.Equal(t, WebFetchToolName, def.Name)
 	require.NotEmpty(t, def.Description)
@@ -31,7 +33,7 @@ func TestWebFetchTool_Call_ReturnsContent(t *testing.T) {
 		})
 	})
 
-	tool := NewWebFetch(client)
+	tool := NewWebFetch(client, nil)
 	result, err := tool.Call(context.Background(), `{"url":"https://example.com/page"}`)
 	require.NoError(t, err)
 	require.Equal(t, "the page's text", result)
@@ -45,7 +47,7 @@ func TestWebFetchTool_Call_TruncatesLongContent(t *testing.T) {
 		})
 	})
 
-	tool := NewWebFetch(client)
+	tool := NewWebFetch(client, nil)
 	result, err := tool.Call(context.Background(), `{"url":"https://example.com/long"}`)
 	require.NoError(t, err)
 	require.True(t, strings.HasSuffix(result, "... (truncated)"))
@@ -60,14 +62,36 @@ func TestWebFetchTool_Call_FailedExtractReturnsError(t *testing.T) {
 		})
 	})
 
-	tool := NewWebFetch(client)
+	tool := NewWebFetch(client, nil)
 	_, err := tool.Call(context.Background(), `{"url":"https://example.com/dead"}`)
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "timeout")
 }
 
 func TestWebFetchTool_Call_MissingURL(t *testing.T) {
-	tool := NewWebFetch(tavily.New(""))
+	tool := NewWebFetch(tavily.New(""), nil)
 	_, err := tool.Call(context.Background(), `{}`)
 	require.Error(t, err)
+}
+
+func TestWebFetchTool_Call_LogsURLAndTimingAtDebugLevel(t *testing.T) {
+	client := newTestTavilyClient(t, func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"results": []map[string]any{{"url": "https://example.com/page", "raw_content": "the page's text"}},
+		})
+	})
+
+	var logBuf bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&logBuf, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	tool := NewWebFetch(client, logger)
+
+	_, err := tool.Call(context.Background(), `{"url":"https://example.com/page"}`)
+	require.NoError(t, err)
+
+	logged := logBuf.String()
+	require.Contains(t, logged, "web_fetch: request")
+	require.Contains(t, logged, "https://example.com/page")
+	require.Contains(t, logged, "web_fetch: response")
+	require.Contains(t, logged, "duration_ms")
+	require.Contains(t, logged, "fetched_chars")
 }

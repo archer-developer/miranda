@@ -202,7 +202,7 @@ func run(cfg config.Config, logger *slog.Logger, eventHub *hub.Hub) error {
 
 	toolManager := connectMCP(ctx, cfg.MCP.Servers, logger)
 
-	webTools, err := buildWebTools(cfg.Tavily)
+	webTools, err := buildWebTools(cfg.Tavily, logger)
 	if err != nil {
 		return err
 	}
@@ -445,7 +445,7 @@ func connectMCP(ctx context.Context, servers []config.MCPServer, logger *slog.Lo
 // fast on, rather than something to retry in the background, since there's
 // no "comes back later" scenario for a typo'd env var name the way there is
 // for a temporarily-down MCP server.
-func buildWebTools(cfg config.TavilyConfig) ([]tools.Tool, error) {
+func buildWebTools(cfg config.TavilyConfig, logger *slog.Logger) ([]tools.Tool, error) {
 	if !cfg.WebSearch.Enabled && !cfg.WebFetch.Enabled {
 		return nil, nil
 	}
@@ -457,10 +457,10 @@ func buildWebTools(cfg config.TavilyConfig) ([]tools.Tool, error) {
 
 	var out []tools.Tool
 	if cfg.WebSearch.Enabled {
-		out = append(out, tools.NewWebSearch(client, cfg.WebSearch))
+		out = append(out, tools.NewWebSearch(client, cfg.WebSearch, logger))
 	}
 	if cfg.WebFetch.Enabled {
-		out = append(out, tools.NewWebFetch(client))
+		out = append(out, tools.NewWebFetch(client, logger))
 	}
 	return out, nil
 }

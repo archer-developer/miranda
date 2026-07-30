@@ -4,7 +4,9 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"strings"
+	"time"
 
 	"github.com/archer-developer/miranda/internal/config"
 	"github.com/archer-developer/miranda/internal/llm"
@@ -24,6 +26,7 @@ const WebSearchToolName = "web_search"
 type WebSearchTool struct {
 	client     *tavily.Client
 	maxResults int
+	logger     *slog.Logger
 	// def is computed once in NewWebSearch rather than rebuilt on every
 	// Def() call — its content is fixed for the process's lifetime (it
 	// doesn't depend on anything that changes at runtime), and Def() is
@@ -35,11 +38,19 @@ type WebSearchTool struct {
 
 // NewWebSearch builds a WebSearchTool. cfg.Enabled is the caller's concern
 // (cmd/miranda only constructs this when true) — this constructor doesn't
-// re-check it.
-func NewWebSearch(client *tavily.Client, cfg config.WebSearchToolConfig) *WebSearchTool {
+// re-check it. logger is used at debug level only (see Call) — the query
+// sent to Tavily and a summary of what came back, to debug why a turn did
+// or didn't find what the model expected without needing to reproduce it
+// against the real API; nil falls back to slog.Default(), same convention
+// as internal/llm/gemini.New/internal/mcp.NewManager.
+func NewWebSearch(client *tavily.Client, cfg config.WebSearchToolConfig, logger *slog.Logger) *WebSearchTool {
+	if logger == nil {
+		logger = slog.Default()
+	}
 	return &WebSearchTool{
 		client:     client,
 		maxResults: cfg.MaxResults,
+		logger:     logger,
 		def: llm.ToolDef{
 			Name: WebSearchToolName,
 			Description: "Search the live web for information you don't already know or that changes over time " +
@@ -76,17 +87,27 @@ func (t *WebSearchTool) Call(ctx context.Context, argumentsJSON string) (string,
 		return "", fmt.Errorf("query is required")
 	}
 
+	start := time.Now()
+	t.logger.Debug("web_search: request", "query", args.Query, "max_results", t.maxResults)
+
 	resp, err := t.client.Search(ctx, args.Query, t.maxResults)
 	if err != nil {
+		t.logger.Debug("web_search: failed", "query", args.Query, "duration_ms", time.Since(start).Milliseconds(), "error", err)
 		return "", err
 	}
 	if len(resp.Results) == 0 {
+		t.logger.Debug("web_search: no results", "query", args.Query, "duration_ms", time.Since(start).Milliseconds())
 		return "no results found", nil
 	}
 
+	urls := make([]string, len(resp.Results))
 	var b strings.Builder
 	for i, r := range resp.Results {
+		urls[i] = r.URL
 		fmt.Fprintf(&b, "%d. %s\n%s\n%s\n\n", i+1, r.Title, r.URL, r.Content)
 	}
-	return strings.TrimRight(b.String(), "\n"), nil
+	result := strings.TrimRight(b.String(), "\n")
+	t.logger.Debug("web_search: response", "query", args.Query, "duration_ms", time.Since(start).Milliseconds(),
+		"result_count", len(resp.Results), "urls", urls, "result_chars", len(result))
+	return result, nil
 }
