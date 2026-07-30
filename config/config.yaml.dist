@@ -61,19 +61,17 @@ llm:
       model: "claude-sonnet-5"
       api_key_envs: ["ANTHROPIC_API_KEY"]
       # Claude's own server-executed tools (run by Anthropic itself, not
-      # through Miranda's tool loop). All default to false. Prefer the
-      # tavily: section below for web_search/web_fetch instead of enabling
-      # them here: it's self-hosted, so it works identically across every
-      # provider in the chain (not just Claude), and enabling BOTH here and
-      # there would collide — Anthropic requires unique tool names on one
-      # request, and tools.tavily's tools are deliberately named
-      # "web_search"/"web_fetch" too (see internal/tools). code_execution
-      # has no self-hosted equivalent (yet), so it stays native/opt-in here;
-      # enabling it also lets the sandboxed code call Claude's OWN native
-      # web_search/web_fetch as a helper, if those are enabled too.
+      # through Miranda's tool loop). These coexist safely with tavily: below
+      # — Tavily's tools are named "tavily_web_search"/"tavily_web_fetch"
+      # while these are "web_search"/"web_fetch", so no naming collision.
+      # When both are enabled Claude sees all four and prefers its own
+      # server-side native ones (faster, no external API key); Gemini and
+      # other providers in the chain only see the Tavily ones.
+      # code_execution lets sandboxed Python call Claude's OWN native
+      # web_search/web_fetch as a helper within the same Anthropic round-trip.
       anthropic_tools:
-        web_search: false
-        web_fetch: false
+        web_search: true
+        web_fetch: true
         code_execution: true
       # No escalation block — top of this chain, nowhere further to hand
       # off to. The zero-value (disabled) EscalationConfig is correct here.
@@ -89,16 +87,17 @@ llm:
   # gemini_tools.google_search (Grounding with Google Search) is NOT
   # recommended: it has a zero quota on the free-tier Gemini Developer API,
   # not merely a low one, so every request that touches it fails with
-  # RESOURCE_EXHAUSTED — use tavily: below instead, same reasoning as
-  # anthropic_tools.web_search above. Gemini's code-execution tool is
-  # Vertex AI-only and not offered here, unlike Claude's
+  # RESOURCE_EXHAUSTED — use tavily: below instead. Gemini's code-execution
+  # tool is Vertex AI-only and not offered here, unlike Claude's
   # anthropic_tools.code_execution above.
 
-# Miranda's own web_search/web_fetch tools (internal/tools, backed by
-# Tavily — https://tavily.com), offered identically to every LLM provider
-# above via the Orchestrator's own tool loop, rather than through any one
-# provider's native web tool support. Both default to false (opt-in — needs
-# a real Tavily API key, set as TAVILY_API_KEY — see .env.example).
+# Miranda's own tavily_web_search/tavily_web_fetch tools (internal/tools,
+# backed by Tavily — https://tavily.com), offered identically to every LLM
+# provider above via the Orchestrator's own tool loop. These names don't
+# collide with Anthropic's native "web_search"/"web_fetch" (see Claude's
+# anthropic_tools block above), so both can be enabled simultaneously.
+# Both default to false (opt-in — needs a real Tavily API key, set as
+# TAVILY_API_KEY — see .env.example).
 tavily:
   api_key_env: "TAVILY_API_KEY"
   web_search:

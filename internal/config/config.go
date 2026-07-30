@@ -691,38 +691,7 @@ func Load(paths ...string) (Config, error) {
 	if err := validateMCPServerNames(cfg.MCP.Servers); err != nil {
 		return cfg, err
 	}
-	if err := validateNoDuplicateWebTools(cfg.LLM.Providers, cfg.Tavily); err != nil {
-		return cfg, err
-	}
-
 	return cfg, nil
-}
-
-// validateNoDuplicateWebTools rejects a config where an "anthropic"-type
-// provider's own native web_search/web_fetch (AnthropicToolsConfig) is
-// enabled at the same time as tavily's identically-named custom tool. This
-// isn't just redundant — internal/tools' web_search/web_fetch are
-// deliberately named the same as Claude's native tools (see that package's
-// doc comment), specifically so config/llm.yaml only ever offers one of the
-// two, and Anthropic's Messages API requires unique tool names on a single
-// request: enabling both would make every turn on that provider fail with a
-// duplicate-tool-name error, discovered only the first time that provider
-// is actually invoked rather than at startup.
-func validateNoDuplicateWebTools(providers []LLMProvider, tavily TavilyConfig) error {
-	for _, p := range providers {
-		if p.Type != "anthropic" {
-			continue
-		}
-		if p.AnthropicTools.WebSearch && tavily.WebSearch.Enabled {
-			return fmt.Errorf("config: llm.providers[%q].anthropic_tools.web_search and tavily.web_search are both enabled — "+
-				"they'd send two tools both named %q to Claude, which Anthropic rejects; enable only one", p.Name, "web_search")
-		}
-		if p.AnthropicTools.WebFetch && tavily.WebFetch.Enabled {
-			return fmt.Errorf("config: llm.providers[%q].anthropic_tools.web_fetch and tavily.web_fetch are both enabled — "+
-				"they'd send two tools both named %q to Claude, which Anthropic rejects; enable only one", p.Name, "web_fetch")
-		}
-	}
-	return nil
 }
 
 // validateMCPServerNames rejects two enabled mcp.servers entries sharing a

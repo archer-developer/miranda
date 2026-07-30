@@ -131,7 +131,11 @@ mcp:
 	require.NoError(t, err)
 }
 
-func TestLoad_AnthropicWebSearchAlongsideTavilyWebSearchReturnsError(t *testing.T) {
+func TestLoad_AnthropicNativeToolsAlongsideTavilyIsAllowed(t *testing.T) {
+	// Tavily tools are named "tavily_web_search"/"tavily_web_fetch", so they
+	// don't collide with Anthropic's native "web_search"/"web_fetch" — both
+	// can be enabled at once. Claude sees all four and prefers its own
+	// server-side native ones; Gemini and other providers only see Tavily's.
 	path := filepath.Join(t.TempDir(), "config.yaml")
 	yamlContent := `
 llm:
@@ -141,47 +145,13 @@ llm:
       model: "claude-sonnet-5"
       anthropic_tools:
         web_search: true
+        web_fetch: true
+        code_execution: true
 tavily:
   web_search:
     enabled: true
-`
-	require.NoError(t, os.WriteFile(path, []byte(yamlContent), 0o644))
-
-	_, err := Load(path)
-	require.Error(t, err)
-}
-
-func TestLoad_AnthropicWebFetchAlongsideTavilyWebFetchReturnsError(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "config.yaml")
-	yamlContent := `
-llm:
-  providers:
-    - name: claude
-      type: anthropic
-      model: "claude-sonnet-5"
-      anthropic_tools:
-        web_fetch: true
-tavily:
   web_fetch:
     enabled: true
-`
-	require.NoError(t, os.WriteFile(path, []byte(yamlContent), 0o644))
-
-	_, err := Load(path)
-	require.Error(t, err)
-}
-
-func TestLoad_AnthropicWebSearchWithoutTavilyIsFine(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "config.yaml")
-	yamlContent := `
-llm:
-  providers:
-    - name: claude
-      type: anthropic
-      model: "claude-sonnet-5"
-      anthropic_tools:
-        web_search: true
-        web_fetch: true
 `
 	require.NoError(t, os.WriteFile(path, []byte(yamlContent), 0o644))
 

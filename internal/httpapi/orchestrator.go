@@ -40,10 +40,10 @@ const sendTelegramToolName = "send_telegram"
 
 // ReservedToolNames returns every name Miranda's own agent loop can
 // advertise as a tool: every hardcoded built-in above, plus internal/tools'
-// fixed web_search/web_fetch names — regardless of whether config
-// currently enables each one (a name is reserved the moment Miranda could
-// ever advertise it, not only while it's actively turned on). cmd/miranda
-// uses this at startup to reject a config where an LLMProvider's
+// fixed tavily_web_search/tavily_web_fetch names — regardless of whether
+// config currently enables each one (a name is reserved the moment Miranda
+// could ever advertise it, not only while it's actively turned on).
+// cmd/miranda uses this at startup to reject a config where an LLMProvider's
 // escalation.tool_name collides with one of these: router.deliver
 // intercepts any model tool call matching esc.ToolName as an escalation
 // trigger before it ever reaches Orchestrator.executeTool, so a collision
@@ -150,8 +150,8 @@ func (o *Orchestrator) SetTelegram(sender *telegram.Sender, cfg config.TelegramC
 	o.telegramCfg = cfg
 }
 
-// SetWebTools wires in Miranda's own web_search/web_fetch tools (see
-// internal/tools), mirroring SetTelegram's post-construction style for an
+// SetWebTools wires in Miranda's own tavily_web_search/tavily_web_fetch tools
+// (see internal/tools), mirroring SetTelegram's post-construction style for an
 // optional dependency — call it once from cmd/miranda after building
 // whichever tools config.TavilyConfig enables. Leaving it uncalled (the
 // default, a nil slice) means availableTools never offers either tool.

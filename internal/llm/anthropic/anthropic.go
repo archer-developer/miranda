@@ -241,14 +241,11 @@ func toAnthropicTools(tools []llm.ToolDef) []anthropic.ToolUnionParam {
 // (config.AnthropicToolsConfig) — unlike everything in toAnthropicTools,
 // the model's use of these never round-trips through the Orchestrator's
 // executeTool; Anthropic resolves them server-side within the same
-// streamed response. WebSearch/WebFetch are deliberately left false in
-// config/llm.yaml in favor of internal/tools' own self-hosted web_search/
-// web_fetch (Tavily-backed) — those DO reach the open web through
-// Miranda's ordinary executeTool path, so this is no longer the only way
-// Claude (or any other provider) answers something needing live internet
-// data; enabling both here and there at once is a real conflict (Anthropic
-// requires unique tool names on one request), not just redundancy — see
-// internal/tools' package doc comment.
+// streamed response. These have different names from internal/tools'
+// Tavily-backed tools ("web_search"/"web_fetch" here vs.
+// "tavily_web_search"/"tavily_web_fetch" there), so both can be enabled on
+// the same request without colliding. Claude sees both and prefers its own
+// server-side native ones; Gemini and other providers only see Tavily's.
 func (p *Provider) nativeTools() []anthropic.ToolUnionParam {
 	var out []anthropic.ToolUnionParam
 

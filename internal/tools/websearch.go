@@ -13,14 +13,14 @@ import (
 	"github.com/archer-developer/miranda/internal/tavily"
 )
 
-// WebSearchToolName is the function name advertised to every LLM provider —
-// deliberately the same name Claude/Gemini's own native tools use
-// (anthropic_tools.web_search, gemini_tools.google_search's rough
-// equivalent), since config/llm.yaml turns those off in favor of this one:
-// a provider offering both its own native tool AND a custom function tool
-// with the same name is a real conflict (Anthropic, for one, requires
-// unique tool names on a single request), not just redundant.
-const WebSearchToolName = "web_search"
+// WebSearchToolName is the function name advertised to every LLM provider.
+// Named "tavily_web_search" (not "web_search") so it can coexist with
+// Anthropic's own native web_search tool on the same request — Anthropic
+// requires unique tool names, and the Claude provider may have
+// anthropic_tools.web_search enabled at the same time (see
+// config.AnthropicToolsConfig). Claude sees both and prefers its own
+// server-side native tool; Gemini and other providers only see this one.
+const WebSearchToolName = "tavily_web_search"
 
 // WebSearchTool implements Tool by calling Tavily's /search endpoint.
 type WebSearchTool struct {
@@ -55,7 +55,7 @@ func NewWebSearch(client *tavily.Client, cfg config.WebSearchToolConfig, logger 
 			Name: WebSearchToolName,
 			Description: "Search the live web for information you don't already know or that changes over time " +
 				"(current events, prices, schedules, facts beyond your training data). Returns a list of results, " +
-				"each with a title, URL, and a short content snippet — use web_fetch on a result's URL if you need " +
+				"each with a title, URL, and a short content snippet — use tavily_web_fetch on a result's URL if you need " +
 				"the full page rather than just the snippet.",
 			Parameters: map[string]any{
 				"type": "object",
@@ -88,15 +88,15 @@ func (t *WebSearchTool) Call(ctx context.Context, argumentsJSON string) (string,
 	}
 
 	start := time.Now()
-	t.logger.Debug("web_search: request", "query", args.Query, "max_results", t.maxResults)
+	t.logger.Debug("tavily_web_search: request", "query", args.Query, "max_results", t.maxResults)
 
 	resp, err := t.client.Search(ctx, args.Query, t.maxResults)
 	if err != nil {
-		t.logger.Debug("web_search: failed", "query", args.Query, "duration_ms", time.Since(start).Milliseconds(), "error", err)
+		t.logger.Debug("tavily_web_search: failed", "query", args.Query, "duration_ms", time.Since(start).Milliseconds(), "error", err)
 		return "", err
 	}
 	if len(resp.Results) == 0 {
-		t.logger.Debug("web_search: no results", "query", args.Query, "duration_ms", time.Since(start).Milliseconds())
+		t.logger.Debug("tavily_web_search: no results", "query", args.Query, "duration_ms", time.Since(start).Milliseconds())
 		return "no results found", nil
 	}
 
@@ -107,7 +107,7 @@ func (t *WebSearchTool) Call(ctx context.Context, argumentsJSON string) (string,
 		fmt.Fprintf(&b, "%d. %s\n%s\n%s\n\n", i+1, r.Title, r.URL, r.Content)
 	}
 	result := strings.TrimRight(b.String(), "\n")
-	t.logger.Debug("web_search: response", "query", args.Query, "duration_ms", time.Since(start).Milliseconds(),
+	t.logger.Debug("tavily_web_search: response", "query", args.Query, "duration_ms", time.Since(start).Milliseconds(),
 		"result_count", len(resp.Results), "urls", urls, "result_chars", len(result))
 	return result, nil
 }

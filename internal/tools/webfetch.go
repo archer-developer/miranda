@@ -11,10 +11,11 @@ import (
 	"github.com/archer-developer/miranda/internal/tavily"
 )
 
-// WebFetchToolName mirrors WebSearchToolName's reasoning — kept identical
-// to what Anthropic's own native web_fetch tool would otherwise be named,
-// since config/llm.yaml disables that in favor of this one.
-const WebFetchToolName = "web_fetch"
+// WebFetchToolName mirrors WebSearchToolName's reasoning — named
+// "tavily_web_fetch" so it can coexist with Anthropic's own native web_fetch
+// on the same request (see WebSearchToolName's doc comment for the full
+// rationale).
+const WebFetchToolName = "tavily_web_fetch"
 
 // maxFetchContentChars bounds how much of a fetched page's text is handed
 // back to the model — a defensive cap independent of whatever Tavily's own
@@ -47,7 +48,7 @@ func NewWebFetch(client *tavily.Client, logger *slog.Logger) *WebFetchTool {
 		def: llm.ToolDef{
 			Name: WebFetchToolName,
 			Description: "Fetch the text content of a specific URL — a link the user gave you, or one from a " +
-				"web_search result. Use web_search first if you don't already have a specific URL to fetch.",
+				"tavily_web_search result. Use tavily_web_search first if you don't already have a specific URL to fetch.",
 			Parameters: map[string]any{
 				"type": "object",
 				"properties": map[string]any{
@@ -79,11 +80,11 @@ func (t *WebFetchTool) Call(ctx context.Context, argumentsJSON string) (string, 
 	}
 
 	start := time.Now()
-	t.logger.Debug("web_fetch: request", "url", args.URL)
+	t.logger.Debug("tavily_web_fetch: request", "url", args.URL)
 
 	resp, err := t.client.Extract(ctx, args.URL)
 	if err != nil {
-		t.logger.Debug("web_fetch: failed", "url", args.URL, "duration_ms", time.Since(start).Milliseconds(), "error", err)
+		t.logger.Debug("tavily_web_fetch: failed", "url", args.URL, "duration_ms", time.Since(start).Milliseconds(), "error", err)
 		return "", err
 	}
 	if len(resp.Results) == 0 {
@@ -91,7 +92,7 @@ func (t *WebFetchTool) Call(ctx context.Context, argumentsJSON string) (string, 
 		if len(resp.FailedResults) > 0 {
 			reason = resp.FailedResults[0].Error
 		}
-		t.logger.Debug("web_fetch: no content", "url", args.URL, "duration_ms", time.Since(start).Milliseconds(), "reason", reason)
+		t.logger.Debug("tavily_web_fetch: no content", "url", args.URL, "duration_ms", time.Since(start).Milliseconds(), "reason", reason)
 		return "", fmt.Errorf("could not fetch %s: %s", args.URL, reason)
 	}
 
@@ -102,7 +103,7 @@ func (t *WebFetchTool) Call(ctx context.Context, argumentsJSON string) (string, 
 	if truncated {
 		content = string(runes[:maxFetchContentChars]) + "\n... (truncated)"
 	}
-	t.logger.Debug("web_fetch: response", "url", args.URL, "duration_ms", time.Since(start).Milliseconds(),
+	t.logger.Debug("tavily_web_fetch: response", "url", args.URL, "duration_ms", time.Since(start).Milliseconds(),
 		"fetched_chars", fetchedChars, "truncated", truncated)
 	return content, nil
 }

@@ -380,7 +380,7 @@ func (o *Orchestrator) speakText(ctx context.Context, text string) {
 
 // executeTool runs one tool call: locally (remember_this, search_history,
 // end_conversation, forget_conversation), via an internal/tools.Tool
-// (web_search, web_fetch — see o.webTools), or via the MCP tool manager.
+// (tavily_web_search, tavily_web_fetch — see o.webTools), or via the MCP tool manager.
 // Errors are turned into a result string rather than aborting the turn, so
 // the model can see what went wrong and react (apologize, retry
 // differently) instead of the whole request failing.
