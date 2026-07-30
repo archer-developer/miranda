@@ -6,6 +6,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/archer-developer/miranda/internal/config"
+	"github.com/archer-developer/miranda/internal/tools"
 )
 
 func TestValidateEscalationToolNames_CollisionWithReservedNameErrors(t *testing.T) {
@@ -14,7 +15,7 @@ func TestValidateEscalationToolNames_CollisionWithReservedNameErrors(t *testing.
 			Name: "gemini-lite",
 			Escalation: config.EscalationConfig{
 				Enabled:  true,
-				ToolName: "web_search",
+				ToolName: tools.WebSearchToolName,
 			},
 		},
 	}

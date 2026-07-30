@@ -25,6 +25,9 @@ storage:
   # below) — kept apart so wiping/backing up dialog history never touches
   # registered passkeys, and vice versa. Only used if webauthn.enabled.
   webauthn_sqlite_path: "./data/webauthn.db"
+  # Separate SQLite file for scheduled tasks (see schedule: below) — same
+  # reasoning as webauthn_sqlite_path. Only used if schedule.enabled.
+  schedule_sqlite_path: "./data/schedule.db"
 
 logging:
   # Mirrors everything on stdout into logging.dir/miranda.log, plus a
@@ -127,6 +130,16 @@ memory:
   # current conversation entirely ("забудь этот диалог"), deleting it from
   # history with no summarization.
   forget_conversation_tool: true
+
+schedule:
+  # Lets the model create/list/delete its own scheduled tasks
+  # (create_scheduled_task/list_scheduled_tasks/delete_scheduled_task) — a
+  # one-off reminder ("сегодня в 22:00 напомни мне...") or a recurring
+  # routine ("каждое утро в 9:01..."). When a task fires, its stored
+  # free-text prompt is replayed through the agent loop as a live turn — the
+  # model decides which of its own tools (speak_reply, send_telegram, etc.)
+  # to call. No deployment-specific secret needed, so this defaults to true.
+  enabled: true
 
 mcp:
   servers:

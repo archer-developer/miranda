@@ -545,6 +545,43 @@ messaged the bot at least once, for the reason in step 6 above.
 
 ---
 
+## Scheduled tasks
+
+With `schedule.enabled: true` (the default — see Configuration above), the
+model gets three tools: `create_scheduled_task`, `list_scheduled_tasks`, and
+`delete_scheduled_task`, backed by their own SQLite file
+(`storage.schedule_sqlite_path`, `internal/schedule`). A background sweep
+(`cmd/miranda`, once a minute) checks for due tasks and, for each, replays
+its stored free-text prompt through the ordinary agent loop
+(`Orchestrator.Handle`, `source: "scheduled"`) exactly as if the user had
+just said it — Miranda's scheduler never interprets the prompt itself; the
+model decides what to do (and which of its own tools — `speak_reply`,
+`send_telegram`, an HA-facing MCP tool, etc. — to call) at fire time, the
+same as any live turn. A scheduled turn is never spoken live the way
+`ha_assist` turns are (see "Response routing" in `CLAUDE.md`) — the prompt
+has to explicitly ask for `speak_reply`/`send_telegram`/etc. if it wants
+output somewhere.
+
+Two worked examples:
+
+- One-off: *"сегодня в 22:00 напомни мне выпить тёмного пива — отправь на
+  телефон"* → `create_scheduled_task` with `run_at` (an RFC3339 datetime)
+  and a `task` prompt that itself calls for `send_telegram` when it fires.
+- Recurring: *"каждое утро в 9:01 голосом пожелай Ане, мне и Бяше доброго
+  утра, получи актуальный курс моих монет и зачитай голосом, а потом
+  попроси Алису включить Linkin Park"* → `create_scheduled_task` with
+  `schedule` (a standard 5-field cron expression, `1 9 * * *`) and a `task`
+  prompt the model decomposes itself at fire time using `speak_reply` (TTS
+  already broadcasts to every configured Yandex Station entity, so no
+  per-recipient targeting is needed), a web-search/fetch tool for exchange
+  rates, and whatever Alice-facing tool is configured.
+
+`schedule`/`run_at` are mutually exclusive — exactly one is required per
+task. Cron expressions are the standard `minute hour day-of-month month
+day-of-week` 5 fields, evaluated in the server's local time zone.
+
+---
+
 ## Project layout
 
 ```
@@ -560,6 +597,7 @@ internal/llm/           provider-agnostic chat interface
 internal/mcp/            MCP Client/Manager abstraction, multi-server tool-name prefixing
 internal/history/        SQLite (pure-Go, no cgo) dialog log with FTS5 search
 internal/memory/         per-user markdown long-term memory
+internal/schedule/       SQLite-backed scheduled tasks (one-off + cron recurrence)
 internal/tts/            sentence-boundary chunking, Yandex Station text + Gemini TTS providers,
                            disk cache, async player, GET /tts-audio/ handler
 internal/ha/             minimal Home Assistant REST client (for TTS dispatch)

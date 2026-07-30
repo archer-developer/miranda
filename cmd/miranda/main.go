@@ -33,6 +33,7 @@ import (
 	"github.com/archer-developer/miranda/internal/llmtrace"
 	"github.com/archer-developer/miranda/internal/mcp"
 	"github.com/archer-developer/miranda/internal/memory"
+	"github.com/archer-developer/miranda/internal/schedule"
 	"github.com/archer-developer/miranda/internal/session"
 	"github.com/archer-developer/miranda/internal/tavily"
 	"github.com/archer-developer/miranda/internal/telegram"
@@ -57,6 +58,11 @@ const sessionTTL = 30 * 24 * time.Hour
 // itself) — this is just the polling cadence, and cheap to run often since
 // it's a single indexed SQLite query.
 const idleSweepInterval = time.Minute
+
+// scheduleSweepInterval is how often the background scheduled-task sweeper
+// checks for due tasks — independent of any individual task's own
+// recurrence, this is just the polling cadence (see sweepScheduledTasks).
+const scheduleSweepInterval = time.Minute
 
 // webauthnCeremonyTTL bounds how long a pending passkey registration/login
 // ceremony (the gap between its begin and finish HTTP calls) stays valid —
@@ -189,6 +195,15 @@ func run(cfg config.Config, logger *slog.Logger, eventHub *hub.Hub) error {
 		return err
 	}
 
+	var scheduleStore *schedule.Store
+	if cfg.Schedule.Enabled {
+		scheduleStore, err = schedule.Open(cfg.Storage.ScheduleSQLitePath)
+		if err != nil {
+			return err
+		}
+		defer func() { _ = scheduleStore.Close() }()
+	}
+
 	// Created here (rather than at its previous spot right before
 	// serveUntilInterrupted) so it can also bound buildProviders' gemini.New
 	// calls and connectMCP's background reconnect goroutines below — they
@@ -266,6 +281,9 @@ func run(cfg config.Config, logger *slog.Logger, eventHub *hub.Hub) error {
 	if len(webTools) > 0 {
 		orchestrator.SetWebTools(webTools)
 	}
+	if cfg.Schedule.Enabled {
+		orchestrator.SetSchedule(scheduleStore)
+	}
 
 	var webHandler http.Handler
 	if cfg.WebUI.Enabled {
@@ -291,6 +309,7 @@ func run(cfg config.Config, logger *slog.Logger, eventHub *hub.Hub) error {
 	httpServer := &http.Server{Addr: cfg.Server.HTTPAddr, Handler: server}
 
 	go sweepIdleSessions(ctx, orchestrator, cfg.Memory, logger)
+	go sweepScheduledTasks(ctx, orchestrator, cfg.Schedule, logger)
 
 	return serveUntilInterrupted(ctx, httpServer, logger)
 }
@@ -315,6 +334,29 @@ func sweepIdleSessions(ctx context.Context, o *httpapi.Orchestrator, cfg config.
 		case <-ticker.C:
 			if err := o.SummarizeIdleSessions(ctx, idleFor); err != nil {
 				logger.Error("memory sweep failed", "error", err)
+			}
+		}
+	}
+}
+
+// sweepScheduledTasks periodically fires any scheduled tasks that are due
+// (see Orchestrator.RunScheduledTasks). It's a no-op ticker when
+// cfg.Enabled is off, and exits once ctx is cancelled at shutdown.
+func sweepScheduledTasks(ctx context.Context, o *httpapi.Orchestrator, cfg config.ScheduleConfig, logger *slog.Logger) {
+	if !cfg.Enabled {
+		return
+	}
+
+	ticker := time.NewTicker(scheduleSweepInterval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			if err := o.RunScheduledTasks(ctx, logger); err != nil {
+				logger.Error("scheduled task sweep failed", "error", err)
 			}
 		}
 	}

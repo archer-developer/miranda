@@ -133,7 +133,11 @@ real tool argument — not a flag inferred from *which* turn happened to
 contain the model's answer (an earlier version of this code guessed that
 from `control.speakRequested` and could double-speak when the guess was
 wrong; see git history). Every other source otherwise stays silent, or
-testing via the web UI's debug box would make it talk unprompted.
+testing via the web UI's debug box would make it talk unprompted. A fired
+scheduled task (`source: users.SourceScheduled`, see "Scheduled tasks"
+below) is one more source that gets this same silent treatment — its own
+prompt has to call `speak_reply`/`send_telegram`/etc. explicitly for
+whatever output it wants, same as Telegram or the web UI.
 
 TTS dispatch is asynchronous: `Dispatcher.Speak` only enqueues text onto a
 background `Player` (`internal/tts/player.go`) and returns immediately —
@@ -175,6 +179,54 @@ matching what the user said (e.g. "Аня") against that user's `FullName`/
 `Username`. It fails with a clear error (relayed back to the model, not the
 caller) if the target has never messaged the bot, since that's the only way
 `ChatStore` ever learns a chat id.
+
+### Scheduled tasks
+
+Optional (`config.ScheduleConfig.Enabled`, default **true** — unlike
+Telegram/WebAuthn this needs no deployment secret/URL, so it's opt-out, not
+opt-in). Three tools — `create_scheduled_task`, `list_scheduled_tasks`,
+`delete_scheduled_task` — back onto their own SQLite file
+(`internal/schedule`, `Storage.ScheduleSQLitePath`), the same
+one-file-per-subsystem convention `WebAuthnSQLitePath` established, wired in
+via `Orchestrator.SetSchedule` (nil means the tools are never offered, same
+pattern as `SetTelegram`/`SetWebTools`). A `schedule.Task` stores a `UserID`,
+a free-text `Prompt`, and exactly one of `RunAt` (a one-off `time.Time`) or
+`CronExpr` (a 5-field `robfig/cron/v3` standard expression); `internal/schedule`
+itself never imports `robfig/cron` or knows what a prompt means — callers
+compute `NextRunAt` and pass it in, the store only persists it.
+
+A ticker in `cmd/miranda` (`sweepScheduledTasks`, modeled exactly on
+`sweepIdleSessions`) calls `Orchestrator.RunScheduledTasks` once a minute.
+For each due task it builds `InputRequest{Source: users.SourceScheduled,
+UserID: task.UserID, Text: task.Prompt}` and calls `Handle` — the same entry
+point every channel uses — inside a `detachedTurnContext` (the same helper
+Telegram's webhook handler uses) so the turn survives past the sweep tick
+that triggered it. The scheduler never interprets the prompt itself: at fire
+time the model decides what tools to call (`speak_reply`, `send_telegram`,
+an HA-facing MCP tool, ...), exactly like a live turn — see "Response
+routing" above for why a scheduled turn never gets live TTS the way
+`ha_assist` does. After firing, a recurring task (`CronExpr` set) is
+rescheduled via `cron.ParseStandard(...).Next(time.Now())`; a one-off task
+(`RunAt` set) is deleted outright, the same "nothing left to summarize"
+reasoning `forget_conversation` uses. `create_scheduled_task` validates
+`run_at`/`schedule` (exactly one required, cron syntax, no past `run_at`) at
+tool-call time, not at config load — there's no static cron expression in
+config to validate ahead of time, every one is model/user-supplied per task.
+`delete_scheduled_task`/`list_scheduled_tasks` are scoped to the calling
+`userID` the same IDOR-safe way `internal/webui`'s dialog/memory endpoints
+are — `schedule.Store.Delete` returns the same `ErrNotFound` whether an id
+doesn't exist or belongs to someone else.
+
+`RunScheduledTasks` takes a `*slog.Logger` and logs every firing (fired,
+rescheduled, or failed, with `task_id`/`user_id`) through it rather than
+`o.hub` — unlike `o.hub.Publish(Event{Source: "error", ...})`, which nothing
+in the web UI currently subscribes to (`internal/webui/static/js/screens/logs.js`'s
+Logs screen only has `app_log`/`llm_log` tabs), a logger call reaches
+`logs/miranda.log`, stdout, *and* the `app_log` tab (via
+`eventHub.Writer("app_log")`, see `cmd/miranda.setupLogging`) — this is the
+only durable trace that the scheduler actually ran, separate from a fired
+task's own conversation content (already fully captured in `logs/llm.log`
+via the normal `Handle`/`llmtrace` path).
 
 ### Session lifecycle
 
@@ -346,6 +398,7 @@ Config flags below live on `config.MemoryConfig` unless otherwise noted.
 | `speak_reply` | `config.TTSConfig.SpeakReplyTool` | Takes a `text` argument and dispatches exactly that text to `tts.primary`, even on a source other than `ha_assist` — triggered by an explicit "read/say that aloud" request (see Response routing above). Speech-friendly text the model composes itself, not necessarily identical to its written reply. |
 | `stop_speech` | `config.TTSConfig.StopSpeechTool` | Interrupt whatever `tts.primary`/`tts.fallback` is currently speaking or has queued (clears the queue, then `media_player.media_stop`s every configured entity) — triggered by an explicit "stop talking" request. Every `ha_assist` turn also triggers this automatically at turn start (barge-in) — see Response routing above. |
 | `send_telegram` | `config.TelegramConfig.SendMessageTool` | Proactively push a message to a household member's Telegram (current user by default, or a named one) — see Telegram channel above. |
+| `create_scheduled_task` / `list_scheduled_tasks` / `delete_scheduled_task` | `config.ScheduleConfig.Enabled` | Schedule/list/cancel a free-text prompt to be replayed through the agent loop later, once or on a cron recurrence — see Scheduled tasks above. |
 | `web_search` | `config.TavilyConfig.WebSearch.Enabled` | Search the live web via Tavily (`internal/tools`, `internal/tavily`) — offered to every LLM provider identically, not tied to one backend's native tool. See "Web tools" above. |
 | `web_fetch` | `config.TavilyConfig.WebFetch.Enabled` | Fetch a specific URL's readable text via Tavily's `/extract` endpoint — same package/reasoning as `web_search`. |
 | Escalation tool (name configurable per provider) | `config.LLMProvider.Escalation.Enabled` | Hand a hard turn off to that provider's own configured target; intercepted at the router level, transparent to the Orchestrator. See "LLM providers and escalation" above — each provider in the chain has its own target/tool name, and a chain can be more than one hop deep. |

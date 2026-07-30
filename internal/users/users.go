@@ -24,6 +24,14 @@ const SourceHAAssist = "ha_assist"
 // handler (internal/httpapi) uses for turns that arrive via the bot.
 const SourceTelegram = "telegram"
 
+// SourceScheduled is the InputRequest.Source value
+// Orchestrator.RunScheduledTasks uses when replaying a due scheduled task's
+// prompt through Handle — never live-spoken the way ha_assist is (see
+// streamOneTurn's speakLive check), since a scheduled turn's own prompt is
+// expected to call speak_reply/send_telegram/etc. explicitly for whatever
+// output it needs, the same as every other non-ha_assist source.
+const SourceScheduled = "scheduled"
+
 // User is one configured account, with config-file secrets already
 // unwrapped (PasswordHash stays hashed; it's never handled in plaintext
 // after config load).

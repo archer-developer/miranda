@@ -13,6 +13,7 @@ import (
 	"github.com/archer-developer/miranda/internal/llmtrace"
 	"github.com/archer-developer/miranda/internal/mcp"
 	"github.com/archer-developer/miranda/internal/memory"
+	"github.com/archer-developer/miranda/internal/schedule"
 	"github.com/archer-developer/miranda/internal/telegram"
 	"github.com/archer-developer/miranda/internal/tools"
 	"github.com/archer-developer/miranda/internal/tts"
@@ -22,7 +23,7 @@ import (
 // maxToolIterations bounds the agent loop (model calls a tool, gets a
 // result, decides what to do next) so a misbehaving model can't loop forever
 // racking up API calls.
-const maxToolIterations = 5
+const maxToolIterations = 15
 
 const rememberToolName = "remember_this"
 
@@ -37,6 +38,12 @@ const speakReplyToolName = "speak_reply"
 const stopSpeechToolName = "stop_speech"
 
 const sendTelegramToolName = "send_telegram"
+
+const createScheduledTaskToolName = "create_scheduled_task"
+
+const listScheduledTasksToolName = "list_scheduled_tasks"
+
+const deleteScheduledTaskToolName = "delete_scheduled_task"
 
 // ReservedToolNames returns every name Miranda's own agent loop can
 // advertise as a tool: every hardcoded built-in above, plus internal/tools'
@@ -58,6 +65,9 @@ func ReservedToolNames() []string {
 		speakReplyToolName,
 		stopSpeechToolName,
 		sendTelegramToolName,
+		createScheduledTaskToolName,
+		listScheduledTasksToolName,
+		deleteScheduledTaskToolName,
 		tools.WebSearchToolName,
 		tools.WebFetchToolName,
 	}
@@ -138,6 +148,9 @@ type Orchestrator struct {
 	// intentionally randomized iteration order would silently defeat that
 	// cache on every single call.
 	webTools []tools.Tool
+	// schedule is set via SetSchedule; nil means the three scheduled-task
+	// tools are never offered and RunScheduledTasks is a no-op.
+	schedule *schedule.Store
 }
 
 // SetTelegram wires the optional send_telegram tool in, mirroring
@@ -157,6 +170,17 @@ func (o *Orchestrator) SetTelegram(sender *telegram.Sender, cfg config.TelegramC
 // default, a nil slice) means availableTools never offers either tool.
 func (o *Orchestrator) SetWebTools(ts []tools.Tool) {
 	o.webTools = ts
+}
+
+// SetSchedule wires the optional create_scheduled_task/list_scheduled_tasks/
+// delete_scheduled_task tools in, mirroring SetTelegram/SetWebTools's
+// post-construction style for an optional dependency — call it once from
+// cmd/miranda after opening a schedule.Store, only when
+// config.ScheduleConfig.Enabled. Leaving it uncalled (the default) means
+// availableTools never offers any of the three tools, and
+// RunScheduledTasks is a no-op.
+func (o *Orchestrator) SetSchedule(s *schedule.Store) {
+	o.schedule = s
 }
 
 // NewOrchestrator wires the agent loop's dependencies together.

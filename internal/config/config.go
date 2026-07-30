@@ -26,6 +26,7 @@ type Config struct {
 	WebUI    WebUIConfig    `yaml:"web_ui"`
 	WebAuthn WebAuthnConfig `yaml:"webauthn"`
 	Telegram TelegramConfig `yaml:"telegram"`
+	Schedule ScheduleConfig `yaml:"schedule"`
 	Users    []UserConfig   `yaml:"users"`
 }
 
@@ -80,6 +81,12 @@ type StorageConfig struct {
 	// to be learned and persisted rather than derived from config. Only used
 	// when TelegramConfig.Enabled is true.
 	TelegramChatsPath string `yaml:"telegram_chats_path"`
+	// ScheduleSQLitePath is a separate SQLite file for scheduled tasks (see
+	// internal/schedule) — kept apart from SQLitePath for the same reason
+	// WebAuthnSQLitePath is: wiping/backing up dialog history shouldn't touch
+	// a household's pending reminders (and vice versa). Only used when
+	// ScheduleConfig.Enabled is true.
+	ScheduleSQLitePath string `yaml:"schedule_sqlite_path"`
 	// TTSCacheDir is where the gemini_tts provider's content-addressed,
 	// permanent (no TTL/expiry — see internal/tts/cache.go) rendered-audio
 	// cache lives; it's also the directory tts.HTTPHandler serves
@@ -153,6 +160,16 @@ type TelegramConfig struct {
 	// телефон ...", "отправь Ане на телефон ...". Only works for a user who
 	// has messaged the bot at least once (see StorageConfig.TelegramChatsPath).
 	SendMessageTool bool `yaml:"send_message_tool"`
+}
+
+// ScheduleConfig controls the create_scheduled_task/list_scheduled_tasks/
+// delete_scheduled_task tools (see internal/schedule, internal/httpapi) that
+// let the model schedule a free-text prompt to be replayed through the
+// agent loop later — a one-off reminder or a recurring routine. Unlike
+// Telegram/WebAuthn, this needs no deployment-specific secret or URL to
+// turn on, so Enabled defaults to true (opt-out, not opt-in).
+type ScheduleConfig struct {
+	Enabled bool `yaml:"enabled"`
 }
 
 // LoggingConfig controls file logging: the general application log (a
@@ -524,6 +541,7 @@ func Default() Config {
 			AvatarsDir:         "./data/avatars",
 			WebAuthnSQLitePath: "./data/webauthn.db",
 			TelegramChatsPath:  "./data/telegram_chats.json",
+			ScheduleSQLitePath: "./data/schedule.db",
 			TTSCacheDir:        "./data/storage",
 		},
 		Logging: LoggingConfig{
@@ -655,6 +673,9 @@ func Default() Config {
 			Enabled:         false,
 			WebhookPath:     "/telegram/webhook",
 			SendMessageTool: true,
+		},
+		Schedule: ScheduleConfig{
+			Enabled: true,
 		},
 		// No default Users: web UI login is mandatory and fails closed until
 		// config.yaml lists at least one account (see internal/users).

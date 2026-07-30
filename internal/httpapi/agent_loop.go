@@ -5,10 +5,14 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"time"
+
+	"github.com/robfig/cron/v3"
 
 	"github.com/archer-developer/miranda/internal/history"
 	"github.com/archer-developer/miranda/internal/hub"
 	"github.com/archer-developer/miranda/internal/llm"
+	"github.com/archer-developer/miranda/internal/schedule"
 	"github.com/archer-developer/miranda/internal/tts"
 	"github.com/archer-developer/miranda/internal/users"
 )
@@ -246,6 +250,54 @@ func (o *Orchestrator) availableTools(ctx context.Context) []llm.ToolDef {
 		})
 	}
 
+	if o.schedule != nil {
+		add(llm.ToolDef{
+			Name: createScheduledTaskToolName,
+			Description: "Schedule a free-text instruction to be carried out later, either once or on a " +
+				"recurring basis — use when the user explicitly asks to be reminded/have something done " +
+				"at a future time (e.g. \"сегодня в 22:00 напомни мне...\", \"каждое утро в 9:01 ...\"). " +
+				"The instruction is replayed through you later exactly like a live message from the user — " +
+				"at that point you decide which of your own tools (speak_reply, send_telegram, etc.) to call " +
+				"to actually carry it out, so write it as a clear, self-contained instruction, not a summary.",
+			Parameters: map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"task": map[string]any{
+						"type":        "string",
+						"description": "the instruction to carry out when this fires, written exactly as you'd want to receive it as a live message",
+					},
+					"run_at": map[string]any{
+						"type":        "string",
+						"description": "RFC3339 datetime for a one-off task (e.g. \"2026-07-30T22:00:00+03:00\") — provide exactly one of run_at or schedule, never both",
+					},
+					"schedule": map[string]any{
+						"type":        "string",
+						"description": "5-field cron expression (minute hour day-of-month month day-of-week) for a recurring task, e.g. \"1 9 * * *\" for every day at 9:01, or \"20 22 * * 2\" for every Tuesday at 22:20 — provide exactly one of run_at or schedule, never both",
+					},
+				},
+				"required": []string{"task"},
+			},
+		})
+
+		add(llm.ToolDef{
+			Name:        listScheduledTasksToolName,
+			Description: "List this user's currently scheduled tasks (id, next run time, and instruction) — use when the user asks what's scheduled, or before deleting one.",
+			Parameters:  map[string]any{"type": "object", "properties": map[string]any{}},
+		})
+
+		add(llm.ToolDef{
+			Name:        deleteScheduledTaskToolName,
+			Description: "Cancel a scheduled task by id (from list_scheduled_tasks) — use when the user asks to cancel/remove a reminder or scheduled routine.",
+			Parameters: map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"id": map[string]any{"type": "string", "description": "the task id, from list_scheduled_tasks"},
+				},
+				"required": []string{"id"},
+			},
+		})
+	}
+
 	mcpTools := o.tools.Tools(ctx)
 	out := make([]llm.ToolDef, 0, len(mcpTools)+len(tools))
 	for _, t := range mcpTools {
@@ -475,6 +527,80 @@ func (o *Orchestrator) executeTool(ctx context.Context, userID string, tc llm.To
 			return fmt.Sprintf("error: %v", err)
 		}
 		return "sent"
+	}
+
+	if tc.Name == createScheduledTaskToolName {
+		var args struct {
+			Task     string `json:"task"`
+			RunAt    string `json:"run_at"`
+			Schedule string `json:"schedule"`
+		}
+		if err := json.Unmarshal([]byte(tc.Arguments), &args); err != nil {
+			return fmt.Sprintf("error: invalid arguments: %v", err)
+		}
+		if args.Task == "" {
+			return "error: task is required"
+		}
+		if (args.RunAt == "") == (args.Schedule == "") {
+			return "error: provide exactly one of run_at or schedule"
+		}
+
+		task := schedule.Task{UserID: userID, Prompt: args.Task}
+		if args.Schedule != "" {
+			sched, err := cron.ParseStandard(args.Schedule)
+			if err != nil {
+				return fmt.Sprintf("error: invalid schedule expression: %v", err)
+			}
+			task.CronExpr = args.Schedule
+			task.NextRunAt = sched.Next(time.Now())
+		} else {
+			runAt, err := time.Parse(time.RFC3339, args.RunAt)
+			if err != nil {
+				return fmt.Sprintf("error: invalid run_at (expected RFC3339): %v", err)
+			}
+			if !runAt.After(time.Now()) {
+				return "error: run_at is in the past"
+			}
+			task.RunAt = &runAt
+			task.NextRunAt = runAt
+		}
+
+		id, err := o.schedule.Create(ctx, task)
+		if err != nil {
+			return fmt.Sprintf("error: %v", err)
+		}
+		return "scheduled: " + id
+	}
+
+	if tc.Name == listScheduledTasksToolName {
+		tasksList, err := o.schedule.ListForUser(ctx, userID)
+		if err != nil {
+			return fmt.Sprintf("error: %v", err)
+		}
+		if len(tasksList) == 0 {
+			return "no scheduled tasks"
+		}
+		var b strings.Builder
+		for _, t := range tasksList {
+			fmt.Fprintf(&b, "[%s] next: %s — %s\n", t.ID, t.NextRunAt.Format(time.RFC3339), t.Prompt)
+		}
+		return b.String()
+	}
+
+	if tc.Name == deleteScheduledTaskToolName {
+		var args struct {
+			ID string `json:"id"`
+		}
+		if err := json.Unmarshal([]byte(tc.Arguments), &args); err != nil {
+			return fmt.Sprintf("error: invalid arguments: %v", err)
+		}
+		if err := o.schedule.Delete(ctx, args.ID, userID); err != nil {
+			if err == schedule.ErrNotFound {
+				return "error: no such scheduled task"
+			}
+			return fmt.Sprintf("error: %v", err)
+		}
+		return "deleted"
 	}
 
 	for _, t := range o.webTools {
