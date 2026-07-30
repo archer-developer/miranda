@@ -164,6 +164,10 @@ type LoggingConfig struct {
 	// Dir is where log files are written (miranda.log, llm.log). Created
 	// automatically if missing.
 	Dir string `yaml:"dir"`
+	// Level is the minimum log level to emit: "debug", "info", "warn", or
+	// "error". Defaults to "info". Set to "debug" to see tool-call timings,
+	// web search queries, and other verbose diagnostic output.
+	Level string `yaml:"level"`
 	// MaxSizeMB is the size in megabytes a log file reaches before it's
 	// rotated to a numbered backup.
 	MaxSizeMB int `yaml:"max_size_mb"`
@@ -524,6 +528,7 @@ func Default() Config {
 		},
 		Logging: LoggingConfig{
 			Dir:        "./logs",
+			Level:      "info",
 			MaxSizeMB:  10,
 			MaxBackups: 5,
 			MaxAgeDays: 30,

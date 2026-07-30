@@ -143,8 +143,14 @@ func setupLogging(cfg config.LoggingConfig, eventHub *hub.Hub) (*slog.Logger, fu
 		return nil, func() {}, fmt.Errorf("main: create log dir %s: %w", cfg.Dir, err)
 	}
 
+	var level slog.Level
+	if err := level.UnmarshalText([]byte(cfg.Level)); err != nil {
+		return nil, func() {}, fmt.Errorf("main: invalid log level %q: %w", cfg.Level, err)
+	}
+
 	appLogFile := rotatingLogFile(cfg, "miranda.log")
-	logger := slog.New(slog.NewTextHandler(io.MultiWriter(os.Stdout, appLogFile, eventHub.Writer("app_log")), nil))
+	opts := &slog.HandlerOptions{Level: level}
+	logger := slog.New(slog.NewTextHandler(io.MultiWriter(os.Stdout, appLogFile, eventHub.Writer("app_log")), opts))
 	return logger, func() { _ = appLogFile.Close() }, nil
 }
 
