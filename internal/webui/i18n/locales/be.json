@@ -46,6 +46,8 @@
   "logs_trace_response": "Адказ",
   "logs_trace_empty": "(пуста)",
   "logs_trace_error_badge": "памылка",
+  "logs_trace_copy": "Скапіяваць трэйс",
+  "logs_trace_copied": "Скапіявана!",
   "profile_username_label": "Імя карыстальніка",
   "profile_display_name_label": "Імя",
   "profile_language_label": "Мова",

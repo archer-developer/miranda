@@ -38,6 +38,17 @@ function buildJsonTree(value) {
   return new JSONFormatter(value, JSON_OPEN_DEPTH).render();
 }
 
+/** Reconstructs `block` back into the exact log-line shape
+ * internal/llmtrace.Logger.Trace originally wrote it in, so "copy" hands the
+ * user something that pastes as a familiar, self-contained trace block
+ * rather than a one-off JSON fragment. */
+function blockText(block) {
+  let header = `=== ${block.timestamp} provider=${block.provider}`;
+  if (block.conversationId) header += ` conversation=${block.conversationId}`;
+  header += " ===";
+  return [header, "--- request ---", block.requestRaw, "--- response ---", block.responseRaw].join("\n");
+}
+
 /** A muted `<pre>` fallback for content that isn't valid JSON (a parse
  * failure, or an empty section) — still readable, just not foldable. */
 function plainTextBlock(text) {
@@ -102,13 +113,20 @@ export function buildTraceRow(block) {
   item.className =
     "rounded-xl border border-(--color-border) bg-(--color-surface)/40 transition-colors hover:border-(--color-border-strong)";
 
+  // header (the expand/collapse toggle) and the copy button are siblings,
+  // not nested buttons — a <button> inside a <button> is invalid HTML and
+  // makes click handling unreliable, so the row is a flex wrapper around
+  // both instead of the copy control living inside header's own markup.
+  const row = document.createElement("div");
+  row.className = "flex items-center";
+
   const detailId = `trace-detail-${nextRowID++}`;
   const header = document.createElement("button");
   header.type = "button";
   header.setAttribute("aria-expanded", "false");
   header.setAttribute("aria-controls", detailId);
   header.className =
-    "flex w-full items-center justify-between gap-3 px-4 py-3 text-left focus-visible:outline-none sm:px-5";
+    "flex min-w-0 flex-1 items-center justify-between gap-3 py-3 pl-4 text-left focus-visible:outline-none sm:pl-5";
 
   // Model, when present, is a genuinely useful scanning aid (which call was
   // this?) beyond what was strictly asked for — both providers' native
@@ -159,6 +177,41 @@ export function buildTraceRow(block) {
     detail.classList.toggle("hidden", !willOpen);
   });
 
-  item.appendChild(header);
+  const copyLabel = t("logs_trace_copy", "Copy trace");
+  const copyButton = document.createElement("button");
+  copyButton.type = "button";
+  copyButton.className =
+    "mr-3 inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-lg text-(--color-text-faint) transition-colors hover:bg-(--color-surface-2) hover:text-(--color-text) focus-visible:outline-none sm:mr-4";
+  copyButton.setAttribute("aria-label", copyLabel);
+  copyButton.title = copyLabel;
+  copyButton.innerHTML = icon("copy", "h-4 w-4");
+
+  // event.stopPropagation matters here even though copyButton isn't nested
+  // inside header (see the row comment above) — without it a click would
+  // still bubble up to any ancestor listener a future refactor might add;
+  // cheap insurance for a button whose whole point is "don't also toggle
+  // the row".
+  let copyResetTimer = null;
+  copyButton.addEventListener("click", async (event) => {
+    event.stopPropagation();
+    try {
+      await navigator.clipboard.writeText(blockText(block));
+    } catch {
+      // Clipboard access can be denied (permissions, insecure context) — no
+      // useful recovery beyond leaving the row as-is; the expanded JSON
+      // panels remain manually selectable/copyable either way.
+      return;
+    }
+    copyButton.innerHTML = icon("check", "h-4 w-4");
+    copyButton.title = t("logs_trace_copied", "Copied!");
+    clearTimeout(copyResetTimer);
+    copyResetTimer = setTimeout(() => {
+      copyButton.innerHTML = icon("copy", "h-4 w-4");
+      copyButton.title = copyLabel;
+    }, 1500);
+  });
+
+  row.append(header, copyButton);
+  item.appendChild(row);
   return item;
 }

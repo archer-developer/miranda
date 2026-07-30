@@ -46,6 +46,8 @@
   "logs_trace_response": "Ответ",
   "logs_trace_empty": "(пусто)",
   "logs_trace_error_badge": "ошибка",
+  "logs_trace_copy": "Скопировать трейс",
+  "logs_trace_copied": "Скопировано!",
   "profile_username_label": "Имя пользователя",
   "profile_display_name_label": "Имя",
   "profile_language_label": "Язык",

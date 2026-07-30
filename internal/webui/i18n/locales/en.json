@@ -46,6 +46,8 @@
   "logs_trace_response": "Response",
   "logs_trace_empty": "(empty)",
   "logs_trace_error_badge": "error",
+  "logs_trace_copy": "Copy trace",
+  "logs_trace_copied": "Copied!",
   "profile_username_label": "Username",
   "profile_display_name_label": "Name",
   "profile_language_label": "Language",
