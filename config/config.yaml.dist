@@ -61,18 +61,19 @@ llm:
       model: "claude-sonnet-5"
       api_key_envs: ["ANTHROPIC_API_KEY"]
       # Claude's own server-executed tools (run by Anthropic itself, not
-      # through Miranda's tool loop). All default to false. This is what
-      # lets Claude answer something needing the live internet, e.g. "what's
-      # the bitcoin price right now" — none of Miranda's own tools
-      # (MCP/HA, remember_this, etc.) reach the open web. web_search is
-      # required for open-ended questions like that one: web_fetch alone can
-      # only read a URL the model was already given (by the user or by a
-      # prior search), it can't discover one itself. Enabling code_execution
-      # alongside them also lets the sandboxed code call web_search/web_fetch
-      # itself as a helper (e.g. fetch a page, then parse/compute over it).
+      # through Miranda's tool loop). All default to false. Prefer the
+      # tavily: section below for web_search/web_fetch instead of enabling
+      # them here: it's self-hosted, so it works identically across every
+      # provider in the chain (not just Claude), and enabling BOTH here and
+      # there would collide — Anthropic requires unique tool names on one
+      # request, and tools.tavily's tools are deliberately named
+      # "web_search"/"web_fetch" too (see internal/tools). code_execution
+      # has no self-hosted equivalent (yet), so it stays native/opt-in here;
+      # enabling it also lets the sandboxed code call Claude's OWN native
+      # web_search/web_fetch as a helper, if those are enabled too.
       anthropic_tools:
-        web_search: true
-        web_fetch: true
+        web_search: false
+        web_fetch: false
         code_execution: true
       # No escalation block — top of this chain, nowhere further to hand
       # off to. The zero-value (disabled) EscalationConfig is correct here.
@@ -84,10 +85,27 @@ llm:
   # config/llm.yaml for a worked example, including its own multi-key
   # rotation (api_key_envs takes several env var names; unlike anthropic/
   # openai_compat, which only ever use the first, Gemini actually rotates
-  # across all of them on a quota or server error) and native
-  # gemini_tools.google_search (Grounding with Google Search — Gemini's
-  # code-execution tool is Vertex AI-only and not offered here, unlike
-  # Claude's anthropic_tools.code_execution above).
+  # across all of them on a quota or server error). Its own native
+  # gemini_tools.google_search (Grounding with Google Search) is NOT
+  # recommended: it has a zero quota on the free-tier Gemini Developer API,
+  # not merely a low one, so every request that touches it fails with
+  # RESOURCE_EXHAUSTED — use tavily: below instead, same reasoning as
+  # anthropic_tools.web_search above. Gemini's code-execution tool is
+  # Vertex AI-only and not offered here, unlike Claude's
+  # anthropic_tools.code_execution above.
+
+# Miranda's own web_search/web_fetch tools (internal/tools, backed by
+# Tavily — https://tavily.com), offered identically to every LLM provider
+# above via the Orchestrator's own tool loop, rather than through any one
+# provider's native web tool support. Both default to false (opt-in — needs
+# a real Tavily API key, set as TAVILY_API_KEY — see .env.example).
+tavily:
+  api_key_env: "TAVILY_API_KEY"
+  web_search:
+    enabled: false
+    max_results: 5 # bounds how many results are spent into the model's context per search
+  web_fetch:
+    enabled: false
 
 memory:
   # End-of-session LLM summarization pass that merges durable facts into

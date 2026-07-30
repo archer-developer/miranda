@@ -21,6 +21,7 @@ type Config struct {
 	Agent    AgentConfig    `yaml:"agent"`
 	Memory   MemoryConfig   `yaml:"memory"`
 	MCP      MCPConfig      `yaml:"mcp"`
+	Tavily   TavilyConfig   `yaml:"tavily"`
 	TTS      TTSConfig      `yaml:"tts"`
 	WebUI    WebUIConfig    `yaml:"web_ui"`
 	WebAuthn WebAuthnConfig `yaml:"webauthn"`
@@ -348,6 +349,43 @@ type MCPConfig struct {
 	Servers []MCPServer `yaml:"servers"`
 }
 
+// TavilyConfig configures Miranda's own web_search/web_fetch tools
+// (internal/tools, backed by internal/tavily) — unlike LLMProvider's
+// AnthropicTools/GeminiTools, these run through the Orchestrator's own tool
+// loop (executeTool) exactly like remember_this or an MCP tool, so they're
+// offered identically to every provider in the fallback/escalation chain
+// rather than being tied to one specific backend's native tool support.
+// This is what replaced Gemini's gemini_tools.google_search as this
+// project's way of giving a cheap/free-tier model live web access: Grounding
+// with Google Search turned out to have a zero quota on the free-tier
+// Gemini Developer API, failing every single call with RESOURCE_EXHAUSTED
+// rather than merely being rate-limited — see internal/llm/gemini's doc
+// comment and config/llm.yaml.
+type TavilyConfig struct {
+	// APIKeyEnv names the environment variable holding the Tavily API key
+	// (from https://app.tavily.com) — never stored in config.yaml directly,
+	// same *_env convention as every other secret in this codebase.
+	APIKeyEnv string              `yaml:"api_key_env"`
+	WebSearch WebSearchToolConfig `yaml:"web_search"`
+	WebFetch  WebFetchToolConfig  `yaml:"web_fetch"`
+}
+
+// WebSearchToolConfig controls the web_search tool (internal/tools). Opt-in
+// (Enabled defaults false) since it needs a real Tavily API key, same
+// posture as TelegramConfig/WebAuthnConfig.
+type WebSearchToolConfig struct {
+	Enabled bool `yaml:"enabled"`
+	// MaxResults bounds how many results Tavily returns per search — kept
+	// small since every result is spent straight into the model's context.
+	MaxResults int `yaml:"max_results"`
+}
+
+// WebFetchToolConfig controls the web_fetch tool (internal/tools). Opt-in,
+// same reasoning as WebSearchToolConfig.
+type WebFetchToolConfig struct {
+	Enabled bool `yaml:"enabled"`
+}
+
 // YandexStationConfig configures the primary TTS channel.
 type YandexStationConfig struct {
 	Entities           []string `yaml:"entities"`
@@ -505,6 +543,13 @@ func Default() Config {
 		MCP: MCPConfig{
 			Servers: nil,
 		},
+		// Disabled by default — needs a real Tavily API key, same posture as
+		// TelegramConfig/WebAuthnConfig below.
+		Tavily: TavilyConfig{
+			APIKeyEnv: "TAVILY_API_KEY",
+			WebSearch: WebSearchToolConfig{Enabled: false, MaxResults: 5},
+			WebFetch:  WebFetchToolConfig{Enabled: false},
+		},
 		TTS: TTSConfig{
 			// Opt-in gemini_tts is a new channel, not a default swap — this
 			// stays the always-available, zero-external-dependency provider.
@@ -646,8 +691,38 @@ func Load(paths ...string) (Config, error) {
 	if err := validateMCPServerNames(cfg.MCP.Servers); err != nil {
 		return cfg, err
 	}
+	if err := validateNoDuplicateWebTools(cfg.LLM.Providers, cfg.Tavily); err != nil {
+		return cfg, err
+	}
 
 	return cfg, nil
+}
+
+// validateNoDuplicateWebTools rejects a config where an "anthropic"-type
+// provider's own native web_search/web_fetch (AnthropicToolsConfig) is
+// enabled at the same time as tavily's identically-named custom tool. This
+// isn't just redundant — internal/tools' web_search/web_fetch are
+// deliberately named the same as Claude's native tools (see that package's
+// doc comment), specifically so config/llm.yaml only ever offers one of the
+// two, and Anthropic's Messages API requires unique tool names on a single
+// request: enabling both would make every turn on that provider fail with a
+// duplicate-tool-name error, discovered only the first time that provider
+// is actually invoked rather than at startup.
+func validateNoDuplicateWebTools(providers []LLMProvider, tavily TavilyConfig) error {
+	for _, p := range providers {
+		if p.Type != "anthropic" {
+			continue
+		}
+		if p.AnthropicTools.WebSearch && tavily.WebSearch.Enabled {
+			return fmt.Errorf("config: llm.providers[%q].anthropic_tools.web_search and tavily.web_search are both enabled — "+
+				"they'd send two tools both named %q to Claude, which Anthropic rejects; enable only one", p.Name, "web_search")
+		}
+		if p.AnthropicTools.WebFetch && tavily.WebFetch.Enabled {
+			return fmt.Errorf("config: llm.providers[%q].anthropic_tools.web_fetch and tavily.web_fetch are both enabled — "+
+				"they'd send two tools both named %q to Claude, which Anthropic rejects; enable only one", p.Name, "web_fetch")
+		}
+	}
+	return nil
 }
 
 // validateMCPServerNames rejects two enabled mcp.servers entries sharing a

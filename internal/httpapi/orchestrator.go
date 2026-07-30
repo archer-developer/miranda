@@ -14,6 +14,7 @@ import (
 	"github.com/archer-developer/miranda/internal/mcp"
 	"github.com/archer-developer/miranda/internal/memory"
 	"github.com/archer-developer/miranda/internal/telegram"
+	"github.com/archer-developer/miranda/internal/tools"
 	"github.com/archer-developer/miranda/internal/tts"
 	"github.com/archer-developer/miranda/internal/users"
 )
@@ -36,6 +37,31 @@ const speakReplyToolName = "speak_reply"
 const stopSpeechToolName = "stop_speech"
 
 const sendTelegramToolName = "send_telegram"
+
+// ReservedToolNames returns every name Miranda's own agent loop can
+// advertise as a tool: every hardcoded built-in above, plus internal/tools'
+// fixed web_search/web_fetch names — regardless of whether config
+// currently enables each one (a name is reserved the moment Miranda could
+// ever advertise it, not only while it's actively turned on). cmd/miranda
+// uses this at startup to reject a config where an LLMProvider's
+// escalation.tool_name collides with one of these: router.deliver
+// intercepts any model tool call matching esc.ToolName as an escalation
+// trigger before it ever reaches Orchestrator.executeTool, so a collision
+// would silently swallow every real call to that tool instead of running
+// it, with nothing to explain why.
+func ReservedToolNames() []string {
+	return []string{
+		rememberToolName,
+		searchHistoryToolName,
+		endConversationToolName,
+		forgetConversationToolName,
+		speakReplyToolName,
+		stopSpeechToolName,
+		sendTelegramToolName,
+		tools.WebSearchToolName,
+		tools.WebFetchToolName,
+	}
+}
 
 // InputRequest is the body of POST /api/v1/input — the single entry point
 // for both Home Assistant's thin conversation agent and manual curl/web UI
@@ -104,6 +130,14 @@ type Orchestrator struct {
 	baseSystemPrompt string
 	telegram         *telegram.Sender // set via SetTelegram; nil means the send_telegram tool is never offered
 	telegramCfg      config.TelegramConfig
+	// webTools is set via SetWebTools; empty means none offered. Kept as a
+	// slice (not a map) so availableTools advertises them in the same order
+	// on every turn — anthropic.Provider places its prompt-cache breakpoint
+	// on the last tool in the list (see toAnthropicMessages), which only
+	// caches if that list is byte-identical turn to turn; a map's
+	// intentionally randomized iteration order would silently defeat that
+	// cache on every single call.
+	webTools []tools.Tool
 }
 
 // SetTelegram wires the optional send_telegram tool in, mirroring
@@ -114,6 +148,15 @@ type Orchestrator struct {
 func (o *Orchestrator) SetTelegram(sender *telegram.Sender, cfg config.TelegramConfig) {
 	o.telegram = sender
 	o.telegramCfg = cfg
+}
+
+// SetWebTools wires in Miranda's own web_search/web_fetch tools (see
+// internal/tools), mirroring SetTelegram's post-construction style for an
+// optional dependency — call it once from cmd/miranda after building
+// whichever tools config.TavilyConfig enables. Leaving it uncalled (the
+// default, a nil slice) means availableTools never offers either tool.
+func (o *Orchestrator) SetWebTools(ts []tools.Tool) {
+	o.webTools = ts
 }
 
 // NewOrchestrator wires the agent loop's dependencies together.

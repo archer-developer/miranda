@@ -121,11 +121,27 @@ func (o *Orchestrator) currentUserName(userID string) string {
 // provider's own escalation ToolDef to this base list right before each
 // Chat() call (see internal/llm/router.requestFor), and intercepts calls to
 // it transparently, so it never reaches executeTool.
+//
+// Built-ins are collected first (into the closure-captured `tools`/`names`
+// pair below) and MCP tools are filtered against that set afterward, rather
+// than the reverse, because MCP tool names come from a live server
+// (internal/mcp.Manager.Tools, prefixed "<serverName>_<toolName>") and
+// aren't known until connect time — an MCP server whose prefixed name
+// happens to collide with one of Miranda's own fixed tool names (e.g. a
+// server named "web" exposing a tool "search") is dropped, with a warning,
+// rather than silently shadowing (or being shadowed by) a built-in of the
+// same name. Sending two ToolDefs with the same name to a provider isn't
+// just confusing — Anthropic specifically rejects the request outright.
 func (o *Orchestrator) availableTools(ctx context.Context) []llm.ToolDef {
-	tools := append([]llm.ToolDef{}, o.tools.Tools(ctx)...)
+	var tools []llm.ToolDef
+	names := make(map[string]bool)
+	add := func(t llm.ToolDef) {
+		tools = append(tools, t)
+		names[t.Name] = true
+	}
 
 	if o.memoryCfg.ExplicitTool {
-		tools = append(tools, llm.ToolDef{
+		add(llm.ToolDef{
 			Name:        rememberToolName,
 			Description: "Remember a durable fact about the current user for future conversations (preferences, recurring context).",
 			Parameters: map[string]any{
@@ -137,7 +153,7 @@ func (o *Orchestrator) availableTools(ctx context.Context) []llm.ToolDef {
 	}
 
 	if o.memoryCfg.SearchHistoryTool {
-		tools = append(tools, llm.ToolDef{
+		add(llm.ToolDef{
 			Name: searchHistoryToolName,
 			Description: "Search this user's past conversations for something they said earlier — use it when " +
 				"they reference an earlier conversation (e.g. \"помнишь мы говорили о...\", \"remember when we talked about...\").",
@@ -155,7 +171,7 @@ func (o *Orchestrator) availableTools(ctx context.Context) []llm.ToolDef {
 	}
 
 	if o.memoryCfg.EndConversationTool {
-		tools = append(tools, llm.ToolDef{
+		add(llm.ToolDef{
 			Name: endConversationToolName,
 			Description: "End the current conversation right now — use when the user explicitly asks to start a " +
 				"new conversation (e.g. \"давай начнём новую беседу\", \"let's start a new conversation\"), " +
@@ -165,7 +181,7 @@ func (o *Orchestrator) availableTools(ctx context.Context) []llm.ToolDef {
 	}
 
 	if o.memoryCfg.ForgetConversationTool {
-		tools = append(tools, llm.ToolDef{
+		add(llm.ToolDef{
 			Name: forgetConversationToolName,
 			Description: "Delete this entire conversation with no memory of it — use when the user explicitly asks " +
 				"to forget this conversation or start completely from scratch (e.g. \"забудь\", \"забудь этот диалог\", " +
@@ -175,7 +191,7 @@ func (o *Orchestrator) availableTools(ctx context.Context) []llm.ToolDef {
 	}
 
 	if o.ttsCfg.SpeakReplyTool {
-		tools = append(tools, llm.ToolDef{
+		add(llm.ToolDef{
 			Name: speakReplyToolName,
 			Description: "Speak text out loud through the physical speaker, even though this request didn't arrive " +
 				"via the voice pipeline — use only when the user explicitly asks to hear something read aloud " +
@@ -193,7 +209,7 @@ func (o *Orchestrator) availableTools(ctx context.Context) []llm.ToolDef {
 	}
 
 	if o.tts != nil && o.ttsCfg.StopSpeechTool {
-		tools = append(tools, llm.ToolDef{
+		add(llm.ToolDef{
 			Name: stopSpeechToolName,
 			Description: "Stop speaking immediately — use when the user explicitly asks Miranda to stop talking " +
 				"(e.g. \"хватит\", \"замолчи\", \"stop talking\") — clears anything still queued and silences " +
@@ -202,8 +218,12 @@ func (o *Orchestrator) availableTools(ctx context.Context) []llm.ToolDef {
 		})
 	}
 
+	for _, t := range o.webTools {
+		add(t.Def())
+	}
+
 	if o.telegram != nil && o.telegramCfg.SendMessageTool {
-		tools = append(tools, llm.ToolDef{
+		add(llm.ToolDef{
 			Name: sendTelegramToolName,
 			Description: "Send a text message to a household member's Telegram — use when the user explicitly asks " +
 				"to send something to a phone (e.g. \"отправь мне на телефон ...\", \"send that to my phone\", " +
@@ -226,7 +246,17 @@ func (o *Orchestrator) availableTools(ctx context.Context) []llm.ToolDef {
 		})
 	}
 
-	return tools
+	mcpTools := o.tools.Tools(ctx)
+	out := make([]llm.ToolDef, 0, len(mcpTools)+len(tools))
+	for _, t := range mcpTools {
+		if names[t.Name] {
+			o.hub.Publish(hub.Event{Source: "error", Message: fmt.Sprintf(
+				"mcp tool %q collides with a built-in tool of the same name — dropping the mcp one", t.Name)})
+			continue
+		}
+		out = append(out, t)
+	}
+	return append(out, tools...)
 }
 
 // runAgentLoop drives the model until it produces a final text-only reply:
@@ -348,10 +378,11 @@ func (o *Orchestrator) speakText(ctx context.Context, text string) {
 	o.tts.Speak(ctx, text)
 }
 
-// executeTool runs one tool call, either locally (remember_this,
-// search_history, end_conversation, forget_conversation) or via the MCP tool
-// manager. Errors are turned into a result string rather than aborting the
-// turn, so the model can see what went wrong and react (apologize, retry
+// executeTool runs one tool call: locally (remember_this, search_history,
+// end_conversation, forget_conversation), via an internal/tools.Tool
+// (web_search, web_fetch — see o.webTools), or via the MCP tool manager.
+// Errors are turned into a result string rather than aborting the turn, so
+// the model can see what went wrong and react (apologize, retry
 // differently) instead of the whole request failing.
 func (o *Orchestrator) executeTool(ctx context.Context, userID string, tc llm.ToolCall, control *turnControl) string {
 	if tc.Name == rememberToolName {
@@ -444,6 +475,17 @@ func (o *Orchestrator) executeTool(ctx context.Context, userID string, tc llm.To
 			return fmt.Sprintf("error: %v", err)
 		}
 		return "sent"
+	}
+
+	for _, t := range o.webTools {
+		if t.Def().Name != tc.Name {
+			continue
+		}
+		result, err := t.Call(ctx, tc.Arguments)
+		if err != nil {
+			return fmt.Sprintf("error: %v", err)
+		}
+		return result
 	}
 
 	result, err := o.tools.Call(ctx, tc.Name, tc.Arguments)

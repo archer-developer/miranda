@@ -130,3 +130,61 @@ mcp:
 	_, err := Load(path)
 	require.NoError(t, err)
 }
+
+func TestLoad_AnthropicWebSearchAlongsideTavilyWebSearchReturnsError(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	yamlContent := `
+llm:
+  providers:
+    - name: claude
+      type: anthropic
+      model: "claude-sonnet-5"
+      anthropic_tools:
+        web_search: true
+tavily:
+  web_search:
+    enabled: true
+`
+	require.NoError(t, os.WriteFile(path, []byte(yamlContent), 0o644))
+
+	_, err := Load(path)
+	require.Error(t, err)
+}
+
+func TestLoad_AnthropicWebFetchAlongsideTavilyWebFetchReturnsError(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	yamlContent := `
+llm:
+  providers:
+    - name: claude
+      type: anthropic
+      model: "claude-sonnet-5"
+      anthropic_tools:
+        web_fetch: true
+tavily:
+  web_fetch:
+    enabled: true
+`
+	require.NoError(t, os.WriteFile(path, []byte(yamlContent), 0o644))
+
+	_, err := Load(path)
+	require.Error(t, err)
+}
+
+func TestLoad_AnthropicWebSearchWithoutTavilyIsFine(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	yamlContent := `
+llm:
+  providers:
+    - name: claude
+      type: anthropic
+      model: "claude-sonnet-5"
+      anthropic_tools:
+        web_search: true
+        web_fetch: true
+`
+	require.NoError(t, os.WriteFile(path, []byte(yamlContent), 0o644))
+
+	_, err := Load(path)
+	require.NoError(t, err)
+}

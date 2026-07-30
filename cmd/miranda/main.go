@@ -34,7 +34,9 @@ import (
 	"github.com/archer-developer/miranda/internal/mcp"
 	"github.com/archer-developer/miranda/internal/memory"
 	"github.com/archer-developer/miranda/internal/session"
+	"github.com/archer-developer/miranda/internal/tavily"
 	"github.com/archer-developer/miranda/internal/telegram"
+	"github.com/archer-developer/miranda/internal/tools"
 	"github.com/archer-developer/miranda/internal/tts"
 	"github.com/archer-developer/miranda/internal/users"
 	"github.com/archer-developer/miranda/internal/webauthn"
@@ -159,6 +161,10 @@ func rotatingLogFile(cfg config.LoggingConfig, filename string) *lumberjack.Logg
 }
 
 func run(cfg config.Config, logger *slog.Logger, eventHub *hub.Hub) error {
+	if err := validateEscalationToolNames(cfg.LLM.Providers); err != nil {
+		return err
+	}
+
 	llmTraceFile := rotatingLogFile(cfg.Logging, "llm.log")
 	defer func() { _ = llmTraceFile.Close() }()
 	// Mirrored into eventHub as Source: "llm_log" events too, same as the
@@ -195,6 +201,11 @@ func run(cfg config.Config, logger *slog.Logger, eventHub *hub.Hub) error {
 	llmRouter.SetTracer(llmTracer)
 
 	toolManager := connectMCP(ctx, cfg.MCP.Servers, logger)
+
+	webTools, err := buildWebTools(cfg.Tavily)
+	if err != nil {
+		return err
+	}
 
 	dispatcher, ttsAudioHandler := buildTTSDispatcher(cfg.TTS, cfg.Storage, eventHub, logger)
 
@@ -245,6 +256,9 @@ func run(cfg config.Config, logger *slog.Logger, eventHub *hub.Hub) error {
 	)
 	if cfg.Telegram.Enabled {
 		orchestrator.SetTelegram(telegram.NewSender(tgClient, tgChats), cfg.Telegram)
+	}
+	if len(webTools) > 0 {
+		orchestrator.SetWebTools(webTools)
 	}
 
 	var webHandler http.Handler
@@ -364,6 +378,27 @@ func firstAPIKey(envs []string) string {
 	return ""
 }
 
+// validateEscalationToolNames rejects a config where any provider's
+// escalation.tool_name collides with one of httpapi.ReservedToolNames() —
+// see that function's doc comment for why a collision would silently
+// swallow real tool calls instead of erroring loudly. Checked once at
+// startup, before any provider/router construction, so a config mistake
+// fails fast the same way validateMCPServerNames/
+// validateNoDuplicateWebTools already do for their own analogous
+// collisions (internal/config.Load).
+func validateEscalationToolNames(providers []config.LLMProvider) error {
+	reserved := make(map[string]bool)
+	for _, name := range httpapi.ReservedToolNames() {
+		reserved[name] = true
+	}
+	for _, p := range providers {
+		if p.Escalation.Enabled && reserved[p.Escalation.ToolName] {
+			return fmt.Errorf("main: llm.providers[%q].escalation.tool_name %q collides with one of Miranda's own tool names", p.Name, p.Escalation.ToolName)
+		}
+	}
+	return nil
+}
+
 // buildEscalations extracts each provider's own EscalationConfig, keyed by
 // name, for router.New — see config.LLMProvider.Escalation's doc comment
 // for why this moved off a single global LLMConfig.Escalation.
@@ -400,6 +435,34 @@ func connectMCP(ctx context.Context, servers []config.MCPServer, logger *slog.Lo
 		go manager.KeepConnected(ctx, s.Name, mcpReconnectInterval, mcpMaxReconnectInterval, mcpConnectTimeout, connect)
 	}
 	return manager
+}
+
+// buildWebTools constructs Miranda's own web_search/web_fetch tools (see
+// internal/tools) when config.TavilyConfig enables at least one of them —
+// both share a single tavily.Client/API key. Returns a nil slice (not an
+// error) when neither is enabled, the default: unlike MCP servers, a
+// missing/wrong Tavily key is a startup-time config mistake worth failing
+// fast on, rather than something to retry in the background, since there's
+// no "comes back later" scenario for a typo'd env var name the way there is
+// for a temporarily-down MCP server.
+func buildWebTools(cfg config.TavilyConfig) ([]tools.Tool, error) {
+	if !cfg.WebSearch.Enabled && !cfg.WebFetch.Enabled {
+		return nil, nil
+	}
+	apiKey := os.Getenv(cfg.APIKeyEnv)
+	if apiKey == "" {
+		return nil, fmt.Errorf("main: tavily.web_search/web_fetch enabled but %s is not set", cfg.APIKeyEnv)
+	}
+	client := tavily.New(apiKey)
+
+	var out []tools.Tool
+	if cfg.WebSearch.Enabled {
+		out = append(out, tools.NewWebSearch(client, cfg.WebSearch))
+	}
+	if cfg.WebFetch.Enabled {
+		out = append(out, tools.NewWebFetch(client))
+	}
+	return out, nil
 }
 
 // setupTelegram validates config and wires the optional Telegram bot

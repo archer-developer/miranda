@@ -274,6 +274,65 @@ TTS's narrower behavior if you're touching either. `anthropic`/
 schema consistency with `gemini`) but only ever use the first entry —
 those SDKs take a single credential per client, not a rotation pool.
 
+### Web tools (`internal/tools`, `internal/tavily`)
+
+`web_search`/`web_fetch` are Miranda's own tools for live web access,
+backed by the [Tavily](https://tavily.com) API (`internal/tavily`, a
+minimal client for its `/search` and `/extract` endpoints) and exposed via
+`internal/tools.Tool` — a small `Def()`/`Call()` interface deliberately
+decoupled from `Orchestrator` (no dependency on history/memory/TTS/users),
+so the same value works from any agent loop, not just this one. Unlike
+`AnthropicToolsConfig`/`GeminiToolsConfig` (a specific provider's own
+server-executed tools), these run through the Orchestrator's ordinary
+custom-tool path — `Orchestrator.SetWebTools` wires in whichever ones
+`config.TavilyConfig` enables, `availableTools` advertises them to every
+provider identically, and `executeTool` dispatches a call to them before
+falling through to the MCP tool manager. `Orchestrator.webTools` is kept as
+a slice, not a map, specifically so the list order stays identical turn to
+turn — `anthropic.Provider.buildTools` places its prompt-cache breakpoint
+on the *last* tool in the list (see `toAnthropicMessages`), and a map's
+randomized iteration order would silently defeat that cache on every call.
+
+This is what replaced `gemini_tools.google_search` as this project's way of
+giving a cheap/free-tier model live web access: Grounding with Google
+Search turned out to have a zero quota on the free-tier Gemini Developer
+API — not merely a low one — so every request that touched it failed with
+`RESOURCE_EXHAUSTED`, including the first call of the day on an otherwise
+fresh key; `internal/llm/gemini`'s key rotation couldn't route around it
+since the exhaustion is per-*feature*, not per-key. `config/llm.yaml` now
+leaves `gemini_tools.google_search` and `anthropic_tools.web_search`/
+`web_fetch` off in favor of `tavily.web_search`/`tavily.web_fetch` — both
+of those provider-native options are named the same (`web_search`,
+`web_fetch`) as the tools this package defines, so enabling a provider's
+native one *and* these together is a real conflict, not just redundancy
+(Anthropic specifically requires unique tool names on one request). Each
+provider's `escalation.description` in `config/llm.yaml` was updated to say
+escalating is not needed just to search the web or read a page, now that
+every hop in the chain has these directly — see **Web tools** in
+`README.md` for the full config shape.
+
+Three safety nets guard the name-collision risk above instead of leaving it
+to be discovered at runtime:
+`config.validateNoDuplicateWebTools` (`internal/config/config.go`, called
+from `Load`) rejects a config where an `anthropic`-type provider's own
+`anthropic_tools.web_search`/`web_fetch` is enabled alongside the matching
+`tavily.web_search`/`web_fetch` flag. `httpapi.ReservedToolNames()` lists
+every name Miranda's own agent loop can ever advertise (every built-in
+constant plus `tools.WebSearchToolName`/`WebFetchToolName`), and
+`cmd/miranda.validateEscalationToolNames` checks every provider's
+`escalation.tool_name` against it at startup — a collision there would
+otherwise have `router.deliver` silently intercept real tool calls as
+escalation triggers instead of running them. Both run before any
+provider/router construction, failing fast the same way
+`validateMCPServerNames` already does for its own analogous collision.
+Neither can catch a *third* source of the same name — an MCP server whose
+prefixed tool name (`internal/mcp.Manager.Tools`'s `<serverName>_<toolName>`)
+happens to match, since that name isn't known until the server is actually
+connected — so `availableTools` itself de-duplicates at runtime instead:
+built-in/internal tool names are collected first, and any MCP `ToolDef`
+sharing one of those names is dropped (logged via the hub) rather than
+being sent to the provider twice or silently shadowing the built-in.
+
 ### Tools available to the model
 
 Config flags below live on `config.MemoryConfig` unless otherwise noted.
@@ -287,6 +346,8 @@ Config flags below live on `config.MemoryConfig` unless otherwise noted.
 | `speak_reply` | `config.TTSConfig.SpeakReplyTool` | Takes a `text` argument and dispatches exactly that text to `tts.primary`, even on a source other than `ha_assist` — triggered by an explicit "read/say that aloud" request (see Response routing above). Speech-friendly text the model composes itself, not necessarily identical to its written reply. |
 | `stop_speech` | `config.TTSConfig.StopSpeechTool` | Interrupt whatever `tts.primary`/`tts.fallback` is currently speaking or has queued (clears the queue, then `media_player.media_stop`s every configured entity) — triggered by an explicit "stop talking" request. Every `ha_assist` turn also triggers this automatically at turn start (barge-in) — see Response routing above. |
 | `send_telegram` | `config.TelegramConfig.SendMessageTool` | Proactively push a message to a household member's Telegram (current user by default, or a named one) — see Telegram channel above. |
+| `web_search` | `config.TavilyConfig.WebSearch.Enabled` | Search the live web via Tavily (`internal/tools`, `internal/tavily`) — offered to every LLM provider identically, not tied to one backend's native tool. See "Web tools" above. |
+| `web_fetch` | `config.TavilyConfig.WebFetch.Enabled` | Fetch a specific URL's readable text via Tavily's `/extract` endpoint — same package/reasoning as `web_search`. |
 | Escalation tool (name configurable per provider) | `config.LLMProvider.Escalation.Enabled` | Hand a hard turn off to that provider's own configured target; intercepted at the router level, transparent to the Orchestrator. See "LLM providers and escalation" above — each provider in the chain has its own target/tool name, and a chain can be more than one hop deep. |
 | MCP tools (e.g. `ha_*`) | `config.MCPConfig.Servers[].Enabled` | Home Assistant and other MCP-exposed device/service actions. |
 

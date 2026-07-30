@@ -107,27 +107,32 @@ first entry — see below.
 An `anthropic`-type provider can also opt into Claude's own server-executed
 tools via `anthropic_tools` (`web_search`, `web_fetch`, `code_execution` —
 all default to `false`). These run entirely on Anthropic's side, not
-through Miranda's own tool loop, so they're what let Claude answer
-something that needs the live internet (e.g. "какой сейчас курс
-биткоина") — none of Miranda's own tools (MCP/HA, `remember_this`, etc.)
-reach the open web. `web_search` is required for open-ended questions like
-that one: `web_fetch` alone can only read a URL the model was already
-given (by the user, or by a prior search) — it can't discover one itself,
-so enabling `web_fetch` without `web_search` leaves the model unable to
-answer anything it doesn't already have a URL for. Enabling
-`code_execution` alongside them also lets code running in Anthropic's
-sandbox call `web_search`/`web_fetch` itself as a helper (fetch a page,
-then parse or compute over it).
+through Miranda's own tool loop. `code_execution` has no self-hosted
+equivalent (yet — a sandboxed MCP service is planned separately) so it's
+still worth enabling here; **`web_search`/`web_fetch` are not** — prefer
+`tavily.web_search`/`tavily.web_fetch` (see **Web tools** below) instead,
+since those run identically on every provider in the chain rather than
+only on Claude, and enabling both here and there is a real conflict, not
+just redundancy: Anthropic requires unique tool names on one request, and
+Miranda's own tools are deliberately named `web_search`/`web_fetch` too.
+Enabling `code_execution` alongside Claude's own native `web_search`/
+`web_fetch` (if you do enable those instead of `tavily`'s) also lets code
+running in Anthropic's sandbox call them itself as a helper (fetch a page,
+then parse or compute over it) — Miranda's own tools have no equivalent
+sandbox-calls-tool wiring, since they're plain function-call tools, not
+Anthropic server tools.
 
 A `gemini`-type provider (`internal/llm/gemini`, on the official
 `google.golang.org/genai` SDK) is the native equivalent for Google's
 models — full function-calling support combined with Grounding with
 Google Search in one request, unlike routing Gemini through the
 `openai_compat` shim. Its own native tools live under `gemini_tools`
-(currently just `google_search`, same opt-in shape as `anthropic_tools`'s
-flags; `context_caching` exists as a config field but isn't implemented
-yet — `gemini.New` refuses to start if it's set to `true`, rather than
-silently ignoring it). Unlike Claude, there's no `code_execution` option
+(currently just `google_search`; `context_caching` exists as a config field
+but isn't implemented yet — `gemini.New` refuses to start if it's set to
+`true`, rather than silently ignoring it). **`google_search` is not
+recommended** — see the verified-broken note below; prefer
+`tavily.web_search`/`tavily.web_fetch` (**Web tools**) instead, same
+reasoning as `anthropic_tools.web_search` above. Unlike Claude, there's no `code_execution` option
 here: Gemini's code-execution tool only works on Vertex AI (GCP-project
 billing/auth), not the plain API-key-based Gemini Developer API this
 provider type targets — confirmed against the `google.golang.org/genai`
@@ -155,10 +160,16 @@ doc comments elsewhere might suggest. This is why `llm.ToolCall` and
 (opaque, base64 when binary) — `internal/llm/gemini` is the only current
 user, but the field is provider-agnostic so history storage doesn't
 special-case Gemini. Grounding with Google Search is wired and
-structurally correct (confirmed via the SDK's own types), but its free-tier
-quota is separate from and much tighter than plain generateContent calls —
-verify it works before relying on it, the same as the deploy-specific `tts`
-caveats below.
+structurally correct (confirmed via the SDK's own types), but confirmed
+**broken in practice on the free-tier Gemini Developer API**: its quota
+there is zero, not merely tighter than plain `generateContent` calls, so
+every request that triggers it fails with `RESOURCE_EXHAUSTED` — including
+the very first call of the day, on a key that's otherwise well under its
+normal quota. `internal/llm/gemini`'s key rotation can't route around this
+(the exhaustion isn't per-key, it's per-feature), so leave
+`gemini_tools.google_search` off and use `tavily.web_search`/
+`tavily.web_fetch` (**Web tools** below) instead — verified working against
+the real API (see that section).
 
 Each provider entry also carries its own `escalation` block (`enabled`,
 `tool_name`, `target_provider`, optional `description`) — not one global
@@ -173,9 +184,60 @@ Gemini tiers that explicitly name code execution as an escalation
 trigger — since neither Gemini tier has a working code-execution tool (see
 above), calling it out by name in the tool's own description is what makes
 the model reliably hand off for it, rather than leaving that to the
-generic "too complex" wording to somehow imply. The router walks a chain
-of any depth (capped at a small hop limit purely to catch a misconfigured
-cycle, not to limit a legitimate ladder).
+generic "too complex" wording to somehow imply. Both tiers' descriptions
+also explicitly say escalating is *not* needed just to search the web or
+read a page, now that `tavily.web_search`/`tavily.web_fetch` (**Web tools**
+below) are offered directly to every hop in the chain — without that line,
+a model that used to only reach live web info by escalating (back when
+that meant Claude's `anthropic_tools` or `gemini-strong`'s now-disabled
+`google_search`) has no way to know the calculus changed. The router walks
+a chain of any depth (capped at a small hop limit purely to catch a
+misconfigured cycle, not to limit a legitimate ladder).
+
+## Web tools
+
+`web_search` and `web_fetch` (`internal/tools`, backed by
+`internal/tavily` — the [Tavily](https://tavily.com) API) are Miranda's own
+tools for live web access, offered to every LLM provider identically
+through the ordinary custom-tool path (`Orchestrator.availableTools`/
+`executeTool`, same as `remember_this` or an MCP tool) rather than through
+any one provider's own native web tool. This is what replaced Gemini's
+`gemini_tools.google_search` as this project's way of giving a cheap/
+free-tier model live web access, after Grounding with Google Search turned
+out to have a zero quota on the free tier (see above) — a self-hosted
+implementation sidesteps that per-provider quota entirely and works the
+same way no matter which model in the chain handles the turn, which also
+means it's cheaper than paying for Claude's native `anthropic_tools`
+equivalents on every escalated turn just to look something up.
+
+Configure under `tavily:` — both default to `false` (opt-in, needs a real
+API key):
+
+```yaml
+tavily:
+  api_key_env: "TAVILY_API_KEY" # from https://app.tavily.com
+  web_search:
+    enabled: true
+    max_results: 5 # bounds how many results are spent into the model's context per search
+  web_fetch:
+    enabled: true
+```
+
+`web_search` calls Tavily's `/search` endpoint and returns each result's
+title, URL, and a content snippet; `web_fetch` calls Tavily's `/extract`
+endpoint (reusing Tavily rather than Miranda doing its own HTTP GET +
+HTML-to-text extraction, so both tools share one dependency, one API key,
+and one failure mode) to fetch a specific URL's readable text — typically
+one the user gave directly, or one from a prior `web_search` result, since
+`web_fetch` alone can't discover a URL itself. Manually verified against
+the real Tavily API (a live free-tier key): both endpoints return the
+expected result shape end to end.
+
+Both tool names (`web_search`, `web_fetch`) are shared with
+`anthropic_tools`'/`gemini_tools`' own native equivalents on purpose (see
+above) — don't enable a provider's native web tool alongside these on the
+same provider, since a duplicate tool name is a hard conflict on Anthropic
+specifically, not just wasted redundancy.
 
 ## TTS
 

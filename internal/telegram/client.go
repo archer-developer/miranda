@@ -9,15 +9,15 @@
 package telegram
 
 import (
-	"bytes"
 	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
-	"io"
 	"net/http"
 	"time"
+
+	"github.com/archer-developer/miranda/internal/httpx"
 )
 
 // defaultAPIBase is the real Telegram Bot API origin. Overridable per
@@ -78,29 +78,15 @@ func (c *Client) SetWebhook(ctx context.Context, url, secretToken string) error 
 
 // call POSTs a JSON payload to a Bot API method and decodes its "result"
 // into out (if non-nil), treating both a non-2xx HTTP status and the API's
-// own {"ok": false, ...} envelope as errors.
+// own {"ok": false, ...} envelope as errors. The request/response transport
+// plumbing (including a response size cap) is shared with internal/tavily's
+// client via internal/httpx.PostJSON — only the response envelope
+// ({"ok","description","result"}) is specific to this client.
 func (c *Client) call(ctx context.Context, method string, payload, out any) error {
-	body, err := json.Marshal(payload)
-	if err != nil {
-		return fmt.Errorf("telegram: marshal %s request: %w", method, err)
-	}
-
 	url := fmt.Sprintf("%s/bot%s/%s", c.apiBase, c.token, method)
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
+	status, respBody, err := httpx.PostJSON(ctx, c.http, url, nil, payload, httpx.DefaultMaxResponseBytes)
 	if err != nil {
-		return fmt.Errorf("telegram: build %s request: %w", method, err)
-	}
-	req.Header.Set("Content-Type", "application/json")
-
-	resp, err := c.http.Do(req)
-	if err != nil {
-		return fmt.Errorf("telegram: call %s: %w", method, err)
-	}
-	defer resp.Body.Close()
-
-	respBody, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return fmt.Errorf("telegram: read %s response: %w", method, err)
+		return fmt.Errorf("telegram: %s: %w", method, err)
 	}
 
 	var apiResp struct {
@@ -109,7 +95,7 @@ func (c *Client) call(ctx context.Context, method string, payload, out any) erro
 		Result      json.RawMessage `json:"result"`
 	}
 	if err := json.Unmarshal(respBody, &apiResp); err != nil {
-		return fmt.Errorf("telegram: decode %s response (status %d): %w", method, resp.StatusCode, err)
+		return fmt.Errorf("telegram: decode %s response (status %d): %w", method, status, err)
 	}
 	if !apiResp.OK {
 		return fmt.Errorf("telegram: %s failed: %s", method, apiResp.Description)

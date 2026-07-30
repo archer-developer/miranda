@@ -241,17 +241,29 @@ func toAnthropicTools(tools []llm.ToolDef) []anthropic.ToolUnionParam {
 // (config.AnthropicToolsConfig) — unlike everything in toAnthropicTools,
 // the model's use of these never round-trips through the Orchestrator's
 // executeTool; Anthropic resolves them server-side within the same
-// streamed response. This is what lets Claude answer something that needs
-// the live internet (e.g. a current price), which none of Miranda's own
-// tools reach.
+// streamed response. WebSearch/WebFetch are deliberately left false in
+// config/llm.yaml in favor of internal/tools' own self-hosted web_search/
+// web_fetch (Tavily-backed) — those DO reach the open web through
+// Miranda's ordinary executeTool path, so this is no longer the only way
+// Claude (or any other provider) answers something needing live internet
+// data; enabling both here and there at once is a real conflict (Anthropic
+// requires unique tool names on one request), not just redundancy — see
+// internal/tools' package doc comment.
 func (p *Provider) nativeTools() []anthropic.ToolUnionParam {
 	var out []anthropic.ToolUnionParam
 
 	// AllowedCallers defaults to "direct" (the model calling the tool
 	// itself). Adding the code execution caller here is what lets code
-	// running in Anthropic's sandbox invoke web search/fetch itself as a
-	// helper — e.g. fetch a page, then parse or compute over it in code —
-	// instead of only being callable by the model directly.
+	// running in Anthropic's sandbox invoke Claude's OWN native web
+	// search/fetch tools (above) as a helper in one native round trip —
+	// e.g. fetch a page, then parse or compute over it in code — instead
+	// of only being callable by the model directly. It does NOT extend to
+	// internal/tools' web_search/web_fetch: those are plain custom
+	// function-call tools with no AllowedCallers equivalent, so with
+	// WebSearch/WebFetch both false (the shipped config), this caller list
+	// is built but never actually attached to anything below — the
+	// sandbox-calls-web-tool pattern only exists when Claude's own native
+	// tools are the ones enabled.
 	callers := []string{"direct"}
 	if p.tools.CodeExecution {
 		callers = append(callers, codeExecutionCaller)

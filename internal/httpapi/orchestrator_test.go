@@ -22,6 +22,7 @@ import (
 	"github.com/archer-developer/miranda/internal/mcp/mcptest"
 	"github.com/archer-developer/miranda/internal/memory"
 	"github.com/archer-developer/miranda/internal/telegram"
+	"github.com/archer-developer/miranda/internal/tools"
 	"github.com/archer-developer/miranda/internal/tts"
 	"github.com/archer-developer/miranda/internal/users"
 )
@@ -231,6 +232,47 @@ func TestOrchestrator_CallsMCPToolAndReturnsResultToModel(t *testing.T) {
 	last := provider.Requests[1].Messages
 	require.Equal(t, llm.RoleTool, last[len(last)-1].Role)
 	require.Contains(t, last[len(last)-1].Content, "on")
+}
+
+// fakeWebTool is a minimal tools.Tool stub used only to exercise
+// availableTools' MCP/built-in name-collision handling below, without
+// needing a real tavily.Client.
+type fakeWebTool struct {
+	name string
+}
+
+func (f *fakeWebTool) Def() llm.ToolDef { return llm.ToolDef{Name: f.name, Description: "fake"} }
+func (f *fakeWebTool) Call(ctx context.Context, argumentsJSON string) (string, error) {
+	return "fake result", nil
+}
+
+func TestOrchestrator_MCPToolCollidingWithWebToolNameIsDroppedNotShadowed(t *testing.T) {
+	// A server named "web" exposing a tool "search" gets prefixed
+	// "web_search" by internal/mcp.Manager — the exact same name
+	// internal/tools.WebSearchToolName uses (see agent_loop.go's
+	// availableTools doc comment).
+	collidingMCP := mcptest.New("web", llm.ToolDef{Name: "search"}).WithResult("search", "should never be called")
+	provider := llmtest.New("local", llmtest.Response{Text: "ok"})
+	o, _, _ := newTestOrchestrator(t, provider, collidingMCP)
+	o.SetWebTools([]tools.Tool{&fakeWebTool{name: "web_search"}})
+
+	defs := o.availableTools(context.Background())
+
+	var names []string
+	for _, d := range defs {
+		names = append(names, d.Name)
+	}
+	require.Contains(t, names, "web_search")
+	// Exactly one "web_search" ToolDef must reach the provider — sending
+	// two with the same name is a hard error on Anthropic specifically —
+	// and it must be the built-in one, not the MCP server's.
+	count := 0
+	for _, n := range names {
+		if n == "web_search" {
+			count++
+		}
+	}
+	require.Equal(t, 1, count)
 }
 
 func TestOrchestrator_EscalationIsTransparentToOrchestrator(t *testing.T) {
