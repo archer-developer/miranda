@@ -135,10 +135,10 @@ mcp:
       url: "http://homeassistant.local:8123/api/mcp"
       token_env: "HA_MCP_TOKEN" # Home Assistant Long-Lived Access Token
       enabled: true
-    # - name: noolite
-    #   url: "http://localhost:8090"
-    #   token_env: "NOOLITE_MCP_TOKEN"
-    #   enabled: false
+    - name: code_exec_sandbox
+      url: "http://127.0.0.1:8788/mcp"
+      token_env: "SANDBOX_MCP_TOKEN"
+      enabled: true
 
 tts:
   # yandex_station_text (Yandex Station's own built-in voice — the default,
