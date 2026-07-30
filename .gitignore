@@ -1,7 +1,6 @@
 /miranda
 /dist/
-/data/*.db
-/data/*.db-*
+/data/*
 /data/storage/*
 !/data/storage/.gitkeep
 /data/memory/*.md
