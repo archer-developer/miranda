@@ -305,6 +305,51 @@ func TestOrchestrator_EscalationIsTransparentToOrchestrator(t *testing.T) {
 	require.Equal(t, "claude", resp.ProviderUsed)
 }
 
+func TestOrchestrator_EscalatedProviderStaysActiveAcrossToolCall(t *testing.T) {
+	// Reproduces the reported bug: gemini-lite escalates to gemini-strong,
+	// gemini-strong calls an ordinary (non-escalation) tool, and the
+	// follow-up iteration that feeds the tool result back must still be
+	// answered by gemini-strong — not silently downgraded back to
+	// gemini-lite just because a tool call happened in between. lite only
+	// has one scripted response, so FakeProvider panics if runAgentLoop ever
+	// calls it a second time.
+	ha := mcptest.New("ha", llm.ToolDef{Name: "get_state"}).WithResult("get_state", "light.living_room: on")
+
+	lite := llmtest.New("gemini-lite", llmtest.Response{
+		ToolCall: &llm.ToolCall{ID: "call-1", Name: "escalate_to_strong", Arguments: `{"reason":"hard"}`},
+	})
+	strong := llmtest.New("gemini-strong",
+		llmtest.Response{ToolCall: &llm.ToolCall{ID: "call-2", Name: "ha_get_state", Arguments: `{"entity_id":"light.living_room"}`}},
+		llmtest.Response{Text: "Свет в зале включён."},
+	)
+
+	escalations := map[string]config.EscalationConfig{
+		"gemini-lite": {Enabled: true, ToolName: "escalate_to_strong", TargetProvider: "gemini-strong"},
+	}
+	r, err := router.New([]llm.Provider{lite, strong}, escalations, "")
+	require.NoError(t, err)
+
+	h, err := history.Open(filepath.Join(t.TempDir(), "miranda.db"))
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = h.Close() })
+	mem, err := memory.New(t.TempDir())
+	require.NoError(t, err)
+
+	o := NewOrchestrator(r, mcp.NewManager(nil, ha), h, mem, nil, hub.New(100), nil,
+		config.AgentConfig{},
+		config.MemoryConfig{ExplicitTool: true},
+		config.TTSConfig{},
+		100, "debug")
+
+	resp, err := o.Handle(context.Background(), InputRequest{Source: "cli", UserID: "alex", Text: "свет в зале горит?"})
+	require.NoError(t, err)
+	require.Equal(t, "Свет в зале включён.", resp.Reply)
+	require.Equal(t, "gemini-strong", resp.ProviderUsed)
+
+	require.Len(t, lite.Requests, 1)
+	require.Len(t, strong.Requests, 2)
+}
+
 func TestOrchestrator_SearchHistoryToolFindsPastConversation(t *testing.T) {
 	provider := llmtest.New("local",
 		llmtest.Response{Text: "Записал."},

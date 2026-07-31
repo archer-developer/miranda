@@ -313,7 +313,14 @@ func (o *Orchestrator) availableTools(ctx context.Context) []llm.ToolDef {
 
 // runAgentLoop drives the model until it produces a final text-only reply:
 // each iteration streams a response, executes any requested tool calls, and
-// feeds their results back in for the next iteration.
+// feeds their results back in for the next iteration. providerUsed is
+// threaded through every iteration via streamOneTurn/router.ChatPinned so
+// that once a turn escalates (e.g. gemini-lite hands off to gemini-strong),
+// every later iteration of THIS loop stays pinned to whichever provider
+// answered last — a tool call the escalated model requested must be
+// answered by that same model once the tool result comes back, not silently
+// downgraded back to the chain's default provider on the very next
+// iteration just because the tool call happened in between.
 func (o *Orchestrator) runAgentLoop(ctx context.Context, userID, conversationID, source string, messages []llm.Message, tools []llm.ToolDef, control *turnControl) (string, string, error) {
 	var providerUsed string
 
@@ -339,9 +346,13 @@ func (o *Orchestrator) runAgentLoop(ctx context.Context, userID, conversationID,
 	return "", "", fmt.Errorf("orchestrator: exceeded %d tool-call iterations without a final reply", maxToolIterations)
 }
 
-// streamOneTurn consumes one router.Chat stream: text deltas are pushed
-// through a tts.Accumulator so complete sentences get spoken as soon as
-// they're available, and tool calls are collected for the caller to execute.
+// streamOneTurn consumes one router stream: text deltas are pushed through a
+// tts.Accumulator so complete sentences get spoken as soon as they're
+// available, and tool calls are collected for the caller to execute.
+// providerUsed is read before the call to pin the request to whichever
+// provider answered the previous iteration of this same agent loop (see
+// runAgentLoop and router.ChatPinned) — "" on the loop's first iteration,
+// which is a no-op and behaves exactly like an unpinned router.Chat.
 //
 // Only ha_assist gets its streamed text spoken live here — that's the one
 // channel where the model's plain reply text is itself the thing to say out
@@ -358,7 +369,7 @@ func (o *Orchestrator) runAgentLoop(ctx context.Context, userID, conversationID,
 // same text can end up spoken twice. Passing the text as the tool's own
 // argument removes the guess entirely.
 func (o *Orchestrator) streamOneTurn(ctx context.Context, source string, messages []llm.Message, tools []llm.ToolDef, providerUsed *string) (string, []llm.ToolCall, error) {
-	stream, err := o.router.Chat(ctx, llm.ChatRequest{Messages: messages, Tools: tools}, func(name string) { *providerUsed = name })
+	stream, err := o.router.ChatPinned(ctx, llm.ChatRequest{Messages: messages, Tools: tools}, *providerUsed, func(name string) { *providerUsed = name })
 	if err != nil {
 		return "", nil, fmt.Errorf("orchestrator: chat: %w", err)
 	}

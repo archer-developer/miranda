@@ -148,7 +148,34 @@ func requestFor(req llm.ChatRequest, esc config.EscalationConfig) llm.ChatReques
 // the caller — used for the API's provider_used field and for log events
 // published to the hub.
 func (r *Router) Chat(ctx context.Context, req llm.ChatRequest, onProviderUsed func(name string)) (<-chan llm.StreamChunk, error) {
-	stream, providerName, err := r.startChat(ctx, req)
+	return r.chat(ctx, req, "", onProviderUsed)
+}
+
+// ChatPinned is like Chat, but starts the fallback chain at pinnedProvider
+// instead of the front of the configured order (a no-op, identical to Chat,
+// when pinnedProvider is "" or names a provider that isn't configured) — for
+// continuing an agent loop after an earlier turn escalated mid-conversation
+// (see internal/httpapi.runAgentLoop/streamOneTurn). A tool call the
+// escalated model itself requested has to be answered by that same model on
+// the next iteration once the tool result comes back — restarting from the
+// chain's default provider would silently downgrade mid-turn, discarding the
+// escalation the moment a tool was involved. pinnedProvider is only moved to
+// the front of the reliability-fallback order, not treated as the sole
+// candidate: if it fails to even start, the rest of the chain is still tried,
+// same as Chat's own default-order fallback.
+func (r *Router) ChatPinned(ctx context.Context, req llm.ChatRequest, pinnedProvider string, onProviderUsed func(name string)) (<-chan llm.StreamChunk, error) {
+	return r.chat(ctx, req, pinnedProvider, onProviderUsed)
+}
+
+func (r *Router) chat(ctx context.Context, req llm.ChatRequest, pinnedProvider string, onProviderUsed func(name string)) (<-chan llm.StreamChunk, error) {
+	order := r.order
+	if pinnedProvider != "" {
+		if _, ok := r.providers[pinnedProvider]; ok {
+			order = moveToFront(r.order, pinnedProvider)
+		}
+	}
+
+	stream, providerName, err := r.startChat(ctx, req, order)
 	if err != nil {
 		return nil, err
 	}
@@ -174,10 +201,12 @@ func newOnceReporter(onProviderUsed func(string)) func(string) {
 // startChat tries each provider in order until one accepts the request,
 // implementing reliability fallback for connection/auth failures. Each
 // candidate sees its own configured escalation tool appended to req.Tools
-// (see requestFor), not a global one.
-func (r *Router) startChat(ctx context.Context, req llm.ChatRequest) (<-chan llm.StreamChunk, string, error) {
+// (see requestFor), not a global one. order is r.order by default, or
+// r.order re-rooted at a pinned provider (see ChatPinned) — callers never
+// pass an arbitrary order otherwise.
+func (r *Router) startChat(ctx context.Context, req llm.ChatRequest, order []string) (<-chan llm.StreamChunk, string, error) {
 	var lastErr error
-	for _, name := range r.order {
+	for _, name := range order {
 		stream, err := r.providers[name].Chat(ctx, requestFor(req, r.escalations[name]))
 		if err != nil {
 			lastErr = fmt.Errorf("%s: %w", name, err)

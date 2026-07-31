@@ -366,6 +366,39 @@ func TestRouter_EscalationTargetNotConfiguredReturnsErrChunk(t *testing.T) {
 	require.Error(t, gotErr)
 }
 
+func TestRouter_ChatPinnedStartsAtPinnedProviderNotDefaultOrder(t *testing.T) {
+	// Models continuing an agent loop after an earlier iteration escalated:
+	// once the router reports "strong" as the provider that answered, a
+	// later ChatPinned call in the same turn must go straight to "strong"
+	// again, never back to "lite" — lite's single scripted response would
+	// panic FakeProvider if it were called a second time.
+	lite := llmtest.New("lite", llmtest.Response{Text: "should never be called again"})
+	strong := llmtest.New("strong", llmtest.Response{Text: "still the strong model"})
+	r, err := New([]llm.Provider{lite, strong}, noEscalations(), "")
+	require.NoError(t, err)
+
+	var used string
+	ch, err := r.ChatPinned(context.Background(), llm.ChatRequest{}, "strong", func(name string) { used = name })
+	require.NoError(t, err)
+	require.Equal(t, "still the strong model", drainText(t, ch))
+	require.Equal(t, "strong", used)
+	require.Len(t, lite.Requests, 0)
+	require.Len(t, strong.Requests, 1)
+}
+
+func TestRouter_ChatPinnedEmptyProviderBehavesLikeChat(t *testing.T) {
+	a := llmtest.New("a", llmtest.Response{Text: "from a"})
+	b := llmtest.New("b", llmtest.Response{Text: "from b"})
+	r, err := New([]llm.Provider{a, b}, noEscalations(), "")
+	require.NoError(t, err)
+
+	var used string
+	ch, err := r.ChatPinned(context.Background(), llm.ChatRequest{}, "", func(name string) { used = name })
+	require.NoError(t, err)
+	require.Equal(t, "from a", drainText(t, ch))
+	require.Equal(t, "a", used)
+}
+
 func TestRouter_TracesRequestAndResponseWhenTracerSet(t *testing.T) {
 	provider := llmtest.New("local", llmtest.Response{Text: "hi"})
 	r, err := New([]llm.Provider{provider}, noEscalations(), "")
