@@ -9,6 +9,7 @@ import (
 	"github.com/robfig/cron/v3"
 
 	"github.com/archer-developer/miranda/internal/hub"
+	"github.com/archer-developer/miranda/internal/schedule"
 	"github.com/archer-developer/miranda/internal/users"
 )
 
@@ -26,6 +27,12 @@ import (
 // firing or silently failing would leave no trace in logs/miranda.log at
 // all. logger may be nil (falls back to slog.Default()), matching
 // cmd/miranda's other Open/New helpers.
+//
+// Every firing also gets a schedule.TaskRun row via RecordRun — status
+// StatusSent or StatusError — before either branch below runs, so a
+// recurring task's history survives across every occurrence and a one-off
+// task's single firing is preserved even though DeleteFired removes its
+// scheduled_tasks row right after.
 func (o *Orchestrator) RunScheduledTasks(ctx context.Context, logger *slog.Logger) error {
 	if o.schedule == nil {
 		return nil
@@ -50,6 +57,16 @@ func (o *Orchestrator) RunScheduledTasks(ctx context.Context, logger *slog.Logge
 			Text:   task.Prompt,
 		})
 		cancel()
+
+		runStatus, errMsg := schedule.StatusSent, ""
+		if err != nil {
+			runStatus, errMsg = schedule.StatusError, err.Error()
+		}
+		if recordErr := o.schedule.RecordRun(ctx, task, runStatus, errMsg); recordErr != nil {
+			logger.Error("scheduled task history record failed", "task_id", task.ID, "error", recordErr)
+			o.hub.Publish(hub.Event{Source: "error", Message: fmt.Sprintf("record scheduled task history %s: %v", task.ID, recordErr)})
+		}
+
 		if err != nil {
 			logger.Error("scheduled task fire failed", "task_id", task.ID, "user_id", task.UserID, "error", err)
 			o.hub.Publish(hub.Event{Source: "error", Message: fmt.Sprintf("run scheduled task %s: %v", task.ID, err)})

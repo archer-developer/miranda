@@ -186,6 +186,37 @@ func TestDeleteFired_RemovesRow(t *testing.T) {
 	require.Empty(t, tasks)
 }
 
+func TestRecordRunAndHistoryForUser_RoundTripsScopedPerUserMostRecentFirst(t *testing.T) {
+	ctx := context.Background()
+	s := openTestStore(t)
+
+	next := time.Now().Add(time.Hour).UTC().Truncate(time.Second)
+	id, err := s.Create(ctx, Task{UserID: "alex", Prompt: "напомни выпить пива", RunAt: &next, NextRunAt: next})
+	require.NoError(t, err)
+	task, err := s.ListForUser(ctx, "alex")
+	require.NoError(t, err)
+	require.Len(t, task, 1)
+
+	require.NoError(t, s.RecordRun(ctx, task[0], StatusSent, ""))
+	require.NoError(t, s.RecordRun(ctx, task[0], StatusError, "boom"))
+	require.NoError(t, s.RecordRun(ctx, Task{UserID: "anna", Prompt: "anna's task", NextRunAt: next}, StatusSent, ""))
+
+	history, err := s.HistoryForUser(ctx, "alex")
+	require.NoError(t, err)
+	require.Len(t, history, 2)
+	// Most recent first.
+	require.Equal(t, StatusError, history[0].Status)
+	require.Equal(t, "boom", history[0].Error)
+	require.Equal(t, id, history[0].TaskID)
+	require.Equal(t, "напомни выпить пива", history[0].Prompt)
+	require.Equal(t, StatusSent, history[1].Status)
+	require.Empty(t, history[1].Error)
+
+	annaHistory, err := s.HistoryForUser(ctx, "anna")
+	require.NoError(t, err)
+	require.Len(t, annaHistory, 1)
+}
+
 func TestMigrate_IsIdempotentAcrossReopens(t *testing.T) {
 	ctx := context.Background()
 	path := filepath.Join(t.TempDir(), "schedule.db")

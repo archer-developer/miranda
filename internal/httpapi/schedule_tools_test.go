@@ -228,7 +228,13 @@ func TestOrchestrator_RunScheduledTasks_FiresDueTaskThroughHandleAndDeletesOneOf
 	tasks, err := s.ListForUser(context.Background(), "alex")
 	require.NoError(t, err)
 	require.Empty(t, tasks, "one-off task must be removed after firing")
-	_ = id
+
+	history, err := s.HistoryForUser(context.Background(), "alex")
+	require.NoError(t, err)
+	require.Len(t, history, 1, "the fired one-off task must survive in history even though its scheduled_tasks row is gone")
+	require.Equal(t, id, history[0].TaskID)
+	require.Equal(t, schedule.StatusSent, history[0].Status)
+	require.Empty(t, history[0].Error)
 }
 
 func TestOrchestrator_RunScheduledTasks_LogsEachFiring(t *testing.T) {
@@ -283,6 +289,12 @@ func TestOrchestrator_RunScheduledTasks_LogsFailureWhenHandleErrors(t *testing.T
 	tasks, err := s.ListForUser(context.Background(), "alex")
 	require.NoError(t, err)
 	require.Len(t, tasks, 1)
+
+	history, err := s.HistoryForUser(context.Background(), "alex")
+	require.NoError(t, err)
+	require.Len(t, history, 1)
+	require.Equal(t, schedule.StatusError, history[0].Status)
+	require.Contains(t, history[0].Error, "boom")
 }
 
 func TestOrchestrator_RunScheduledTasks_ReschedulesRecurringTask(t *testing.T) {
@@ -306,4 +318,10 @@ func TestOrchestrator_RunScheduledTasks_ReschedulesRecurringTask(t *testing.T) {
 	require.Equal(t, id, tasks[0].ID)
 	require.True(t, tasks[0].NextRunAt.After(due), "next_run_at must have advanced")
 	require.NotNil(t, tasks[0].LastFiredAt)
+
+	history, err := s.HistoryForUser(context.Background(), "alex")
+	require.NoError(t, err)
+	require.Len(t, history, 1, "a recurring task's firing must also be recorded even though its scheduled_tasks row stays")
+	require.Equal(t, id, history[0].TaskID)
+	require.Equal(t, schedule.StatusSent, history[0].Status)
 }

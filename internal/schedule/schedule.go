@@ -27,6 +27,15 @@ import (
 // for the existence of another user's task id (see Delete).
 var ErrNotFound = errors.New("schedule: task not found")
 
+// Status values recorded by RecordRun. StatusError is used whenever
+// Orchestrator.Handle returned an error for that firing; StatusSent
+// otherwise (the model ran to completion — regardless of which, if any,
+// output tool it chose to call — see RunScheduledTasks).
+const (
+	StatusSent  = "sent"
+	StatusError = "error"
+)
+
 // Task is one scheduled task. Exactly one of CronExpr/RunAt is set: RunAt
 // for a one-off task, CronExpr (a 5-field robfig/cron/v3 standard
 // expression) for a recurring one.
@@ -39,6 +48,24 @@ type Task struct {
 	NextRunAt   time.Time
 	CreatedAt   time.Time
 	LastFiredAt *time.Time
+}
+
+// TaskRun is one historical record of a scheduled task firing, written by
+// RecordRun into scheduled_task_history — a table separate from
+// scheduled_tasks so that a recurring task's many firings, and a one-off
+// task's single firing (right before its scheduled_tasks row is removed via
+// DeleteFired), both leave a permanent, queryable trace of what ran and
+// whether it succeeded.
+type TaskRun struct {
+	ID       string
+	TaskID   string
+	UserID   string
+	Prompt   string
+	CronExpr string
+	RunAt    *time.Time
+	FiredAt  time.Time
+	Status   string
+	Error    string
 }
 
 // Store is a SQLite-backed scheduled-task database.
@@ -92,6 +119,19 @@ func (s *Store) migrate(ctx context.Context) error {
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_scheduled_tasks_next_run ON scheduled_tasks(next_run_at)`,
 		`CREATE INDEX IF NOT EXISTS idx_scheduled_tasks_user ON scheduled_tasks(user_id)`,
+		`CREATE TABLE IF NOT EXISTS scheduled_task_history (
+			id TEXT PRIMARY KEY,
+			task_id TEXT NOT NULL,
+			user_id TEXT NOT NULL,
+			prompt TEXT NOT NULL,
+			cron_expr TEXT,
+			run_at DATETIME,
+			fired_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+			status TEXT NOT NULL,
+			error TEXT
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_scheduled_task_history_user ON scheduled_task_history(user_id)`,
+		`CREATE INDEX IF NOT EXISTS idx_scheduled_task_history_task ON scheduled_task_history(task_id)`,
 	}
 	for _, stmt := range stmts {
 		if _, err := s.db.ExecContext(ctx, stmt); err != nil {
@@ -183,6 +223,58 @@ func (s *Store) Reschedule(ctx context.Context, id string, nextRunAt time.Time) 
 		return fmt.Errorf("schedule: reschedule task: %w", err)
 	}
 	return nil
+}
+
+// RecordRun writes one history row for a firing of task — called by
+// RunScheduledTasks right after Orchestrator.Handle returns, whether it
+// succeeded (status StatusSent) or failed (StatusError, with errMsg from
+// Handle's returned error). This is what makes "which scheduled tasks
+// actually ran" answerable after the fact: a recurring task's
+// scheduled_tasks row survives and keeps getting reused, and a one-off
+// task's row is removed entirely by DeleteFired once it succeeds, so
+// scheduled_task_history is the only place either kind of firing is kept
+// permanently.
+func (s *Store) RecordRun(ctx context.Context, task Task, status, errMsg string) error {
+	id := uuid.NewString()
+	if _, err := s.db.ExecContext(ctx,
+		`INSERT INTO scheduled_task_history (id, task_id, user_id, prompt, cron_expr, run_at, status, error) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+		id, task.ID, task.UserID, task.Prompt, nullString(task.CronExpr), nullTime(task.RunAt), status, nullString(errMsg),
+	); err != nil {
+		return fmt.Errorf("schedule: record task run: %w", err)
+	}
+	return nil
+}
+
+// HistoryForUser returns userID's recorded task firings, most recent first.
+// fired_at is only second-precision (SQLite's CURRENT_TIMESTAMP), so two
+// runs recorded within the same second would otherwise tie; rowid — which
+// SQLite assigns in insertion order even for a TEXT PRIMARY KEY table like
+// this one — breaks the tie deterministically.
+func (s *Store) HistoryForUser(ctx context.Context, userID string) ([]TaskRun, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT id, task_id, user_id, prompt, cron_expr, run_at, fired_at, status, error
+		 FROM scheduled_task_history WHERE user_id = ? ORDER BY fired_at DESC, rowid DESC`, userID)
+	if err != nil {
+		return nil, fmt.Errorf("schedule: list task history: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	var out []TaskRun
+	for rows.Next() {
+		var r TaskRun
+		var cronExpr, errMsg sql.NullString
+		var runAt sql.NullTime
+		if err := rows.Scan(&r.ID, &r.TaskID, &r.UserID, &r.Prompt, &cronExpr, &runAt, &r.FiredAt, &r.Status, &errMsg); err != nil {
+			return nil, fmt.Errorf("schedule: scan task run: %w", err)
+		}
+		r.CronExpr = cronExpr.String
+		r.Error = errMsg.String
+		if runAt.Valid {
+			r.RunAt = &runAt.Time
+		}
+		out = append(out, r)
+	}
+	return out, rows.Err()
 }
 
 func scanTasks(rows *sql.Rows) ([]Task, error) {

@@ -217,6 +217,19 @@ config to validate ahead of time, every one is model/user-supplied per task.
 are — `schedule.Store.Delete` returns the same `ErrNotFound` whether an id
 doesn't exist or belongs to someone else.
 
+Every firing — success or failure, one-off or recurring — is also recorded
+as a `schedule.TaskRun` row (`Store.RecordRun`, table
+`scheduled_task_history`, a separate table from `scheduled_tasks`) with
+`Status` `StatusSent` or `StatusError` (`err.Error()` from `Handle` when it
+failed). This is what keeps a firing auditable after the fact even though
+the two branches above otherwise erase all trace of it from
+`scheduled_tasks` itself: a one-off task's row is deleted outright, and a
+recurring task's row is overwritten in place on every `Reschedule`. There's
+no tool exposing this history to the model (only `Store.HistoryForUser`,
+queried directly against the DB) — deliberately kept out of the agent loop
+for now, same "not every persisted thing needs a tool" reasoning as
+`internal/webui`'s dialog browser being read-only.
+
 `RunScheduledTasks` takes a `*slog.Logger` and logs every firing (fired,
 rescheduled, or failed, with `task_id`/`user_id`) through it rather than
 `o.hub` — unlike `o.hub.Publish(Event{Source: "error", ...})`, which nothing
