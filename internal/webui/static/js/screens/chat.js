@@ -55,17 +55,93 @@ function formatTime(iso) {
   }
 }
 
+function formatFileSize(bytes) {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${Math.round(bytes / 1024)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+/**
+ * Strip file-content blocks that processAttachments (internal/httpapi/attachments.go)
+ * injects into the stored user message text, and return a list of attachment
+ * descriptors to render as compact chips instead of raw content.
+ *
+ * Three patterns are produced server-side:
+ *   text files  →  \n\n<file:NAME>\nCONTENT\n</file>
+ *   images      →  \n\n[Изображение: "NAME" (MIME)]
+ *   binary blobs→  \n\nФайл "NAME" (MIME, SIZE байт) загружен в sandbox … программно.
+ * A fourth pattern appears when the file_id has expired or is invalid:
+ *   missing     →  \n\n[Файл "NAME" не найден — …]
+ */
+function extractFileAttachments(text) {
+  const chips = [];
+  let clean = text;
+
+  clean = clean.replace(/\n\n<file:([^>]+)>[\s\S]*?<\/file>/g, (_, filename) => {
+    chips.push({ filename });
+    return "";
+  });
+
+  clean = clean.replace(/\n\n\[Изображение: "([^"]+)" \([^)]+\)\]/g, (_, filename) => {
+    chips.push({ filename });
+    return "";
+  });
+
+  clean = clean.replace(
+    /\n\nФайл "([^"]+)" \([^)]*,\s*(\d+) байт\) загружен в sandbox[\s\S]*?программно\./g,
+    (_, filename, size) => {
+      chips.push({ filename, size: parseInt(size, 10) });
+      return "";
+    },
+  );
+
+  clean = clean.replace(/\n\n\[Файл "[^"]+" не найден[^\]]*\]/g, "");
+
+  return { displayText: clean.trim(), chips };
+}
+
+/** A compact file chip shown inside a user bubble in place of the raw content. */
+function attachmentChip(filename, size) {
+  const el = document.createElement("div");
+  el.className =
+    "mb-1 flex items-center gap-1.5 rounded-lg border border-white/20 bg-white/10 px-2.5 py-1 text-xs text-white/75";
+  // icon() returns our own trusted SVG — safe to set via innerHTML.
+  el.innerHTML = icon("paperclip", "h-3 w-3 shrink-0 opacity-60");
+  const nameSpan = document.createElement("span");
+  nameSpan.className = "max-w-[200px] truncate";
+  nameSpan.textContent = filename;
+  el.appendChild(nameSpan);
+  if (size != null) {
+    const sizeSpan = document.createElement("span");
+    sizeSpan.className = "shrink-0 opacity-60";
+    sizeSpan.textContent = `· ${formatFileSize(size)}`;
+    el.appendChild(sizeSpan);
+  }
+  return el;
+}
+
 function bubble(role, text, timeIso) {
   const wrap = document.createElement("div");
   wrap.className = `flex flex-col ${role === "user" ? "items-end" : "items-start"}`;
 
-  const b = document.createElement("div");
-  b.className =
-    role === "user"
-      ? "max-w-[85%] whitespace-pre-wrap rounded-2xl rounded-br-md bg-(--color-accent) px-4 py-2.5 text-sm leading-relaxed text-white sm:max-w-[75%]"
-      : "max-w-[85%] whitespace-pre-wrap rounded-2xl rounded-bl-md border border-(--color-border) bg-(--color-surface)/70 px-4 py-2.5 text-sm leading-relaxed text-(--color-text) sm:max-w-[75%]";
-  b.textContent = text;
-  wrap.appendChild(b);
+  let displayText = text;
+  if (role === "user") {
+    const { displayText: dt, chips } = extractFileAttachments(text);
+    displayText = dt;
+    for (const { filename, size } of chips) {
+      wrap.appendChild(attachmentChip(filename, size));
+    }
+  }
+
+  if (displayText) {
+    const b = document.createElement("div");
+    b.className =
+      role === "user"
+        ? "max-w-[85%] whitespace-pre-wrap rounded-2xl rounded-br-md bg-(--color-accent) px-4 py-2.5 text-sm leading-relaxed text-white sm:max-w-[75%]"
+        : "max-w-[85%] whitespace-pre-wrap rounded-2xl rounded-bl-md border border-(--color-border) bg-(--color-surface)/70 px-4 py-2.5 text-sm leading-relaxed text-(--color-text) sm:max-w-[75%]";
+    b.textContent = displayText;
+    wrap.appendChild(b);
+  }
 
   if (timeIso) {
     const time = document.createElement("span");
