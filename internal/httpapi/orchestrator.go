@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/archer-developer/miranda/internal/attachments"
 	"github.com/archer-developer/miranda/internal/config"
 	"github.com/archer-developer/miranda/internal/history"
 	"github.com/archer-developer/miranda/internal/hub"
@@ -73,6 +74,17 @@ func ReservedToolNames() []string {
 	}
 }
 
+// Attachment describes one file already uploaded via POST /api/upload and
+// attached to this message. The file's bytes are looked up in the
+// Orchestrator's attachments.Store by FileID; only the metadata is carried
+// in the InputRequest itself to keep the JSON payload small.
+type Attachment struct {
+	FileID    string `json:"file_id"`
+	Filename  string `json:"filename"`
+	MIMEType  string `json:"mime_type"`
+	SizeBytes int64  `json:"size_bytes"`
+}
+
 // InputRequest is the body of POST /api/v1/input — the single entry point
 // for both Home Assistant's thin conversation agent and manual curl/web UI
 // commands, distinguished by Source.
@@ -88,6 +100,12 @@ type InputRequest struct {
 	Text           string         `json:"text"`
 	ConversationID string         `json:"conversation_id,omitempty"`
 	Metadata       map[string]any `json:"metadata,omitempty"`
+	// Attachments lists files that were pre-uploaded via POST /api/upload
+	// and should be included as context in this turn. Each entry's FileID
+	// is resolved against the Orchestrator's in-memory attachments.Store;
+	// entries whose TTL has expired are surfaced to the model as an
+	// inline error notice rather than silently dropped.
+	Attachments []Attachment `json:"attachments,omitempty"`
 }
 
 // InputResponse is the synchronous reply to an InputRequest.
@@ -151,6 +169,9 @@ type Orchestrator struct {
 	// schedule is set via SetSchedule; nil means the three scheduled-task
 	// tools are never offered and RunScheduledTasks is a no-op.
 	schedule *schedule.Store
+	// attachStore is set via SetAttachmentStore; nil means Attachments in
+	// InputRequest are ignored (file_upload.enabled is false).
+	attachStore *attachments.Store
 }
 
 // SetTelegram wires the optional send_telegram tool in, mirroring
@@ -181,6 +202,15 @@ func (o *Orchestrator) SetWebTools(ts []tools.Tool) {
 // RunScheduledTasks is a no-op.
 func (o *Orchestrator) SetSchedule(s *schedule.Store) {
 	o.schedule = s
+}
+
+// SetAttachmentStore wires the optional in-memory file-attachment cache in,
+// mirroring SetTelegram/SetWebTools's post-construction style — call it once
+// from cmd/miranda after creating an attachments.Store, only when
+// config.FileUploadConfig.Enabled. Leaving it uncalled (the default) means
+// any Attachments field in an InputRequest is ignored silently.
+func (o *Orchestrator) SetAttachmentStore(s *attachments.Store) {
+	o.attachStore = s
 }
 
 // NewOrchestrator wires the agent loop's dependencies together.
@@ -247,11 +277,18 @@ func (o *Orchestrator) Handle(ctx context.Context, req InputRequest) (InputRespo
 		return InputResponse{}, fmt.Errorf("orchestrator: read memory: %w", err)
 	}
 
-	userMsgID, err := o.history.AppendMessage(ctx, convID, "user", req.Text)
+	// Build the enriched user content: req.Text plus any inline file context
+	// (text file contents) and placeholder annotations (images, binary, PDF).
+	// imageParts carries base64 image blocks for vision models and is only
+	// used in the current turn's LLM message — not in history, since
+	// future replays don't re-send the image bytes.
+	userContent, imageParts := o.processAttachments(userID, req.Text, req.Attachments)
+
+	userMsgID, err := o.history.AppendMessage(ctx, convID, "user", userContent)
 	if err != nil {
 		return InputResponse{}, fmt.Errorf("orchestrator: record user message: %w", err)
 	}
-	o.publishChatMessage(userID, convID, history.Message{ID: userMsgID, ConversationID: convID, Role: "user", Content: req.Text})
+	o.publishChatMessage(userID, convID, history.Message{ID: userMsgID, ConversationID: convID, Role: "user", Content: userContent})
 
 	systemPrompt := o.buildSystemPrompt(userID, sharedMem, memContent)
 	if err := o.history.SetSystemPrompt(ctx, convID, systemPrompt); err != nil {
@@ -259,7 +296,7 @@ func (o *Orchestrator) Handle(ctx context.Context, req InputRequest) (InputRespo
 	}
 
 	messages := append([]llm.Message{{Role: llm.RoleSystem, Content: systemPrompt}}, priorMessages...)
-	messages = append(messages, llm.Message{Role: llm.RoleUser, Content: req.Text})
+	messages = append(messages, llm.Message{Role: llm.RoleUser, Content: userContent, Parts: imageParts})
 
 	tools := o.availableTools(ctx)
 

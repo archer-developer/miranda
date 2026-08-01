@@ -367,7 +367,35 @@ func toGeminiContents(msgs []llm.Message) (*genai.Content, []*genai.Content) {
 			systemParts = append(systemParts, &genai.Part{Text: m.Content})
 
 		case llm.RoleUser:
-			out = append(out, &genai.Content{Role: genai.RoleUser, Parts: []*genai.Part{{Text: m.Content}}})
+			var userParts []*genai.Part
+			if m.Content != "" {
+				userParts = append(userParts, &genai.Part{Text: m.Content})
+			}
+			for _, p := range m.Parts {
+				if p.ImageBase64 != "" {
+					// base64.StdEncoding.DecodeString requires the "encoding/base64"
+					// import already present in this file (used by toLLMToolCall's
+					// ProviderMetadata decode). Best-effort: a corrupt/foreign
+					// blob just means the image is silently skipped rather than
+					// failing the whole request, same posture as the ProviderMetadata
+					// decode above.
+					imgBytes, err := base64.StdEncoding.DecodeString(p.ImageBase64)
+					if err == nil {
+						userParts = append(userParts, &genai.Part{
+							InlineData: &genai.Blob{
+								MIMEType: p.MIMEType,
+								Data:     imgBytes,
+							},
+						})
+					}
+				}
+			}
+			if len(userParts) == 0 {
+				// Gemini requires at least one part; fall back to an empty text
+				// part rather than producing a structurally invalid Content.
+				userParts = []*genai.Part{{Text: ""}}
+			}
+			out = append(out, &genai.Content{Role: genai.RoleUser, Parts: userParts})
 
 		case llm.RoleTool:
 			out = append(out, &genai.Content{Role: genai.RoleUser, Parts: []*genai.Part{{

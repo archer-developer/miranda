@@ -31,12 +31,30 @@ type ToolCall struct {
 	ProviderMetadata string
 }
 
+// ContentPart is one non-text content block within a user message —
+// currently only image data for vision-capable models. Plain text turns
+// always use Message.Content and leave Parts nil; Parts is only non-empty
+// when the user attached an image file that can be inlined for vision.
+type ContentPart struct {
+	// ImageBase64 is the base64-encoded image bytes. Set MIMEType to the
+	// image's actual MIME type (e.g. "image/jpeg", "image/png",
+	// "image/gif", "image/webp") so providers know how to decode it.
+	ImageBase64 string
+	// MIMEType is the MIME type of ImageBase64's data.
+	MIMEType string
+}
+
 // Message is one turn in the conversation sent to/received from a Provider.
 type Message struct {
 	Role Role
 	// Content is the text content. Empty for an assistant message that only
 	// contains tool calls.
 	Content string
+	// Parts carries multi-modal content blocks (image data for vision models)
+	// alongside Content. Non-nil only for user messages that include uploaded
+	// images; plain text turns always use Content and leave Parts nil.
+	// Providers that don't support vision ignore Parts silently.
+	Parts []ContentPart
 	// ToolCalls is set on assistant messages that invoke one or more tools.
 	ToolCalls []ToolCall
 	// ToolCallID identifies which ToolCall this message answers, and is only

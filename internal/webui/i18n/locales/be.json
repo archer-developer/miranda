@@ -18,6 +18,7 @@
   "chat_empty_subtitle": "Спытайце Miranda пра што заўгодна — яна памятае кантэкст размовы.",
   "chat_hint": "Enter — адправіць · Shift+Enter — новы радок",
   "send_button": "Адправіць",
+  "attach_button": "Прымацаваць файл",
   "sending_ellipsis": "Адпраўка…",
   "request_failed": "Памылка запыту:",
   "retry_button": "Паспрабаваць зноў",

@@ -63,6 +63,16 @@ type Server struct {
 	sessions     *session.Store
 	logger       *slog.Logger
 	telegram     *TelegramWebhook // set via SetTelegramWebhook; nil means the channel is disabled
+	upload       *uploadConfig    // set via SetUploadHandler; nil means POST /api/upload is not registered
+}
+
+// uploadConfig holds the static configuration for the POST /api/upload
+// handler. Wired in by SetUploadHandler at startup; all fields are
+// read-only after that.
+type uploadConfig struct {
+	sandboxURL   string // e.g. "http://192.168.1.50:8788/files"
+	sandboxToken string // bearer token for sandbox API auth
+	maxBytes     int64  // per-file size limit
 }
 
 // NewServer builds a Server. webUI, if non-nil, is mounted at "/" (see
@@ -98,6 +108,26 @@ func NewServer(orchestrator *Orchestrator, h *hub.Hub, authToken string, webUI h
 
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	s.mux.ServeHTTP(w, r)
+}
+
+// SetUploadHandler wires the optional POST /api/upload route in when
+// file_upload is enabled, mirroring SetTTSAudioHandler's post-construction
+// style for optional routes — nil is a no-op, leaving the route unregistered.
+// sandboxURL and sandboxToken identify the sandbox's file-upload endpoint
+// (derived from config via Config.SandboxFilesURL); maxBytes caps the
+// per-file read limit (config.FileUploadConfig.MaxFileSizeBytes).
+//
+// The handler proxies received files to the sandbox, caches them in
+// o.attachStore (wired separately via Orchestrator.SetAttachmentStore), and
+// returns the sandbox-assigned file_id to the client for later inclusion in
+// an InputRequest.Attachments list.
+func (s *Server) SetUploadHandler(sandboxURL, sandboxToken string, maxBytes int64) {
+	s.upload = &uploadConfig{
+		sandboxURL:   sandboxURL,
+		sandboxToken: sandboxToken,
+		maxBytes:     maxBytes,
+	}
+	s.mux.HandleFunc("POST /api/upload", s.handleUpload)
 }
 
 // SetTTSAudioHandler wires the optional GET /tts-audio/{filename} route in,

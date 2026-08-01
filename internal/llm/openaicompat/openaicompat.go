@@ -163,7 +163,30 @@ func toOpenAIMessages(msgs []llm.Message) []openai.ChatCompletionMessageParamUni
 		case llm.RoleSystem:
 			out = append(out, openai.SystemMessage(m.Content))
 		case llm.RoleUser:
-			out = append(out, openai.UserMessage(m.Content))
+			// Only switch to array-form content when there are actual image
+			// blocks to include. Many OpenAI-compat local backends (Ollama,
+			// vLLM, LM Studio) only accept content as a plain string and
+			// reject the array form even for text-only content — so we must
+			// not change the wire format just because Parts is non-empty.
+			var imageParts []openai.ChatCompletionContentPartUnionParam
+			for _, p := range m.Parts {
+				if p.ImageBase64 != "" {
+					dataURI := "data:" + p.MIMEType + ";base64," + p.ImageBase64
+					imageParts = append(imageParts, openai.ImageContentPart(
+						openai.ChatCompletionContentPartImageImageURLParam{URL: dataURI},
+					))
+				}
+			}
+			if len(imageParts) > 0 {
+				// Multi-modal: text first, then images.
+				parts := make([]openai.ChatCompletionContentPartUnionParam, 0, 1+len(imageParts))
+				if m.Content != "" {
+					parts = append(parts, openai.TextContentPart(m.Content))
+				}
+				out = append(out, openai.UserMessage(append(parts, imageParts...)))
+			} else {
+				out = append(out, openai.UserMessage(m.Content))
+			}
 		case llm.RoleTool:
 			out = append(out, openai.ToolMessage(m.Content, m.ToolCallID))
 		case llm.RoleAssistant:

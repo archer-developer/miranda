@@ -165,7 +165,29 @@ func toAnthropicMessages(msgs []llm.Message) ([]anthropic.TextBlockParam, []anth
 			system = append(system, anthropic.TextBlockParam{Text: m.Content})
 
 		case llm.RoleUser:
-			out = append(out, anthropic.NewUserMessage(anthropic.NewTextBlock(m.Content)))
+			if len(m.Parts) > 0 {
+				// Multi-modal user message: text first (so the model reads
+				// the question before the image), then each image block.
+				// Providers that don't support vision only get the text block.
+				blocks := make([]anthropic.ContentBlockParamUnion, 0, 1+len(m.Parts))
+				if m.Content != "" {
+					blocks = append(blocks, anthropic.NewTextBlock(m.Content))
+				}
+				for _, p := range m.Parts {
+					if p.ImageBase64 != "" {
+						blocks = append(blocks, anthropic.NewImageBlockBase64(p.MIMEType, p.ImageBase64))
+					}
+				}
+				// Anthropic requires at least one content block; guard against
+				// a Parts list where every ImageBase64 was empty (e.g. the
+				// store record had nil Data) combined with an empty Content.
+				if len(blocks) == 0 {
+					blocks = append(blocks, anthropic.NewTextBlock(""))
+				}
+				out = append(out, anthropic.NewUserMessage(blocks...))
+			} else {
+				out = append(out, anthropic.NewUserMessage(anthropic.NewTextBlock(m.Content)))
+			}
 
 		case llm.RoleTool:
 			out = append(out, anthropic.NewUserMessage(anthropic.NewToolResultBlock(m.ToolCallID, m.Content, false)))

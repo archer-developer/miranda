@@ -6,6 +6,7 @@ package config
 import (
 	"fmt"
 	"os"
+	"strings"
 
 	"gopkg.in/yaml.v3"
 )
@@ -25,9 +26,10 @@ type Config struct {
 	TTS      TTSConfig      `yaml:"tts"`
 	WebUI    WebUIConfig    `yaml:"web_ui"`
 	WebAuthn WebAuthnConfig `yaml:"webauthn"`
-	Telegram TelegramConfig `yaml:"telegram"`
-	Schedule ScheduleConfig `yaml:"schedule"`
-	Users    []UserConfig   `yaml:"users"`
+	Telegram   TelegramConfig   `yaml:"telegram"`
+	Schedule   ScheduleConfig   `yaml:"schedule"`
+	FileUpload FileUploadConfig `yaml:"file_upload"`
+	Users      []UserConfig     `yaml:"users"`
 }
 
 // UserConfig is one login account for the web UI, and doubles as the
@@ -170,6 +172,27 @@ type TelegramConfig struct {
 // turn on, so Enabled defaults to true (opt-out, not opt-in).
 type ScheduleConfig struct {
 	Enabled bool `yaml:"enabled"`
+}
+
+// FileUploadConfig controls the optional POST /api/upload endpoint and
+// client-side file attachment support in the web UI. Opt-in (Enabled
+// defaults false) because it requires a configured sandbox MCP server to
+// proxy uploads to.
+type FileUploadConfig struct {
+	// Enabled activates POST /api/upload and attachment processing in the
+	// agent loop. Requires SandboxMCPServerName to be set.
+	Enabled bool `yaml:"enabled"`
+	// SandboxMCPServerName is the name of an MCP server entry in
+	// MCPConfig.Servers whose URL hosts the sandbox's file-upload API.
+	// The files endpoint URL is derived by replacing the "/mcp" suffix of
+	// that server's URL with "/files" — e.g.
+	// "http://192.168.1.50:8788/mcp" → "http://192.168.1.50:8788/files".
+	// The same server's TokenEnv is used to authenticate upload requests.
+	SandboxMCPServerName string `yaml:"sandbox_mcp_server_name"`
+	// MaxFileSizeBytes is the maximum size of a single uploaded file.
+	// Defaults to 50 MB. Applies both to the /api/upload read limit and
+	// to what Miranda proxies to the sandbox.
+	MaxFileSizeBytes int64 `yaml:"max_file_size_bytes"`
 }
 
 // LoggingConfig controls file logging: the general application log (a
@@ -677,10 +700,46 @@ func Default() Config {
 		Schedule: ScheduleConfig{
 			Enabled: true,
 		},
+		FileUpload: FileUploadConfig{
+			// Opt-in, same posture as Telegram/WebAuthn — requires a
+			// configured sandbox MCP server URL to proxy uploads to, so
+			// there's no safe auto-detected default.
+			Enabled:          false,
+			MaxFileSizeBytes: 50 * 1024 * 1024, // 50 MB
+		},
 		// No default Users: web UI login is mandatory and fails closed until
 		// config.yaml lists at least one account (see internal/users).
 		Users: nil,
 	}
+}
+
+// SandboxFilesURL returns the HTTP endpoint URL and bearer token for the
+// sandbox's file-upload API, derived from the MCP server named by
+// FileUpload.SandboxMCPServerName. The endpoint URL is that server's URL
+// with its "/mcp" suffix replaced by "/files"; the token is the resolved
+// value of the server's TokenEnv environment variable. Returns an error if
+// FileUpload is disabled, the server name is empty, or no matching MCP
+// server entry exists.
+func (c *Config) SandboxFilesURL() (filesURL, token string, err error) {
+	if !c.FileUpload.Enabled {
+		return "", "", fmt.Errorf("config: file_upload is not enabled")
+	}
+	if c.FileUpload.SandboxMCPServerName == "" {
+		return "", "", fmt.Errorf("config: file_upload.sandbox_mcp_server_name is not set")
+	}
+	for _, s := range c.MCP.Servers {
+		if s.Name == c.FileUpload.SandboxMCPServerName {
+			if !strings.HasSuffix(s.URL, "/mcp") {
+				return "", "", fmt.Errorf("config: sandbox MCP server %q URL %q does not end with /mcp — cannot derive files endpoint", s.Name, s.URL)
+			}
+			filesURL = strings.TrimSuffix(s.URL, "/mcp") + "/files"
+			if s.TokenEnv != "" {
+				token = os.Getenv(s.TokenEnv)
+			}
+			return filesURL, token, nil
+		}
+	}
+	return "", "", fmt.Errorf("config: no MCP server named %q found in mcp.servers", c.FileUpload.SandboxMCPServerName)
 }
 
 // Load reads the YAML file at path and merges it over Default(). A missing
@@ -717,6 +776,9 @@ func Load(paths ...string) (Config, error) {
 	if err := validateMCPServerNames(cfg.MCP.Servers); err != nil {
 		return cfg, err
 	}
+	if err := validateFileUploadConfig(cfg.FileUpload, cfg.MCP.Servers); err != nil {
+		return cfg, err
+	}
 	return cfg, nil
 }
 
@@ -738,4 +800,20 @@ func validateMCPServerNames(servers []MCPServer) error {
 		seen[s.Name] = true
 	}
 	return nil
+}
+
+// validateFileUploadConfig rejects a FileUploadConfig that names an MCP
+// server which doesn't exist in the server list. The check only runs when
+// file_upload.enabled is true and sandbox_mcp_server_name is set — if the
+// feature is disabled there is nothing to validate.
+func validateFileUploadConfig(cfg FileUploadConfig, servers []MCPServer) error {
+	if !cfg.Enabled || cfg.SandboxMCPServerName == "" {
+		return nil
+	}
+	for _, s := range servers {
+		if s.Name == cfg.SandboxMCPServerName {
+			return nil
+		}
+	}
+	return fmt.Errorf("config: file_upload.sandbox_mcp_server_name %q does not match any entry in mcp.servers", cfg.SandboxMCPServerName)
 }

@@ -199,7 +199,7 @@ func (o *Orchestrator) availableTools(ctx context.Context) []llm.ToolDef {
 			Name: speakReplyToolName,
 			Description: "Speak text out loud through the physical speaker, even though this request didn't arrive " +
 				"via the voice pipeline — use only when the user explicitly asks to hear something read aloud " +
-				"(e.g. \"озвучь это\", \"скажи вслух\", \"read that out loud\"). Pass the text to speak — normally " +
+				"(e.g. \"озвучь это\", \"расскажи голосом\", \"скажи вслух\", \"read that out loud\"). Pass the text to speak — normally " +
 				"the same as your written reply, but reworded speech-friendly (no markdown, links, code) if the " +
 				"reply itself wouldn't sound natural read verbatim.",
 			Parameters: map[string]any{
@@ -332,6 +332,15 @@ func (o *Orchestrator) runAgentLoop(ctx context.Context, userID, conversationID,
 
 		if len(toolCalls) == 0 {
 			return text, providerUsed, nil
+		}
+
+		// Strip image Parts from all user messages now that the model has
+		// seen them on this first successful call. Subsequent iterations
+		// re-send the full accumulated message history, and re-transmitting
+		// large base64 blobs on every tool-call round-trip wastes both
+		// tokens and latency — the model's context already holds the image.
+		for j := range messages {
+			messages[j].Parts = nil
 		}
 
 		o.recordAssistantToolCallMessage(ctx, userID, conversationID, text, toolCalls)

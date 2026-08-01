@@ -18,6 +18,7 @@
   "chat_empty_subtitle": "Ask Miranda anything — she remembers context across the conversation.",
   "chat_hint": "Enter to send · Shift+Enter for a new line",
   "send_button": "Send",
+  "attach_button": "Attach file",
   "sending_ellipsis": "Sending…",
   "request_failed": "Request failed:",
   "retry_button": "Try again",

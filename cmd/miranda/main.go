@@ -19,6 +19,7 @@ import (
 
 	"gopkg.in/natefinch/lumberjack.v2"
 
+	"github.com/archer-developer/miranda/internal/attachments"
 	"github.com/archer-developer/miranda/internal/config"
 	"github.com/archer-developer/miranda/internal/envfile"
 	"github.com/archer-developer/miranda/internal/ha"
@@ -285,6 +286,27 @@ func run(cfg config.Config, logger *slog.Logger, eventHub *hub.Hub) error {
 		orchestrator.SetSchedule(scheduleStore)
 	}
 
+	// File upload is opt-in (Enabled defaults false). Resolve config early
+	// so a misconfigured sandbox URL fails fast before the HTTP server starts.
+	// The attachments.Store and SetUploadHandler wiring happens after
+	// server construction below (SetUploadHandler registers the route on the
+	// server's mux, which only exists after NewServer).
+	var (
+		uploadFilesURL   string
+		uploadToken      string
+		uploadAttachStore *attachments.Store
+	)
+	if cfg.FileUpload.Enabled {
+		var err error
+		uploadFilesURL, uploadToken, err = cfg.SandboxFilesURL()
+		if err != nil {
+			return fmt.Errorf("main: configure file upload: %w", err)
+		}
+		uploadAttachStore = attachments.NewStore(0) // 0 → default 1-hour TTL
+		defer uploadAttachStore.Close()
+		orchestrator.SetAttachmentStore(uploadAttachStore)
+	}
+
 	var webHandler http.Handler
 	if cfg.WebUI.Enabled {
 		wh, err := webui.New(historyStore, memoryStore, webauthnSvc, usersRegistry, sessions, cfg.WebUI.DefaultLanguage, cfg.Storage.AvatarsDir)
@@ -297,6 +319,9 @@ func run(cfg config.Config, logger *slog.Logger, eventHub *hub.Hub) error {
 	server := httpapi.NewServer(orchestrator, eventHub, cfg.Server.AuthToken, webHandler, logger, usersRegistry, sessions)
 	if ttsAudioHandler != nil {
 		server.SetTTSAudioHandler(ttsAudioHandler)
+	}
+	if cfg.FileUpload.Enabled {
+		server.SetUploadHandler(uploadFilesURL, uploadToken, cfg.FileUpload.MaxFileSizeBytes)
 	}
 	if cfg.Telegram.Enabled {
 		server.SetTelegramWebhook(&httpapi.TelegramWebhook{

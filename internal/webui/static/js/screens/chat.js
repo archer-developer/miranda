@@ -6,7 +6,12 @@ import { t } from "../i18n.js";
 import { icon } from "../icons.js";
 import * as chatWs from "../chat-ws.js";
 
-let messagesEl, scrollEl, formEl, textEl, sendBtn, unsubscribeWs, unsubscribeReconnect;
+let messagesEl, scrollEl, formEl, textEl, sendBtn, fileInput, attachBtn, attachChip, unsubscribeWs, unsubscribeReconnect;
+
+// Holds the metadata of the file that was selected and successfully uploaded,
+// ready to attach to the next send(). Cleared after a successful send or when
+// the user removes the chip.
+let pendingAttachment = null; // {file_id, filename, mime_type, size_bytes}
 
 // message id (real history.Message.ID, or a "local:" temp key for a
 // not-yet-confirmed optimistic bubble) -> its rendered DOM node. This is
@@ -145,6 +150,89 @@ function clearMessages() {
   renderGeneration++;
 }
 
+/** Build and return an attachment chip element showing the filename and a
+ * remove button. Appended below the composer when a file is selected. */
+function buildAttachChip(filename) {
+  const chip = document.createElement("div");
+  chip.className =
+    "flex items-center gap-1.5 rounded-lg border border-(--color-border) bg-(--color-surface)/80 px-3 py-1 text-xs text-(--color-text-muted)";
+  chip.innerHTML = `
+    <span class="attachment-name max-w-[200px] truncate" title="${filename.replace(/"/g, "&quot;")}"></span>
+    <button type="button" class="attachment-remove ml-1 flex items-center rounded p-0.5 text-(--color-text-faint) hover:text-(--color-danger-text) focus-visible:outline-none" aria-label="Remove attachment">
+      ${icon("close", "h-3.5 w-3.5")}
+    </button>`;
+  chip.querySelector(".attachment-name").textContent = filename;
+  chip.querySelector(".attachment-remove").addEventListener("click", clearAttachment);
+  return chip;
+}
+
+/** Show the attachment chip for the current pendingAttachment. */
+function showAttachChip() {
+  clearAttachChip();
+  if (!pendingAttachment) return;
+  attachChip = buildAttachChip(pendingAttachment.filename);
+  // Insert the chip row just above the form inside the composer wrapper.
+  formEl.parentElement.insertBefore(attachChip, formEl);
+}
+
+/** Remove the chip DOM node if present. */
+function clearAttachChip() {
+  if (attachChip) {
+    attachChip.remove();
+    attachChip = null;
+  }
+}
+
+/** Discard the pending attachment and its chip. */
+function clearAttachment() {
+  pendingAttachment = null;
+  clearAttachChip();
+  // Reset the hidden file input so the same file can be re-selected.
+  if (fileInput) fileInput.value = "";
+}
+
+/** Show a spinner on the attach button while a file is uploading. */
+function setUploading(uploading) {
+  if (!attachBtn) return;
+  attachBtn.disabled = uploading;
+  attachBtn.innerHTML = uploading
+    ? '<span class="h-4 w-4 animate-spin rounded-full border-2 border-(--color-text-faint)/30 border-t-(--color-text-faint)"></span>'
+    : icon("paperclip", "h-4 w-4");
+}
+
+/** Handle a File object selected by the user (via button or drag-and-drop). */
+async function handleFileSelected(file) {
+  if (!file) return;
+  clearAttachment();
+  setUploading(true);
+  try {
+    const formData = new FormData();
+    formData.append("file", file, file.name);
+    const res = await fetch("/api/upload", { method: "POST", body: formData });
+    if (!res.ok) {
+      const msg = await res.text().catch(() => String(res.status));
+      // Surface the error as an inline notice rather than a disruptive alert.
+      messagesEl.querySelector("[data-empty-state]")?.remove();
+      messagesEl.appendChild(errorBubble(msg, () => handleFileSelected(file)));
+      return;
+    }
+    const data = await res.json();
+    pendingAttachment = {
+      file_id: data.file_id,
+      filename: data.filename,
+      mime_type: data.mime_type,
+      size_bytes: data.size_bytes,
+    };
+    showAttachChip();
+  } catch (err) {
+    messagesEl.querySelector("[data-empty-state]")?.remove();
+    messagesEl.appendChild(errorBubble(String(err), () => handleFileSelected(file)));
+  } finally {
+    setUploading(false);
+    if (fileInput) fileInput.value = "";
+  }
+}
+
 /** Render a message delivered live over chat-ws.js, if it isn't already on
  * screen — a no-op for an id already in `rendered` (this tab's own HTTP
  * response beat the WS event, or a duplicate delivery), and for turns
@@ -242,6 +330,14 @@ async function send(text) {
   // way, writing into the current (unrelated) DOM would be wrong.
   const myGeneration = renderGeneration;
 
+  // Snapshot and clear the pending attachment before going async — if the
+  // send fails the user can try again (the chip is already gone, but the
+  // retry button re-calls send(text) and the attachment is lost on retry,
+  // which is acceptable: the file_id in the store is still valid for the
+  // TTL window, so the user can re-attach if needed).
+  const attachments = pendingAttachment ? [pendingAttachment] : [];
+  clearAttachment();
+
   messagesEl.querySelector("[data-empty-state]")?.remove();
   const userNode = bubble("user", text);
   messagesEl.appendChild(userNode);
@@ -259,10 +355,12 @@ async function send(text) {
   setSending(true);
 
   try {
+    const body = { source: "web_ui", text };
+    if (attachments.length > 0) body.attachments = attachments;
     const res = await fetch("/api/v1/input", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ source: "web_ui", text }),
+      body: JSON.stringify(body),
     });
     thinking.remove();
     if (!res.ok) {
@@ -310,6 +408,10 @@ async function send(text) {
     messagesEl.appendChild(errorBubble(String(err), () => send(text)));
   } finally {
     setSending(false);
+    // setSending(true) disables the textarea to block a second send, which
+    // drops focus from it — without this the user has to click back into
+    // the field before typing their next message.
+    textEl.focus();
   }
   scrollToBottom();
 }
@@ -351,7 +453,7 @@ export function mount(container) {
           <div id="chat-messages" class="flex flex-col gap-4" aria-live="polite" aria-relevant="additions"></div>
         </div>
       </div>
-      <div class="border-t border-(--color-border) bg-(--color-bg)/70">
+      <div class="border-t border-(--color-border) bg-(--color-bg)/70" id="chat-composer">
         <!-- pb-[max(0.75rem,env(safe-area-inset-bottom))]: on an installed
              iOS PWA (viewport-fit=cover in index.html's <head>) the inset
              resolves to the home-indicator height instead of 0, so the
@@ -362,9 +464,15 @@ export function mount(container) {
              physical inset", which is all that's actually needed; in a
              regular browser tab (inset 0) this is identical to plain py-3. -->
         <form id="chat-form" class="mx-auto flex max-w-3xl items-end gap-2 px-4 pt-3 pb-[max(0.75rem,env(safe-area-inset-bottom))] sm:px-6">
+          <!-- Hidden file input — triggered by the attach button or drag-and-drop. -->
+          <input type="file" id="chat-file" class="sr-only" accept="*/*" tabindex="-1" aria-hidden="true" />
           <label for="chat-text" class="sr-only">${t("chat_placeholder", "Message Miranda…")}</label>
           <textarea id="chat-text" rows="1" placeholder="${t("chat_placeholder", "Message Miranda…")}"
             class="scrollbar-thin max-h-40 flex-1 resize-none rounded-xl border border-(--color-border-strong) bg-(--color-surface)/60 px-4 py-2.5 text-sm text-(--color-text) transition-colors placeholder:text-(--color-text-faint) hover:border-(--color-text-faint) focus:border-(--color-accent-emphasis) focus:outline-none focus-visible:outline-none"></textarea>
+          <button type="button" id="chat-attach" aria-label="${t("attach_button", "Attach file")}"
+            class="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl border border-(--color-border-strong) bg-(--color-surface)/60 text-(--color-text-muted) transition-colors hover:border-(--color-text-faint) hover:text-(--color-text) focus-visible:outline-none disabled:cursor-not-allowed disabled:opacity-60">
+            ${icon("paperclip", "h-4 w-4")}
+          </button>
           <button type="submit" id="chat-send" aria-label="${t("send_button", "Send")}"
             class="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl bg-(--color-accent) text-white transition-colors hover:bg-(--color-accent-hover) focus-visible:outline-none active:bg-(--color-accent-active) disabled:cursor-not-allowed disabled:opacity-60">
             ${icon("send", "h-4 w-4")}
@@ -379,10 +487,36 @@ export function mount(container) {
   formEl = container.querySelector("#chat-form");
   textEl = container.querySelector("#chat-text");
   sendBtn = container.querySelector("#chat-send");
+  attachBtn = container.querySelector("#chat-attach");
+  fileInput = container.querySelector("#chat-file");
 
   formEl.addEventListener("submit", onSubmit);
   textEl.addEventListener("keydown", onKeydown);
   textEl.addEventListener("input", autoResize);
+
+  // Attach button opens the hidden file picker.
+  attachBtn.addEventListener("click", () => fileInput.click());
+
+  // File selected via the picker.
+  fileInput.addEventListener("change", () => {
+    if (fileInput.files && fileInput.files[0]) {
+      handleFileSelected(fileInput.files[0]);
+    }
+  });
+
+  // Drag-and-drop: accept files dropped anywhere on the chat scroll area.
+  // Only handle files; text/URL drops are ignored.
+  scrollEl.addEventListener("dragover", (e) => {
+    if (e.dataTransfer.types.includes("Files")) {
+      e.preventDefault();
+      e.dataTransfer.dropEffect = "copy";
+    }
+  });
+  scrollEl.addEventListener("drop", (e) => {
+    if (!e.dataTransfer.files || e.dataTransfer.files.length === 0) return;
+    e.preventDefault();
+    handleFileSelected(e.dataTransfer.files[0]);
+  });
 
   unsubscribeWs = chatWs.on(onChatEvent);
   // Re-hydrates history on every reconnect (network blip, laptop sleep,
@@ -402,4 +536,10 @@ export function unmount() {
   // handlers.
   unsubscribeWs?.();
   unsubscribeReconnect?.();
+  // Discard any pending attachment so a remounted screen starts clean.
+  clearAttachment();
+  pendingAttachment = null;
+  attachBtn = null;
+  fileInput = null;
+  attachChip = null;
 }
