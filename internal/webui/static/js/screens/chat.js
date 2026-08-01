@@ -7,6 +7,18 @@ import { icon } from "../icons.js";
 import * as chatWs from "../chat-ws.js";
 
 let messagesEl, scrollEl, formEl, textEl, sendBtn, fileInput, attachBtn, attachChip, unsubscribeWs, unsubscribeReconnect;
+// Non-null while a file upload XHR is in flight — aborted by clearAttachment().
+let currentUploadXHR = null;
+
+// True while a POST /api/v1/input fetch is in flight. Survives unmount/remount
+// so loadHistory() can restore the typing indicator when the user navigates
+// away and back to the chat screen during a long response.
+let isSending = false;
+
+// The current typing indicator DOM node, or null. Module-level so clearMessages()
+// can null it out when the DOM is wiped, and loadHistory() can re-add it if
+// isSending is still true when history finishes loading.
+let thinkingEl = null;
 
 // Holds the metadata of the file that was selected and successfully uploaded,
 // ready to attach to the next send(). Cleared after a successful send or when
@@ -61,6 +73,61 @@ function formatFileSize(bytes) {
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }
 
+/** Scale an image File down to at most maxPx on both axes and return a compact
+ * JPEG data URL for an inline thumbnail. Resolves to null on any canvas error
+ * so the caller can silently fall back to a chip-only render. */
+function thumbnailDataURL(file, maxPx) {
+  return new Promise((resolve) => {
+    const img = new Image();
+    const objURL = URL.createObjectURL(file);
+    img.onload = () => {
+      URL.revokeObjectURL(objURL);
+      const scale = Math.min(maxPx / img.naturalWidth, maxPx / img.naturalHeight, 1);
+      const w = Math.round(img.naturalWidth * scale);
+      const h = Math.round(img.naturalHeight * scale);
+      const canvas = document.createElement("canvas");
+      canvas.width = w;
+      canvas.height = h;
+      canvas.getContext("2d").drawImage(img, 0, 0, w, h);
+      resolve(canvas.toDataURL("image/jpeg", 0.8));
+    };
+    img.onerror = () => { URL.revokeObjectURL(objURL); resolve(null); };
+    img.src = objURL;
+  });
+}
+
+/** Sentinel thrown when the user cancels an in-flight upload via clearAttachment(). */
+class UploadCancelledError extends Error {}
+
+/** POST a file to /api/upload via XHR so we can track byte-level progress.
+ * Calls onProgress(0..100) as data is sent; resolves with the parsed JSON
+ * response on success. Rejects with UploadCancelledError on abort (user
+ * clicked ×), or a plain Error on network failure / non-2xx status. */
+function uploadWithProgress(file, onProgress) {
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    currentUploadXHR = xhr;
+    xhr.open("POST", "/api/upload");
+    xhr.upload.addEventListener("progress", (e) => {
+      if (e.lengthComputable) onProgress(Math.round((e.loaded / e.total) * 100));
+    });
+    xhr.addEventListener("load", () => {
+      currentUploadXHR = null;
+      if (xhr.status >= 200 && xhr.status < 300) {
+        try { resolve(JSON.parse(xhr.responseText)); }
+        catch { reject(new Error("Invalid JSON response")); }
+      } else {
+        reject(new Error(xhr.responseText || String(xhr.status)));
+      }
+    });
+    xhr.addEventListener("error", () => { currentUploadXHR = null; reject(new Error("Network error")); });
+    xhr.addEventListener("abort", () => { currentUploadXHR = null; reject(new UploadCancelledError()); });
+    const formData = new FormData();
+    formData.append("file", file, file.name);
+    xhr.send(formData);
+  });
+}
+
 /**
  * Strip file-content blocks that processAttachments (internal/httpapi/attachments.go)
  * injects into the stored user message text, and return a list of attachment
@@ -100,22 +167,36 @@ function extractFileAttachments(text) {
   return { displayText: clean.trim(), chips };
 }
 
-/** A compact file chip shown inside a user bubble in place of the raw content. */
-function attachmentChip(filename, size) {
+/** A file attachment shown inside a user bubble in place of the raw content.
+ * Images render as a 100×100 thumbnail; other files render as a compact chip. */
+function attachmentChip(filename, size, previewDataURL) {
   const el = document.createElement("div");
-  el.className =
-    "mb-1 flex items-center gap-1.5 rounded-lg border border-white/20 bg-white/10 px-2.5 py-1 text-xs text-white/75";
-  // icon() returns our own trusted SVG — safe to set via innerHTML.
-  el.innerHTML = icon("paperclip", "h-3 w-3 shrink-0 opacity-60");
-  const nameSpan = document.createElement("span");
-  nameSpan.className = "max-w-[200px] truncate";
-  nameSpan.textContent = filename;
-  el.appendChild(nameSpan);
-  if (size != null) {
-    const sizeSpan = document.createElement("span");
-    sizeSpan.className = "shrink-0 opacity-60";
-    sizeSpan.textContent = `· ${formatFileSize(size)}`;
-    el.appendChild(sizeSpan);
+  if (previewDataURL) {
+    el.className = "mb-1 flex flex-col gap-0.5";
+    const img = document.createElement("img");
+    img.src = previewDataURL;
+    img.alt = filename;
+    img.className = "h-[120px] w-[120px] rounded-xl object-cover";
+    el.appendChild(img);
+    const caption = document.createElement("span");
+    caption.className = "max-w-[200px] truncate text-xs text-white/60";
+    caption.textContent = filename;
+    el.appendChild(caption);
+  } else {
+    el.className =
+      "mb-1 flex items-center gap-1.5 rounded-lg border border-white/20 bg-white/10 px-2.5 py-1 text-xs text-white/75";
+    // icon() returns our own trusted SVG — safe to set via innerHTML.
+    el.innerHTML = icon("paperclip", "h-3 w-3 shrink-0 opacity-60");
+    const nameSpan = document.createElement("span");
+    nameSpan.className = "max-w-[200px] truncate";
+    nameSpan.textContent = filename;
+    el.appendChild(nameSpan);
+    if (size != null) {
+      const sizeSpan = document.createElement("span");
+      sizeSpan.className = "shrink-0 opacity-60";
+      sizeSpan.textContent = `· ${formatFileSize(size)}`;
+      el.appendChild(sizeSpan);
+    }
   }
   return el;
 }
@@ -164,6 +245,18 @@ function typingIndicator() {
       <span class="h-1.5 w-1.5 animate-bounce rounded-full bg-(--color-text-faint)"></span>
     </div>`;
   return wrap;
+}
+
+function showThinking() {
+  if (thinkingEl) return;
+  thinkingEl = typingIndicator();
+  messagesEl.appendChild(thinkingEl);
+  scrollToBottom();
+}
+
+function hideThinking() {
+  thinkingEl?.remove();
+  thinkingEl = null;
 }
 
 /** A visually distinct error bubble with an inline retry action — errors
@@ -223,31 +316,60 @@ function clearMessages() {
   messagesEl.innerHTML = "";
   rendered.clear();
   pendingUserKey = null;
+  thinkingEl = null; // detached by the innerHTML wipe above
   renderGeneration++;
 }
 
-/** Build and return an attachment chip element showing the filename and a
- * remove button. Appended below the composer when a file is selected. */
+/** Build and return the attachment chip shown below the composer while a file
+ * is uploading or ready to send. The chip starts with a hidden progress bar
+ * that setAttachChipProgress() activates; finalizeAttachChip() hides it and
+ * optionally injects an image thumbnail once the upload completes. */
 function buildAttachChip(filename) {
   const chip = document.createElement("div");
   chip.className =
-    "flex items-center gap-1.5 rounded-lg border border-(--color-border) bg-(--color-surface)/80 px-3 py-1 text-xs text-(--color-text-muted)";
-  chip.innerHTML = `
-    <span class="attachment-name max-w-[200px] truncate" title="${filename.replace(/"/g, "&quot;")}"></span>
-    <button type="button" class="attachment-remove ml-1 flex items-center rounded p-0.5 text-(--color-text-faint) hover:text-(--color-danger-text) focus-visible:outline-none" aria-label="Remove attachment">
-      ${icon("close", "h-3.5 w-3.5")}
-    </button>`;
-  chip.querySelector(".attachment-name").textContent = filename;
-  chip.querySelector(".attachment-remove").addEventListener("click", clearAttachment);
+    "flex w-fit flex-col gap-1.5 rounded-lg border border-(--color-border) bg-(--color-surface)/80 px-3 py-2 text-xs text-(--color-text-muted)";
+
+  // Top row: invisible spacer | filename (centred) | × button.
+  // The spacer mirrors the button's width so the name is truly centred.
+  const topRow = document.createElement("div");
+  topRow.className = "flex items-center";
+  topRow.dataset.topRow = "true";
+  const spacer = document.createElement("div");
+  spacer.className = "w-6 shrink-0";
+  topRow.appendChild(spacer);
+  const nameSpan = document.createElement("span");
+  nameSpan.className = "min-w-0 flex-1 truncate text-center";
+  nameSpan.title = filename;
+  nameSpan.textContent = filename;
+  topRow.appendChild(nameSpan);
+  const removeBtn = document.createElement("button");
+  removeBtn.type = "button";
+  removeBtn.className =
+    "w-6 shrink-0 flex items-center justify-end rounded p-1 text-(--color-text-faint) hover:text-(--color-danger-text) focus-visible:outline-none";
+  removeBtn.setAttribute("aria-label", "Remove attachment");
+  removeBtn.innerHTML = icon("close", "h-4 w-4");
+  removeBtn.addEventListener("click", clearAttachment);
+  topRow.appendChild(removeBtn);
+  chip.appendChild(topRow);
+
+  // Progress bar — hidden until setAttachChipProgress() is called.
+  const track = document.createElement("div");
+  track.className = "h-0.5 w-full overflow-hidden rounded-full bg-(--color-border)";
+  track.dataset.progressTrack = "true";
+  track.hidden = true;
+  const fill = document.createElement("div");
+  fill.className = "h-full rounded-full bg-(--color-accent) transition-[width] duration-100 ease-linear";
+  fill.style.width = "0%";
+  track.appendChild(fill);
+  chip.appendChild(track);
+
   return chip;
 }
 
-/** Show the attachment chip for the current pendingAttachment. */
-function showAttachChip() {
+/** Show the attachment chip for the given filename above the composer form. */
+function showAttachChip(filename) {
   clearAttachChip();
-  if (!pendingAttachment) return;
-  attachChip = buildAttachChip(pendingAttachment.filename);
-  // Insert the chip row just above the form inside the composer wrapper.
+  attachChip = buildAttachChip(filename);
   formEl.parentElement.insertBefore(attachChip, formEl);
 }
 
@@ -259,9 +381,36 @@ function clearAttachChip() {
   }
 }
 
-/** Discard the pending attachment and its chip. */
+/** Reveal the progress bar on the current chip and set its fill to percent (0–100). */
+function setAttachChipProgress(percent) {
+  if (!attachChip) return;
+  const track = attachChip.querySelector("[data-progress-track]");
+  if (!track) return;
+  track.hidden = false;
+  track.firstElementChild.style.width = `${percent}%`;
+}
+
+/** Called when upload completes successfully: hide the progress bar and
+ * optionally prepend a thumbnail to the top row (images only). */
+function finalizeAttachChip(previewDataURL) {
+  if (!attachChip) return;
+  const track = attachChip.querySelector("[data-progress-track]");
+  if (track) track.hidden = true;
+  if (previewDataURL) {
+    const topRow = attachChip.querySelector("[data-top-row]");
+    const img = document.createElement("img");
+    img.src = previewDataURL;
+    img.alt = "";
+    img.className = "h-9 w-9 shrink-0 rounded object-cover";
+    topRow?.prepend(img);
+  }
+}
+
+/** Discard the pending attachment, abort any in-flight upload, and remove the chip. */
 function clearAttachment() {
   pendingAttachment = null;
+  currentUploadXHR?.abort();
+  currentUploadXHR = null;
   clearAttachChip();
   // Reset the hidden file input so the same file can be re-selected.
   if (fileInput) fileInput.value = "";
@@ -281,26 +430,27 @@ async function handleFileSelected(file) {
   if (!file) return;
   clearAttachment();
   setUploading(true);
+  // Show the chip immediately so the user sees the filename while uploading.
+  showAttachChip(file.name);
+  setAttachChipProgress(0);
   try {
-    const formData = new FormData();
-    formData.append("file", file, file.name);
-    const res = await fetch("/api/upload", { method: "POST", body: formData });
-    if (!res.ok) {
-      const msg = await res.text().catch(() => String(res.status));
-      // Surface the error as an inline notice rather than a disruptive alert.
-      messagesEl.querySelector("[data-empty-state]")?.remove();
-      messagesEl.appendChild(errorBubble(msg, () => handleFileSelected(file)));
-      return;
-    }
-    const data = await res.json();
+    const data = await uploadWithProgress(file, setAttachChipProgress);
     pendingAttachment = {
       file_id: data.file_id,
       filename: data.filename,
       mime_type: data.mime_type,
       size_bytes: data.size_bytes,
     };
-    showAttachChip();
+    // Generate a local thumbnail for images — scaled down so the data URL
+    // stays small (200px covers 2× retina at our 100px display size).
+    if (data.mime_type?.startsWith("image/")) {
+      pendingAttachment.previewDataURL = await thumbnailDataURL(file, 240);
+    }
+    finalizeAttachChip(pendingAttachment.previewDataURL ?? null);
   } catch (err) {
+    // User clicked × — chip already gone, nothing to surface.
+    if (err instanceof UploadCancelledError) return;
+    clearAttachment();
     messagesEl.querySelector("[data-empty-state]")?.remove();
     messagesEl.appendChild(errorBubble(String(err), () => handleFileSelected(file)));
   } finally {
@@ -357,35 +507,42 @@ async function loadHistory() {
     if (!conversations || conversations.length === 0 || conversations[0].ended_at) {
       clearMessages();
       messagesEl.appendChild(emptyState());
-      return;
+    } else {
+      const msgsRes = await fetch(`/api/dialogs/${encodeURIComponent(conversations[0].id)}`);
+      const messages = await msgsRes.json();
+      // History interleaves plain chat turns with tool activity: role "tool"
+      // holds a tool's result, and an assistant row that only requested a
+      // tool call (no reply text yet) is stored with empty content — both
+      // are recorded for history/logs (see internal/httpapi's
+      // recordAssistantToolCallMessage/recordToolCall) but aren't part of
+      // the conversation a person reads, so they must not render as bubbles.
+      const chatMessages = messages.filter(isChatBubble);
+      clearMessages();
+      if (chatMessages.length === 0) {
+        messagesEl.appendChild(emptyState());
+      } else {
+        for (const m of chatMessages) {
+          const node = bubble(m.role, m.content, m.created_at);
+          messagesEl.appendChild(node);
+          rendered.set(m.id, node);
+        }
+        scrollToBottom();
+      }
     }
-
-    const msgsRes = await fetch(`/api/dialogs/${encodeURIComponent(conversations[0].id)}`);
-    const messages = await msgsRes.json();
-    // History interleaves plain chat turns with tool activity: role "tool"
-    // holds a tool's result, and an assistant row that only requested a
-    // tool call (no reply text yet) is stored with empty content — both
-    // are recorded for history/logs (see internal/httpapi's
-    // recordAssistantToolCallMessage/recordToolCall) but aren't part of
-    // the conversation a person reads, so they must not render as bubbles.
-    const chatMessages = messages.filter(isChatBubble);
-
-    clearMessages();
-    if (chatMessages.length === 0) {
-      messagesEl.appendChild(emptyState());
-      return;
-    }
-    for (const m of chatMessages) {
-      const node = bubble(m.role, m.content, m.created_at);
-      messagesEl.appendChild(node);
-      rendered.set(m.id, node);
-    }
-    scrollToBottom();
   } catch {
     // Best-effort restore only — a failed background history fetch just
     // means starting fresh, same as if there were no prior conversation.
     clearMessages();
     messagesEl.appendChild(emptyState());
+  }
+  // If a POST /api/v1/input request is still in flight (user navigated away
+  // and back, or the WS reconnected), re-apply the disabled composer and
+  // typing indicator — they were wiped when mount() rebuilt the DOM.
+  // isSending is set to false in send()'s finally, so if the response
+  // arrived before this point the check is a safe no-op.
+  if (isSending) {
+    setSending(true);
+    showThinking();
   }
 }
 
@@ -416,6 +573,11 @@ async function send(text) {
 
   messagesEl.querySelector("[data-empty-state]")?.remove();
   const userNode = bubble("user", text);
+  // Chips for the attachment aren't in `text` yet (the server injects file
+  // blocks after processing) — render them immediately from the local snapshot.
+  for (const att of attachments) {
+    userNode.prepend(attachmentChip(att.filename, att.size_bytes ?? null, att.previewDataURL ?? null));
+  }
   messagesEl.appendChild(userNode);
   // Keyed under a temporary id until the response tells us the real
   // history.Message.ID — see the `rendered`/`pendingUserKey` doc comments
@@ -425,9 +587,8 @@ async function send(text) {
   pendingUserKey = tempKey;
   scrollToBottom();
 
-  const thinking = typingIndicator();
-  messagesEl.appendChild(thinking);
-  scrollToBottom();
+  isSending = true;
+  showThinking();
   setSending(true);
 
   try {
@@ -438,7 +599,7 @@ async function send(text) {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
     });
-    thinking.remove();
+    hideThinking();
     if (!res.ok) {
       // Shown even if renderGeneration has since moved on (e.g. a WS
       // reconnect — network blip, laptop sleep, backgrounded tab — ran
@@ -476,13 +637,14 @@ async function send(text) {
       }
     }
   } catch (err) {
-    thinking.remove();
+    hideThinking();
     // Same reasoning as the !res.ok branch above: shown regardless of a
     // stale renderGeneration, since a network failure has no chat-ws.js
     // reply that could arrive instead.
     messagesEl.querySelector("[data-empty-state]")?.remove();
     messagesEl.appendChild(errorBubble(String(err), () => send(text)));
   } finally {
+    isSending = false;
     setSending(false);
     // setSending(true) disables the textarea to block a second send, which
     // drops focus from it — without this the user has to click back into

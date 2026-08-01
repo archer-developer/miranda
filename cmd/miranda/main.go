@@ -334,7 +334,17 @@ func run(cfg config.Config, logger *slog.Logger, eventHub *hub.Hub) error {
 			Chats:  tgChats,
 		})
 	}
-	httpServer := &http.Server{Addr: cfg.Server.HTTPAddr, Handler: server}
+	httpServer := &http.Server{
+		Addr:    cfg.Server.HTTPAddr,
+		Handler: server,
+		// ReadHeaderTimeout guards against Slowloris; WriteTimeout is the
+		// hard ceiling for the entire request lifecycle, covering worst-case
+		// LLM escalation chains and key-rotation retries. Keep the two in
+		// sync: if you raise WriteTimeout here, raise the client-side fetch
+		// timeout (if any) to match.
+		ReadHeaderTimeout: 30 * time.Second,
+		WriteTimeout:      5 * time.Minute,
+	}
 
 	go sweepIdleSessions(ctx, orchestrator, cfg.Memory, logger)
 	go sweepScheduledTasks(ctx, orchestrator, cfg.Schedule, logger)
