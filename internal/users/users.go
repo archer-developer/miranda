@@ -8,6 +8,7 @@ package users
 import (
 	"fmt"
 	"strings"
+	"time"
 
 	"golang.org/x/crypto/bcrypt"
 
@@ -43,6 +44,23 @@ type User struct {
 	HAUserID     string
 	TelegramName string
 	Language     string
+	// Timezone is the IANA timezone name from config (e.g. "Europe/Moscow").
+	// Call Location() to get a parsed *time.Location.
+	Timezone string
+}
+
+// Location returns the parsed IANA timezone for this user, or time.Local when
+// Timezone is empty or names an unknown zone. Used by the scheduler to
+// interpret cron expressions and display times in the user's local time.
+func (u User) Location() *time.Location {
+	if u.Timezone == "" {
+		return time.Local
+	}
+	loc, err := time.LoadLocation(u.Timezone)
+	if err != nil {
+		return time.Local
+	}
+	return loc
 }
 
 // DisplayName returns FullName if set, else the bare Username — for the web
@@ -85,6 +103,7 @@ func NewRegistry(configs []config.UserConfig) (*Registry, error) {
 			HAUserID:     c.HAUserID,
 			TelegramName: c.TelegramName,
 			Language:     c.Language,
+			Timezone:     c.Timezone,
 		}
 		r.byUsername[c.Username] = u
 		if c.HAUserID != "" {

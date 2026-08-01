@@ -87,11 +87,17 @@ func (o *Orchestrator) resolveConversation(ctx context.Context, userID, source s
 // follows. Without the speaker identity, the model has no way to tell which
 // of the household it is talking to — it can only guess from what gets said,
 // which is exactly the kind of thing that should never need guessing.
+//
+// The user's current local time is injected so the model can correctly
+// interpret relative time references ("в 22:00", "через 10 минут") and
+// generate proper RFC3339 timestamps for create_scheduled_task.
 func (o *Orchestrator) buildSystemPrompt(userID, sharedMemory, userMemory string) string {
 	prompt := o.baseSystemPrompt
 	if name := o.currentUserName(userID); name != "" {
 		prompt += "\n\nСейчас с тобой разговаривает: " + name + "."
 	}
+	now := time.Now().In(o.userLocation(userID))
+	prompt += "\n\nТекущее время пользователя: " + now.Format("2006-01-02 15:04 MST") + "."
 	if sharedMemory != "" {
 		prompt += "\n\nShared household memory:\n" + sharedMemory
 	}
@@ -114,6 +120,18 @@ func (o *Orchestrator) currentUserName(userID string) string {
 		return u.DisplayName()
 	}
 	return userID
+}
+
+// userLocation returns the configured IANA timezone for userID, or time.Local
+// when the user is not in the registry or has no timezone configured. Used by
+// the scheduler to interpret cron expressions and format timestamps.
+func (o *Orchestrator) userLocation(userID string) *time.Location {
+	if o.users != nil {
+		if u, ok := o.users.Get(userID); ok {
+			return u.Location()
+		}
+	}
+	return time.Local
 }
 
 // availableTools combines every connected MCP server's tools with the
@@ -272,11 +290,11 @@ func (o *Orchestrator) availableTools(ctx context.Context) []llm.ToolDef {
 					},
 					"run_at": map[string]any{
 						"type":        "string",
-						"description": "RFC3339 datetime for a one-off task (e.g. \"2026-07-30T22:00:00+03:00\") — provide exactly one of run_at or schedule, never both",
+						"description": "RFC3339 datetime for a one-off task — use the user's current local timezone offset shown in the system prompt (e.g. \"2026-07-30T22:00:00+03:00\") — provide exactly one of run_at or schedule, never both",
 					},
 					"schedule": map[string]any{
 						"type":        "string",
-						"description": "5-field cron expression (minute hour day-of-month month day-of-week) for a recurring task, e.g. \"1 9 * * *\" for every day at 9:01, or \"20 22 * * 2\" for every Tuesday at 22:20 — provide exactly one of run_at or schedule, never both",
+						"description": "5-field cron expression (minute hour day-of-month month day-of-week) for a recurring task — times are interpreted in the user's local timezone, e.g. \"1 9 * * *\" for every day at 09:01 local time, or \"20 22 * * 2\" for every Tuesday at 22:20 local time — provide exactly one of run_at or schedule, never both",
 					},
 				},
 				"required": []string{"task"},
@@ -580,6 +598,11 @@ func (o *Orchestrator) executeTool(ctx context.Context, userID string, tc llm.To
 			if err != nil {
 				return fmt.Sprintf("error: invalid schedule expression: %v", err)
 			}
+			// Interpret the cron expression in the user's local timezone so
+			// "1 9 * * *" means 09:01 in the user's time, not the server's.
+			if specSched, ok := sched.(*cron.SpecSchedule); ok {
+				specSched.Location = o.userLocation(userID)
+			}
 			task.CronExpr = args.Schedule
 			task.NextRunAt = sched.Next(time.Now())
 		} else {
@@ -609,9 +632,10 @@ func (o *Orchestrator) executeTool(ctx context.Context, userID string, tc llm.To
 		if len(tasksList) == 0 {
 			return "no scheduled tasks"
 		}
+		userLoc := o.userLocation(userID)
 		var b strings.Builder
 		for _, t := range tasksList {
-			fmt.Fprintf(&b, "[%s] next: %s — %s\n", t.ID, t.NextRunAt.Format(time.RFC3339), t.Prompt)
+			fmt.Fprintf(&b, "[%s] next: %s — %s\n", t.ID, t.NextRunAt.In(userLoc).Format(time.RFC3339), t.Prompt)
 		}
 		return b.String()
 	}

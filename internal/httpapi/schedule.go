@@ -81,6 +81,12 @@ func (o *Orchestrator) RunScheduledTasks(ctx context.Context, logger *slog.Logge
 				o.hub.Publish(hub.Event{Source: "error", Message: fmt.Sprintf("reschedule task %s: invalid cron_expr %q: %v", task.ID, task.CronExpr, parseErr)})
 				continue
 			}
+			// Use the task owner's timezone when computing the next run so
+			// that "1 9 * * *" fires at 09:01 in the user's local time on
+			// every reschedule, not just the first one.
+			if specSched, ok := sched.(*cron.SpecSchedule); ok {
+				specSched.Location = o.userLocation(task.UserID)
+			}
 			nextRunAt := sched.Next(time.Now())
 			if err := o.schedule.Reschedule(ctx, task.ID, nextRunAt); err != nil {
 				logger.Error("scheduled task reschedule failed", "task_id", task.ID, "error", err)

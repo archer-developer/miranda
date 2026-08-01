@@ -152,6 +152,18 @@ mcp:
       token_env: "SANDBOX_MCP_TOKEN"
       enabled: true
 
+# Optional file upload support for the web UI — lets users attach files before
+# sending a message. Off by default because it requires the sandbox MCP server
+# (mcp.servers above) to be running with sessions enabled; that's what provides
+# the POST /files HTTP endpoint Miranda proxies uploads through.
+# Miranda derives the sandbox's upload URL from the named server's URL by
+# replacing the /mcp suffix with /files (e.g. "http://127.0.0.1:8788/mcp"
+# → "http://127.0.0.1:8788/files"), so the server's URL must end with /mcp.
+file_upload:
+  enabled: true
+  sandbox_mcp_server_name: code_exec_sandbox # must match a name in mcp.servers above
+  max_file_size_bytes: 52428800 # 50 MB — same as the sandbox's staged_files default
+
 tts:
   # yandex_station_text (Yandex Station's own built-in voice — the default,
   # zero external dependencies) or gemini_tts (renders audio via Gemini's
@@ -270,6 +282,7 @@ users:
     ha_user_id: ""
     telegram_name: ""
     language: "ru"
+    timezone: "Europe/Minsk" # IANA timezone for scheduled tasks; defaults to server's local timezone
   - username: anna
     password_hash: "$2a$10$cR6srtGvKY2swOq0Nd.lvuuplR.Retvj3PBX6PyLiFIzMBVE10FLi" # "555"
     full_name: "Anna"
@@ -277,3 +290,4 @@ users:
     ha_user_id: ""
     telegram_name: ""
     language: "ru"
+    timezone: "Europe/Minsk"

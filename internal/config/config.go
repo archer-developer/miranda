@@ -56,6 +56,11 @@ type UserConfig struct {
 	// ("ru", "be", or "en"); the header switcher can still override it per
 	// session. Defaults to the server-wide web_ui.default_language.
 	Language string `yaml:"language,omitempty"`
+	// Timezone is the IANA timezone name for this user (e.g. "Europe/Moscow",
+	// "America/New_York"). Used to display scheduled task times to the model
+	// and to interpret cron expressions relative to the user's local time.
+	// Defaults to the server's local timezone when empty or invalid.
+	Timezone string `yaml:"timezone,omitempty"`
 }
 
 // ServerConfig controls the unified command interface / web UI HTTP server.
