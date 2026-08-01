@@ -16,12 +16,15 @@ import (
 // (gemini.go) renders it via Gemini's API first and hands the station a
 // URL to fetch and play instead.
 type Provider interface {
-	// Speak synthesizes (if needed) and plays text. Returns ErrQuotaExceeded
-	// specifically when this provider's own quota (e.g. every configured
-	// Gemini API key, across every retry cycle) is exhausted, so
-	// Dispatcher.speakOne knows a fallback provider is worth trying instead
-	// of just failing the turn's speech outright.
-	Speak(ctx context.Context, text string) error
+	// Speak synthesizes (if needed) and plays text on entityID. entityID is
+	// the resolved media_player entity to dispatch to (e.g.
+	// "media_player.alice_mini_pro") — the Dispatcher resolves the friendly
+	// device name to this entity_id before calling Speak. Returns
+	// ErrQuotaExceeded specifically when this provider's own quota (e.g.
+	// every configured Gemini API key, across every retry cycle) is
+	// exhausted, so Dispatcher.speakOne knows a fallback provider is worth
+	// trying instead of just failing the turn's speech outright.
+	Speak(ctx context.Context, text, entityID string) error
 }
 
 // ErrQuotaExceeded is the sentinel a Provider's Speak returns when every

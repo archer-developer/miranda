@@ -3,6 +3,7 @@ package httpapi
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -54,6 +55,14 @@ func (f *fakeHAClient) CallService(ctx context.Context, domain, service string, 
 
 func (f *fakeHAClient) AliceState(ctx context.Context, entityID string) (string, error) {
 	return "IDLE", nil
+}
+
+// ResolveMediaPlayer maps the configured test device name to the test entity_id.
+func (f *fakeHAClient) ResolveMediaPlayer(ctx context.Context, friendlyName string) (string, error) {
+	if friendlyName == "test-kitchen" {
+		return "media_player.kitchen", nil
+	}
+	return "", fmt.Errorf("no media_player with friendly name %q", friendlyName)
 }
 
 // Calls returns a snapshot of every play_media call's media_content_id so
@@ -112,7 +121,6 @@ func newTestOrchestratorWithTTS(t *testing.T, provider *llmtest.FakeProvider) (*
 
 	ha := &fakeHAClient{}
 	yandexCfg := config.YandexStationConfig{
-		Entities:           []string{"media_player.kitchen"},
 		ChunkMaxChars:      100,
 		IdlePollIntervalMS: 1,
 		// fakeHAClient.AliceState always reports "idle", so the "wait for it
@@ -121,13 +129,14 @@ func newTestOrchestratorWithTTS(t *testing.T, provider *llmtest.FakeProvider) (*
 		PlaybackStartTimeoutMS: 1,
 	}
 	ttsCfg := config.TTSConfig{
+		DefaultDevice:  "test-kitchen",
 		Primary:        "yandex_station_text",
 		YandexStation:  yandexCfg,
 		SpeakReplyTool: true,
 		StopSpeechTool: true,
 	}
 	primary := tts.NewTextProvider(yandexCfg, ha, nil)
-	dispatcher := tts.NewDispatcher(primary, nil, ha, yandexCfg.Entities, hub.New(100), nil)
+	dispatcher := tts.NewDispatcher(primary, nil, ha, "test-kitchen", hub.New(100), nil)
 
 	o := NewOrchestrator(
 		r, mcp.NewManager(nil), h, mem, dispatcher, hub.New(100), nil,
@@ -556,36 +565,32 @@ func TestOrchestrator_DoesNotSpeakViaTTSForNonHASources(t *testing.T) {
 	}
 }
 
-// TestOrchestrator_StopSpeechToolStopsTheStation exercises the stop_speech
-// tool end to end: the model calling it must reach Dispatcher.Stop, which
-// (via tts.Player.Stop) issues a media_player.media_stop call for every
-// configured entity so the physical station actually falls silent.
-func TestOrchestrator_StopSpeechToolStopsTheStation(t *testing.T) {
+// TestOrchestrator_StopSpeechToolClearsQueue exercises the stop_speech tool
+// end to end: the model calling it must reach Dispatcher.Stop, which clears
+// Miranda's TTS queue and cancels any in-flight synthesis. The physical
+// station finishes its current short chunk on its own — no media_stop call.
+func TestOrchestrator_StopSpeechToolClearsQueue(t *testing.T) {
 	provider := llmtest.New("local",
 		llmtest.Response{ToolCall: &llm.ToolCall{ID: "call-1", Name: "stop_speech", Arguments: `{}`}},
 		llmtest.Response{Text: "Молчу."},
 	)
-	o, ha := newTestOrchestratorWithTTS(t, provider)
+	o, _ := newTestOrchestratorWithTTS(t, provider)
 
 	resp, err := o.Handle(context.Background(), InputRequest{Source: "cli", UserID: "alex", Text: "хватит болтать"})
 	require.NoError(t, err)
 	require.Equal(t, "Молчу.", resp.Reply)
-
-	require.Contains(t, ha.StopCalls(), "media_player.kitchen")
 }
 
 // TestOrchestrator_HAAssistTurnAlwaysStopsWhateverWasPlayingFirst guards the
 // barge-in behavior: every ha_assist turn calls tts.Stop before its own
-// speech has any chance to enqueue, so a new voice turn always interrupts a
-// previous turn's still-finishing speech instead of queuing after it.
+// speech has any chance to enqueue, so a new voice turn always clears the
+// queue and interrupts any in-flight synthesis instead of queuing after it.
 func TestOrchestrator_HAAssistTurnAlwaysStopsWhateverWasPlayingFirst(t *testing.T) {
 	provider := llmtest.New("local", llmtest.Response{Text: "Привет!"})
-	o, ha := newTestOrchestratorWithTTS(t, provider)
+	o, _ := newTestOrchestratorWithTTS(t, provider)
 
 	_, err := o.Handle(context.Background(), InputRequest{Source: users.SourceHAAssist, UserID: "alex", Text: "привет"})
 	require.NoError(t, err)
-
-	require.Contains(t, ha.StopCalls(), "media_player.kitchen")
 }
 
 // newTestOrchestratorWithTelegram is like newTestOrchestrator but also wires

@@ -9,7 +9,7 @@ import (
 )
 
 func TestNewProvider_DefaultsAndExplicitYandexStationText(t *testing.T) {
-	cfg := config.TTSConfig{YandexStation: config.YandexStationConfig{Entities: []string{"media_player.kitchen"}}}
+	cfg := config.TTSConfig{YandexStation: config.YandexStationConfig{}}
 
 	for _, name := range []string{"", "yandex_station_text"} {
 		p, err := NewProvider(name, cfg, t.TempDir(), &fakeHA{}, nil)

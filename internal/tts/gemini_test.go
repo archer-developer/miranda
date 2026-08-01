@@ -57,7 +57,7 @@ func newTestGeminiProvider(t *testing.T, cfg config.GeminiTTSConfig) *geminiProv
 	if cfg.Voice == "" {
 		cfg.Voice = "Kore"
 	}
-	p, err := NewGeminiProvider(cfg, config.YandexStationConfig{Entities: []string{"media_player.kitchen"}}, t.TempDir(), &fakeHA{}, nil)
+	p, err := NewGeminiProvider(cfg, config.YandexStationConfig{}, t.TempDir(), &fakeHA{}, nil)
 	require.NoError(t, err)
 	gp, ok := p.(*geminiProvider)
 	require.True(t, ok)
@@ -269,22 +269,13 @@ func TestNewGeminiProvider_FailsWhenNoConfiguredEnvVarIsSet(t *testing.T) {
 	require.Error(t, err)
 }
 
-func TestGeminiProvider_Speak_ErrorsWithoutEntitiesOrPublicBaseURL(t *testing.T) {
+func TestGeminiProvider_Speak_ErrorsWithoutPublicBaseURL(t *testing.T) {
 	t.Setenv("GEMINI_TEST_KEY_1", "key-1")
 
-	// No entities configured.
-	p1, err := NewGeminiProvider(
-		config.GeminiTTSConfig{APIKeyEnvs: []string{"GEMINI_TEST_KEY_1"}, PublicBaseURL: "http://x", ChunkMaxChars: 200},
+	p, err := NewGeminiProvider(
+		config.GeminiTTSConfig{APIKeyEnvs: []string{"GEMINI_TEST_KEY_1"}, ChunkMaxChars: 200},
 		config.YandexStationConfig{}, t.TempDir(), &fakeHA{}, nil,
 	)
 	require.NoError(t, err)
-	require.Error(t, p1.Speak(context.Background(), "hi"))
-
-	// No public_base_url configured.
-	p2, err := NewGeminiProvider(
-		config.GeminiTTSConfig{APIKeyEnvs: []string{"GEMINI_TEST_KEY_1"}, ChunkMaxChars: 200},
-		config.YandexStationConfig{Entities: []string{"media_player.kitchen"}}, t.TempDir(), &fakeHA{}, nil,
-	)
-	require.NoError(t, err)
-	require.Error(t, p2.Speak(context.Background(), "hi"))
+	require.Error(t, p.Speak(context.Background(), "hi", "media_player.kitchen"))
 }

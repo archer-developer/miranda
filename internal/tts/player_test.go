@@ -34,6 +34,10 @@ func (f *stopTrackingHA) AliceState(ctx context.Context, entityID string) (strin
 	return "IDLE", nil
 }
 
+func (f *stopTrackingHA) ResolveMediaPlayer(ctx context.Context, friendlyName string) (string, error) {
+	return "media_player." + friendlyName, nil
+}
+
 func (f *stopTrackingHA) StopCalls() []string {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -53,7 +57,7 @@ func TestPlayer_EnqueueProcessesInOrderOneAtATime(t *testing.T) {
 	var inFlight int
 	maxConcurrent := 0
 
-	speakOne := func(ctx context.Context, text string) error {
+	speakOne := func(ctx context.Context, text, entityID string) error {
 		mu.Lock()
 		inFlight++
 		if inFlight > maxConcurrent {
@@ -70,10 +74,10 @@ func TestPlayer_EnqueueProcessesInOrderOneAtATime(t *testing.T) {
 		return nil
 	}
 
-	p := newPlayer(&stopTrackingHA{}, nil, speakOne, nil, nil)
-	p.Enqueue("первый")
-	p.Enqueue("второй")
-	p.Enqueue("третий")
+	p := newPlayer(speakOne, nil, nil)
+	p.Enqueue("первый", "media_player.kitchen")
+	p.Enqueue("второй", "media_player.kitchen")
+	p.Enqueue("третий", "media_player.kitchen")
 
 	require.Eventually(t, func() bool {
 		mu.Lock()
@@ -87,17 +91,15 @@ func TestPlayer_EnqueueProcessesInOrderOneAtATime(t *testing.T) {
 	require.Equal(t, 1, maxConcurrent)
 }
 
-// TestPlayer_StopClearsQueueAndCancelsInFlightChunk exercises the full
-// Stop contract: text still sitting in the queue is dropped, whatever chunk
-// speakOne is mid-processing has its context cancelled, and every
-// configured entity gets a media_player.media_stop call regardless of
-// whether anything was actually in flight.
+// TestPlayer_StopClearsQueueAndCancelsInFlightChunk exercises the Stop
+// contract: text still sitting in the queue is dropped and whatever chunk
+// speakOne is mid-processing has its context cancelled.
 func TestPlayer_StopClearsQueueAndCancelsInFlightChunk(t *testing.T) {
 	started := make(chan struct{})
 	var sawCancellation bool
 	var mu sync.Mutex
 
-	speakOne := func(ctx context.Context, text string) error {
+	speakOne := func(ctx context.Context, text, entityID string) error {
 		close(started)
 		<-ctx.Done()
 		mu.Lock()
@@ -106,13 +108,12 @@ func TestPlayer_StopClearsQueueAndCancelsInFlightChunk(t *testing.T) {
 		return ctx.Err()
 	}
 
-	ha := &stopTrackingHA{}
-	p := newPlayer(ha, []string{"media_player.kitchen", "media_player.bedroom"}, speakOne, nil, nil)
-	p.Enqueue("in flight when Stop is called")
-	p.Enqueue("still queued, must be dropped")
+	p := newPlayer(speakOne, nil, nil)
+	p.Enqueue("in flight when Stop is called", "media_player.kitchen")
+	p.Enqueue("still queued, must be dropped", "media_player.kitchen")
 
 	<-started // the first chunk is now blocked inside speakOne, waiting on ctx.Done()
-	p.Stop(context.Background())
+	p.Stop()
 
 	require.Eventually(t, func() bool {
 		mu.Lock()
@@ -124,20 +125,4 @@ func TestPlayer_StopClearsQueueAndCancelsInFlightChunk(t *testing.T) {
 	queueLen := len(p.queue)
 	p.mu.Unlock()
 	require.Zero(t, queueLen, "Stop must drop anything still queued")
-
-	require.ElementsMatch(t, []string{"media_player.kitchen", "media_player.bedroom"}, ha.StopCalls())
-}
-
-// TestPlayer_StopWithNothingInFlightStillStopsThePhysicalStation guards
-// against only wiring Stop's context-cancellation half: even when the
-// queue is already empty (nothing to cancel), Stop must still call
-// media_stop, since audio already finished rendering client-side could
-// still be audibly playing on the physical device.
-func TestPlayer_StopWithNothingInFlightStillStopsThePhysicalStation(t *testing.T) {
-	ha := &stopTrackingHA{}
-	p := newPlayer(ha, []string{"media_player.kitchen"}, func(ctx context.Context, text string) error { return nil }, nil, nil)
-
-	p.Stop(context.Background())
-
-	require.Equal(t, []string{"media_player.kitchen"}, ha.StopCalls())
 }

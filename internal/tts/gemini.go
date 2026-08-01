@@ -99,17 +99,14 @@ func NewGeminiProvider(cfg config.GeminiTTSConfig, stationCfg config.YandexStati
 // sentences are grouped into one ~ChunkMaxChars chunk rather than one
 // request per sentence, since each chunk here is a real, quota-limited
 // Gemini API call), synthesizing (or reusing a cached rendering of) each
-// chunk and playing it on every configured Yandex Station entity in turn.
+// chunk and playing it on entityID in turn.
 //
 // Synthesis and playback are pipelined: a background goroutine synthesizes
 // chunk N+1 while chunk N is still playing, since both operations hit
 // separate services (Gemini API and Yandex Station) and there is no reason
 // to make them sequential. A channel buffer of 1 keeps the synthesizer
 // exactly one chunk ahead of the player.
-func (p *geminiProvider) Speak(ctx context.Context, text string) error {
-	if len(p.stationCfg.Entities) == 0 {
-		return fmt.Errorf("tts: gemini_tts: no yandex_station entities configured to play audio through")
-	}
+func (p *geminiProvider) Speak(ctx context.Context, text, entityID string) error {
 	if p.cfg.PublicBaseURL == "" {
 		return fmt.Errorf("tts: gemini_tts: public_base_url is not configured, the station has no way to fetch synthesized audio")
 	}
@@ -157,23 +154,21 @@ func (p *geminiProvider) Speak(ctx context.Context, text string) error {
 		if result.err != nil {
 			return result.err
 		}
-		for _, entity := range p.stationCfg.Entities {
-			p.logger.Info("tts: gemini: playing chunk",
-				"index", i,
-				"audio_ms", result.duration.Milliseconds(),
-				"entity", entity,
-			)
-			// media_content_type's value doesn't matter to AlexxIT/YandexStation
-			// for URL playback — confirmed both by reading its source
-			// (async_play_media dispatches on "http(s):// in media_id", not on
-			// media_content_type at all) and by a live device: debug logging
-			// showed it correctly built a "radio_play" externalCommandBypass
-			// with our .wav streamUrl. "music" is kept only because it reads
-			// clearly in logs — playAndSleep, not this value, is what makes
-			// playback timing correct (see its doc comment).
-			if err := p.station.playAndSleep(ctx, entity, result.url, "music", result.duration); err != nil {
-				return err
-			}
+		p.logger.Info("tts: gemini: playing chunk",
+			"index", i,
+			"audio_ms", result.duration.Milliseconds(),
+			"entity", entityID,
+		)
+		// media_content_type's value doesn't matter to AlexxIT/YandexStation
+		// for URL playback — confirmed both by reading its source
+		// (async_play_media dispatches on "http(s):// in media_id", not on
+		// media_content_type at all) and by a live device: debug logging
+		// showed it correctly built a "radio_play" externalCommandBypass
+		// with our .wav streamUrl. "music" is kept only because it reads
+		// clearly in logs — playAndSleep, not this value, is what makes
+		// playback timing correct (see its doc comment).
+		if err := p.station.playAndSleep(ctx, entityID, result.url, "music", result.duration); err != nil {
+			return err
 		}
 		i++
 	}

@@ -39,6 +39,10 @@ func (f *fakeHA) AliceState(ctx context.Context, entityID string) (string, error
 	return "IDLE", nil
 }
 
+func (f *fakeHA) ResolveMediaPlayer(ctx context.Context, friendlyName string) (string, error) {
+	return "media_player." + friendlyName, nil
+}
+
 func (f *fakeHA) Calls() []call {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -47,9 +51,8 @@ func (f *fakeHA) Calls() []call {
 	return out
 }
 
-func yandexConfig(entities ...string) config.YandexStationConfig {
+func yandexConfig() config.YandexStationConfig {
 	return config.YandexStationConfig{
-		Entities:           entities,
 		ChunkMaxChars:      100,
 		IdlePollIntervalMS: 1, // keep tests fast
 		// fakeHA.AliceState always reports "IDLE", so the "wait for it to
@@ -58,46 +61,36 @@ func yandexConfig(entities ...string) config.YandexStationConfig {
 	}
 }
 
-func TestTextProvider_BroadcastsChunksToAllEntitiesInParallel(t *testing.T) {
+func TestTextProvider_SpeaksChunkedTextInOrderToEntity(t *testing.T) {
 	ha := &fakeHA{}
-	cfg := yandexConfig("media_player.kitchen", "media_player.bedroom")
+	cfg := yandexConfig()
 	// Small enough to force two chunks — see Accumulator's doc comment for
 	// why chunking is maximally greedy and a generous limit would merge them.
 	cfg.ChunkMaxChars = 25
 	p := NewTextProvider(cfg, ha, nil)
 
-	err := p.Speak(context.Background(), "Первое предложение. Второе предложение.")
+	err := p.Speak(context.Background(), "Первое предложение. Второе предложение.", "media_player.kitchen")
 	require.NoError(t, err)
 
 	calls := ha.Calls()
-	require.Len(t, calls, 4) // 2 chunks x 2 entities
+	require.Len(t, calls, 2) // 2 chunks, 1 entity
 	for _, c := range calls {
 		require.Equal(t, "media_player", c.domain)
 		require.Equal(t, "play_media", c.service)
 		require.Equal(t, "text", c.data["media_content_type"])
+		require.Equal(t, "media_player.kitchen", c.data["entity_id"])
 	}
 
-	// Both entities must receive chunk 1 before either receives chunk 2:
-	// the first two calls (in any order) must both carry the first chunk.
 	chunkOf := func(c call) string { return c.data["media_content_id"].(string) }
-	require.Equal(t, chunkOf(calls[0]), chunkOf(calls[1]),
-		"both entities should receive the first chunk before any entity receives the second")
 	require.Equal(t, "Первое предложение.", chunkOf(calls[0]))
-	require.Equal(t, "Второе предложение.", chunkOf(calls[2]))
+	require.Equal(t, "Второе предложение.", chunkOf(calls[1]))
 }
 
 func TestTextProvider_ReturnsErrorWhenYandexFails(t *testing.T) {
 	ha := &fakeHA{failDomain: "media_player"}
-	p := NewTextProvider(yandexConfig("media_player.kitchen"), ha, nil)
+	p := NewTextProvider(yandexConfig(), ha, nil)
 
-	err := p.Speak(context.Background(), "привет")
-	require.Error(t, err)
-}
-
-func TestTextProvider_ErrorsWhenNoEntitiesConfigured(t *testing.T) {
-	p := NewTextProvider(yandexConfig(), &fakeHA{}, nil) // no entities configured
-
-	err := p.Speak(context.Background(), "привет")
+	err := p.Speak(context.Background(), "привет", "media_player.kitchen")
 	require.Error(t, err)
 }
 
@@ -133,6 +126,10 @@ func (f *scriptedHA) AliceState(ctx context.Context, entityID string) (string, e
 	return f.states[len(f.states)-1], nil
 }
 
+func (f *scriptedHA) ResolveMediaPlayer(ctx context.Context, friendlyName string) (string, error) {
+	return "media_player." + friendlyName, nil
+}
+
 // TestTextProvider_WaitsForPlaybackToStartBeforePollingForIdle guards against
 // the regression stationPlayer.waitIdle's doc comment describes: right after
 // play_media, the entity briefly still reports the *previous* "IDLE"
@@ -143,16 +140,15 @@ func (f *scriptedHA) AliceState(ctx context.Context, entityID string) (string, e
 func TestTextProvider_WaitsForPlaybackToStartBeforePollingForIdle(t *testing.T) {
 	ha := &scriptedHA{states: []string{"IDLE", "NONE", "NONE", "IDLE"}}
 	cfg := config.YandexStationConfig{
-		Entities: []string{"media_player.kitchen"},
 		// Small enough to force two chunks — see the comment in
-		// TestTextProvider_SpeaksChunkedTextToEachEntity for why.
+		// TestTextProvider_SpeaksChunkedTextInOrderToEntity for why.
 		ChunkMaxChars:          25,
 		IdlePollIntervalMS:     1,
 		PlaybackStartTimeoutMS: 50,
 	}
 	p := NewTextProvider(cfg, ha, nil)
 
-	err := p.Speak(context.Background(), "Первое предложение. Второе предложение.")
+	err := p.Speak(context.Background(), "Первое предложение. Второе предложение.", "media_player.kitchen")
 	require.NoError(t, err)
 
 	require.Len(t, ha.calls, 2)

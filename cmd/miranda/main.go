@@ -229,7 +229,7 @@ func run(cfg config.Config, logger *slog.Logger, eventHub *hub.Hub) error {
 		return err
 	}
 
-	dispatcher, ttsAudioHandler := buildTTSDispatcher(cfg.TTS, cfg.Storage, eventHub, logger)
+	dispatcher, ttsAudioHandler, ttsHAClient := buildTTSDispatcher(cfg.TTS, cfg.Storage, eventHub, logger)
 
 	usersRegistry, err := users.NewRegistry(cfg.Users)
 	if err != nil {
@@ -284,6 +284,9 @@ func run(cfg config.Config, logger *slog.Logger, eventHub *hub.Hub) error {
 	}
 	if cfg.Schedule.Enabled {
 		orchestrator.SetSchedule(scheduleStore)
+	}
+	if ttsHAClient != nil {
+		orchestrator.SetSpeakerHA(ttsHAClient)
 	}
 
 	// File upload is opt-in (Enabled defaults false). Resolve config early
@@ -596,18 +599,18 @@ func setupTelegram(cfg config.TelegramConfig, storageCfg config.StorageConfig, l
 // some other provider the config didn't actually ask for — better to notice
 // a misconfiguration in the logs than to have replies quietly go out over
 // the wrong voice.
-func buildTTSDispatcher(cfg config.TTSConfig, storageCfg config.StorageConfig, h *hub.Hub, logger *slog.Logger) (*tts.Dispatcher, *tts.HTTPHandler) {
+func buildTTSDispatcher(cfg config.TTSConfig, storageCfg config.StorageConfig, h *hub.Hub, logger *slog.Logger) (*tts.Dispatcher, *tts.HTTPHandler, *ha.Client) {
 	baseURL := os.Getenv("HA_BASE_URL")
 	if baseURL == "" {
 		logger.Warn("HA_BASE_URL not set — TTS dispatch is disabled")
-		return nil, nil
+		return nil, nil, nil
 	}
 	haClient := ha.New(baseURL, os.Getenv("HA_TOKEN"))
 
 	primary, err := tts.NewProvider(cfg.Primary, cfg, storageCfg.TTSCacheDir, haClient, logger)
 	if err != nil {
 		logger.Error("tts: failed to build primary provider, TTS dispatch is disabled", "error", err, "primary", cfg.Primary)
-		return nil, nil
+		return nil, nil, nil
 	}
 
 	var fallback tts.Provider
@@ -619,7 +622,7 @@ func buildTTSDispatcher(cfg config.TTSConfig, storageCfg config.StorageConfig, h
 		}
 	}
 
-	dispatcher := tts.NewDispatcher(primary, fallback, haClient, cfg.YandexStation.Entities, h, logger)
+	dispatcher := tts.NewDispatcher(primary, fallback, haClient, cfg.DefaultDevice, h, logger)
 
 	// Always registered (independent of which provider ended up being usable
 	// above): a gemini_tts cache directory populated by an earlier, since-
@@ -628,9 +631,9 @@ func buildTTSDispatcher(cfg config.TTSConfig, storageCfg config.StorageConfig, h
 	ttsHandler, err := tts.NewHTTPHandler(storageCfg.TTSCacheDir)
 	if err != nil {
 		logger.Error("tts: failed to create the /tts-audio HTTP handler", "error", err)
-		return dispatcher, nil
+		return dispatcher, nil, haClient
 	}
-	return dispatcher, ttsHandler
+	return dispatcher, ttsHandler, haClient
 }
 
 // ttsChunkMaxChars picks the sentence-boundary chunk size (see

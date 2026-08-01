@@ -206,6 +206,10 @@ func (o *Orchestrator) availableTools(ctx context.Context) []llm.ToolDef {
 				"type": "object",
 				"properties": map[string]any{
 					"text": map[string]any{"type": "string", "description": "the text to speak aloud"},
+					"device": map[string]any{
+						"type":        "string",
+						"description": "friendly name of the speaker to use (e.g. \"Станция Мини 3 Про\") — omit to use the default device",
+					},
 				},
 				"required": []string{"text"},
 			},
@@ -503,7 +507,8 @@ func (o *Orchestrator) executeTool(ctx context.Context, userID string, tc llm.To
 
 	if tc.Name == speakReplyToolName {
 		var args struct {
-			Text string `json:"text"`
+			Text   string `json:"text"`
+			Device string `json:"device"`
 		}
 		if err := json.Unmarshal([]byte(tc.Arguments), &args); err != nil {
 			return fmt.Sprintf("error: invalid arguments: %v", err)
@@ -511,13 +516,17 @@ func (o *Orchestrator) executeTool(ctx context.Context, userID string, tc llm.To
 		if args.Text == "" {
 			return "error: text is required"
 		}
-		o.speakText(ctx, args.Text)
+		if args.Device != "" && o.tts != nil {
+			o.tts.SpeakTo(ctx, args.Text, args.Device)
+		} else {
+			o.speakText(ctx, args.Text)
+		}
 		return "spoken"
 	}
 
 	if tc.Name == stopSpeechToolName {
 		if o.tts != nil {
-			o.tts.Stop(ctx)
+			o.tts.Stop()
 		}
 		return "stopped"
 	}
@@ -634,11 +643,43 @@ func (o *Orchestrator) executeTool(ctx context.Context, userID string, tc llm.To
 		return result
 	}
 
+	// For alice MCP tool calls that carry a "device" argument (the target
+	// speaker's friendly name), coordinate with the TTS Player before firing:
+	// drain any queued TTS first (WaitIdle), then confirm the physical station
+	// is idle via alice_state polling (WaitEntityIdle). This prevents a model
+	// that batches speak_reply + an alice command from having the alice command
+	// interrupt the TTS mid-utterance. Both steps are best-effort: errors are
+	// published to the hub but never abort the tool call.
+	if o.tts != nil && o.speakerHA != nil {
+		if device := aliceToolDevice(tc.Arguments); device != "" {
+			o.tts.WaitIdle(ctx)
+			if entityID, err := o.speakerHA.ResolveMediaPlayer(ctx, device); err == nil {
+				if err := o.tts.WaitEntityIdle(ctx, entityID); err != nil && ctx.Err() == nil {
+					o.hub.Publish(hub.Event{Source: "error", Message: "speaker coordination: " + err.Error()})
+				}
+			}
+		}
+	}
+
 	result, err := o.tools.Call(ctx, tc.Name, tc.Arguments)
 	if err != nil {
 		return fmt.Sprintf("error: %v", err)
 	}
 	return result
+}
+
+// aliceToolDevice extracts the "device" string field from a tool call's JSON
+// arguments, returning "" if the field is absent, not a string, or the JSON
+// is malformed. Used by executeTool to detect alice MCP tool calls that
+// target a speaker by friendly name.
+func aliceToolDevice(args string) string {
+	var m struct {
+		Device string `json:"device"`
+	}
+	if err := json.Unmarshal([]byte(args), &m); err != nil {
+		return ""
+	}
+	return m.Device
 }
 
 // recordAssistantToolCallMessage persists the assistant's turn that

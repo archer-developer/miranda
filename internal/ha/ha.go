@@ -14,6 +14,7 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -22,6 +23,14 @@ type Client struct {
 	baseURL string
 	token   string
 	http    *http.Client
+
+	// playerCacheMu guards playerCache; held during the one-time load and on
+	// every subsequent lookup — reads are infrequent enough that an RWMutex
+	// would only add complexity without measurable gain.
+	playerCacheMu sync.Mutex
+	// playerCache maps media_player friendly names to entity_ids, populated
+	// lazily on the first ResolveMediaPlayer call and never invalidated.
+	playerCache map[string]string
 }
 
 // New builds a Client against baseURL (e.g. "http://homeassistant.local:8123")
@@ -104,4 +113,71 @@ func (c *Client) AliceState(ctx context.Context, entityID string) (string, error
 		return "", fmt.Errorf("ha: decode state response for %s: %w", entityID, err)
 	}
 	return sr.Attributes.AliceState, nil
+}
+
+// ResolveMediaPlayer maps a media_player entity's friendly name (as returned
+// by ha_GetLiveState and used in HA scripts, e.g. "Станция Мини 3 Про") to
+// its entity_id (e.g. "media_player.yandex_station_m0pskn2001y7gw"). The
+// mapping is fetched from HA on the first call and cached for the lifetime of
+// the process — media_player entities are renamed rarely enough that a process
+// restart is an acceptable way to pick up a name change.
+func (c *Client) ResolveMediaPlayer(ctx context.Context, friendlyName string) (string, error) {
+	c.playerCacheMu.Lock()
+	defer c.playerCacheMu.Unlock()
+
+	if c.playerCache == nil {
+		if err := c.loadPlayerCache(ctx); err != nil {
+			return "", err
+		}
+	}
+
+	entityID, ok := c.playerCache[friendlyName]
+	if !ok {
+		return "", fmt.Errorf("ha: no media_player entity with friendly name %q", friendlyName)
+	}
+	return entityID, nil
+}
+
+// loadPlayerCache fetches all entity states from HA, filters to the
+// media_player domain, and builds the friendly_name→entity_id map stored in
+// c.playerCache. Must be called with c.playerCacheMu held; on error the cache
+// stays nil so the next ResolveMediaPlayer call retries the fetch.
+func (c *Client) loadPlayerCache(ctx context.Context) error {
+	url := fmt.Sprintf("%s/api/states", c.baseURL)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return fmt.Errorf("ha: build request: %w", err)
+	}
+	req.Header.Set("Authorization", "Bearer "+c.token)
+
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return fmt.Errorf("ha: get states: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode >= 300 {
+		body, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("ha: get states: status %d: %s", resp.StatusCode, string(body))
+	}
+
+	var states []struct {
+		EntityID   string `json:"entity_id"`
+		Attributes struct {
+			FriendlyName string `json:"friendly_name"`
+		} `json:"attributes"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&states); err != nil {
+		return fmt.Errorf("ha: decode states: %w", err)
+	}
+
+	cache := make(map[string]string)
+	for _, s := range states {
+		if !strings.HasPrefix(s.EntityID, "media_player.") || s.Attributes.FriendlyName == "" {
+			continue
+		}
+		cache[s.Attributes.FriendlyName] = s.EntityID
+	}
+	c.playerCache = cache
+	return nil
 }

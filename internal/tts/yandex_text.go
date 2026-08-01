@@ -2,10 +2,7 @@ package tts
 
 import (
 	"context"
-	"fmt"
 	"log/slog"
-
-	"golang.org/x/sync/errgroup"
 
 	"github.com/archer-developer/miranda/internal/config"
 )
@@ -31,24 +28,13 @@ func NewTextProvider(cfg config.YandexStationConfig, ha HAClient, logger *slog.L
 	}
 }
 
-// Speak sends text, chunked to the station's character limit, to all
-// configured entities simultaneously per chunk — each chunk broadcasts to
-// every entity in parallel, and the next chunk only starts once every entity
-// has finished playing the current one (see stationPlayer.waitIdle). This
-// keeps multi-room setups in sync: all speakers say each sentence together
-// rather than one room finishing before the next starts.
-func (p *textProvider) Speak(ctx context.Context, text string) error {
-	if len(p.cfg.Entities) == 0 {
-		return fmt.Errorf("tts: yandex_station_text: no entities configured")
-	}
+// Speak sends text, chunked to the station's character limit, to entityID in
+// order — each chunk is played and confirmed done (via alice_state polling)
+// before the next one is sent, so the station says each sentence in full
+// before the next begins.
+func (p *textProvider) Speak(ctx context.Context, text, entityID string) error {
 	for _, chunk := range Chunk(text, p.cfg.ChunkMaxChars) {
-		g, gctx := errgroup.WithContext(ctx)
-		for _, entity := range p.cfg.Entities {
-			g.Go(func() error {
-				return p.station.playAndWait(gctx, entity, chunk, "text")
-			})
-		}
-		if err := g.Wait(); err != nil {
+		if err := p.station.playAndWait(ctx, entityID, chunk, "text"); err != nil {
 			return err
 		}
 	}

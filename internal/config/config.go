@@ -430,11 +430,10 @@ type WebFetchToolConfig struct {
 	Enabled bool `yaml:"enabled"`
 }
 
-// YandexStationConfig configures the primary TTS channel.
+// YandexStationConfig configures the Yandex Station-specific TTS parameters.
 type YandexStationConfig struct {
-	Entities           []string `yaml:"entities"`
-	ChunkMaxChars      int      `yaml:"chunk_max_chars"`
-	IdlePollIntervalMS int      `yaml:"idle_poll_interval_ms"`
+	ChunkMaxChars      int `yaml:"chunk_max_chars"`
+	IdlePollIntervalMS int `yaml:"idle_poll_interval_ms"`
 	// PlaybackStartTimeoutMS bounds how long the dispatcher waits, after a
 	// play_media call, for the entity to actually leave "idle" before giving
 	// up and moving on to waiting for it to return to idle. See waitIdle in
@@ -499,6 +498,12 @@ type GeminiTTSConfig struct {
 
 // TTSConfig selects and configures the TTS channel(s).
 type TTSConfig struct {
+	// DefaultDevice is the friendly name of the media_player entity that
+	// receives TTS output when no specific device is requested — e.g.
+	// "Станция Мини 3 Про". The dispatcher resolves this name to an
+	// entity_id via the HA REST API at runtime (see ha.Client.ResolveMediaPlayer).
+	// speak_reply's optional device argument overrides this per-call.
+	DefaultDevice string `yaml:"default_device"`
 	// Primary is the TTS provider tried first for every Speak call:
 	// "yandex_station_text" (Yandex Station's own built-in voice, played via
 	// media_content_type "text" — the default) or "gemini_tts" (an external
@@ -601,7 +606,6 @@ func Default() Config {
 			// stays the always-available, zero-external-dependency provider.
 			Primary: "yandex_station_text",
 			YandexStation: YandexStationConfig{
-				Entities:               nil,
 				ChunkMaxChars:          100,
 				IdlePollIntervalMS:     300,
 				PlaybackStartTimeoutMS: 3000,

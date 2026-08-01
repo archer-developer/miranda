@@ -138,6 +138,13 @@ type ChatEvent struct {
 	Message        *history.Message `json:"message,omitempty"`
 }
 
+// speakerHA is the subset of *ha.Client the Orchestrator needs for per-entity
+// speaker coordination before alice MCP tool calls: resolve a speaker's
+// friendly name to its entity_id so WaitEntityIdle can poll the right entity.
+type speakerHA interface {
+	ResolveMediaPlayer(ctx context.Context, friendlyName string) (string, error)
+}
+
 // Orchestrator drives one full agent turn: it loads the user's memory and
 // prior conversation, calls the LLM router (looping on tool calls), executes
 // tools (either locally — remember_this — or via the MCP tool manager),
@@ -172,6 +179,9 @@ type Orchestrator struct {
 	// attachStore is set via SetAttachmentStore; nil means Attachments in
 	// InputRequest are ignored (file_upload.enabled is false).
 	attachStore *attachments.Store
+	// speakerHA is set via SetSpeakerHA; nil means pre-alice-tool speaker
+	// coordination (WaitIdle + alice_state polling) is skipped entirely.
+	speakerHA speakerHA
 }
 
 // SetTelegram wires the optional send_telegram tool in, mirroring
@@ -202,6 +212,14 @@ func (o *Orchestrator) SetWebTools(ts []tools.Tool) {
 // RunScheduledTasks is a no-op.
 func (o *Orchestrator) SetSchedule(s *schedule.Store) {
 	o.schedule = s
+}
+
+// SetSpeakerHA wires the optional speaker coordinator in — call once from
+// cmd/miranda with the same *ha.Client used for TTS, when HA is configured.
+// Without it, executeTool skips per-entity pre-call coordination and alice
+// tool calls fire immediately regardless of what the station is playing.
+func (o *Orchestrator) SetSpeakerHA(ha speakerHA) {
+	o.speakerHA = ha
 }
 
 // SetAttachmentStore wires the optional in-memory file-attachment cache in,
@@ -251,7 +269,7 @@ func (o *Orchestrator) Handle(ctx context.Context, req InputRequest) (InputRespo
 		// previous turn *before* this turn's own speech has any chance to
 		// enqueue anything, so a new voice turn always cuts in rather than
 		// queuing after what's already playing.
-		o.tts.Stop(ctx)
+		o.tts.Stop()
 	}
 
 	userID := req.UserID

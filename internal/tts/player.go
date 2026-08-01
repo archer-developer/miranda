@@ -9,6 +9,15 @@ import (
 	"github.com/archer-developer/miranda/internal/hub"
 )
 
+// speakItem is one unit of work in the Player's queue: text to synthesize
+// and entityID to play it through (the resolved media_player entity_id,
+// already looked up by the Dispatcher before enqueueing — the Player itself
+// has no knowledge of device names or HA).
+type speakItem struct {
+	text     string
+	entityID string
+}
+
 // Player is a background-worker queue that decouples "enqueue this text to
 // be spoken" from "block until it's actually audible" — Dispatcher.Speak
 // calls Enqueue and returns immediately, so a slow or quota-throttled
@@ -21,35 +30,26 @@ import (
 type Player struct {
 	mu    sync.Mutex
 	cond  *sync.Cond
-	queue []string
+	queue []speakItem
 	// cancel is set (under mu) to the cancel func of whichever chunk's
 	// context is currently being processed by run, and cleared back to nil
 	// once that call returns — Stop uses it to interrupt work in flight.
 	cancel context.CancelFunc
 	closed bool
 
-	speakOne func(ctx context.Context, text string) error
-
-	ha       HAClient
-	entities []string
+	speakOne func(ctx context.Context, text, entityID string) error
 
 	hub    *hub.Hub
 	logger *slog.Logger
 }
 
-// newPlayer builds a Player and starts its worker goroutine. entities is
-// the set of physical Yandex Station media_player entities Stop calls
-// media_player.media_stop on — the one part of "stop whatever's playing"
-// that's about the physical device, not about which provider queued the
-// audio in the first place.
-func newPlayer(ha HAClient, entities []string, speakOne func(ctx context.Context, text string) error, h *hub.Hub, logger *slog.Logger) *Player {
+// newPlayer builds a Player and starts its worker goroutine.
+func newPlayer(speakOne func(ctx context.Context, text, entityID string) error, h *hub.Hub, logger *slog.Logger) *Player {
 	if logger == nil {
 		logger = slog.Default()
 	}
 	p := &Player{
 		speakOne: speakOne,
-		ha:       ha,
-		entities: entities,
 		hub:      h,
 		logger:   logger,
 	}
@@ -58,11 +58,12 @@ func newPlayer(ha HAClient, entities []string, speakOne func(ctx context.Context
 	return p
 }
 
-// Enqueue appends text to the queue and returns immediately — see Player's
-// doc comment. Safe to call concurrently and while the worker is mid-chunk.
-func (p *Player) Enqueue(text string) {
+// Enqueue appends text+entityID to the queue and returns immediately — see
+// Player's doc comment. Safe to call concurrently and while the worker is
+// mid-chunk.
+func (p *Player) Enqueue(text, entityID string) {
 	p.mu.Lock()
-	p.queue = append(p.queue, text)
+	p.queue = append(p.queue, speakItem{text: text, entityID: entityID})
 	p.mu.Unlock()
 	p.cond.Signal()
 }
@@ -82,17 +83,18 @@ func (p *Player) run() {
 			p.mu.Unlock()
 			return
 		}
-		text := p.queue[0]
+		item := p.queue[0]
 		p.queue = p.queue[1:]
 
 		ctx, cancel := context.WithCancel(context.Background())
 		p.cancel = cancel
 		p.mu.Unlock()
 
-		err := p.speakOne(ctx, text)
+		err := p.speakOne(ctx, item.text, item.entityID)
 
 		p.mu.Lock()
 		p.cancel = nil
+		p.cond.Broadcast() // wake any WaitIdle callers blocked on this chunk
 		p.mu.Unlock()
 		cancel() // release the context's resources now that this chunk is done either way
 
@@ -105,23 +107,39 @@ func (p *Player) run() {
 }
 
 // Stop clears any not-yet-spoken queued text and interrupts whatever chunk
-// is currently being synthesized/played, then (regardless of whether
-// anything was actually in flight) tells every configured Yandex Station
-// entity to stop via media_player.media_stop — cancelling our own context
-// alone doesn't un-play audio the speaker has already started rendering, so
-// that HA call is what actually silences the physical device.
-func (p *Player) Stop(ctx context.Context) {
+// is currently being synthesized/played. The station will finish its current
+// short chunk on its own — Miranda's chunks are short enough that the brief
+// tail is acceptable, and avoids having to maintain a separate entity list
+// just for media_stop calls.
+func (p *Player) Stop() {
 	p.mu.Lock()
+	defer p.mu.Unlock()
 	p.queue = nil
 	if p.cancel != nil {
 		p.cancel()
 	}
-	p.mu.Unlock()
+}
 
-	for _, entity := range p.entities {
-		if err := p.ha.CallService(ctx, "media_player", "media_stop", map[string]any{"entity_id": entity}); err != nil {
-			p.publish("stop failed for " + entity + ": " + err.Error())
-		}
+// WaitIdle blocks until the Player's queue is empty and no chunk is currently
+// being synthesized/played — i.e. the background worker is truly idle.
+// Returns immediately if already idle, and honours ctx cancellation.
+//
+// A helper goroutine broadcasts on the cond when ctx is cancelled, because
+// sync.Cond.Wait has no built-in timeout: without that broadcast, a caller
+// waiting while the player is busy would be stuck until the next chunk
+// completes naturally.
+func (p *Player) WaitIdle(ctx context.Context) {
+	wakeCtx, cancelWake := context.WithCancel(ctx)
+	defer cancelWake()
+	go func() {
+		<-wakeCtx.Done()
+		p.cond.Broadcast()
+	}()
+
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	for (len(p.queue) > 0 || p.cancel != nil) && ctx.Err() == nil {
+		p.cond.Wait()
 	}
 }
 
