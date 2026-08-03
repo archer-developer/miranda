@@ -169,7 +169,7 @@ async function load() {
   for (let i = 0; i < 4; i++) listEl.appendChild(skeletonCard());
 
   try {
-    const res = await fetch("/api/dialogs?limit=100");
+    const res = await fetch("/api/dialogs?limit=10");
     if (!res.ok) throw new Error(String(res.status));
     const conversations = await res.json();
     listEl.innerHTML = "";
