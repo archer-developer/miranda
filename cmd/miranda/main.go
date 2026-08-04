@@ -295,8 +295,8 @@ func run(cfg config.Config, logger *slog.Logger, eventHub *hub.Hub) error {
 	// server construction below (SetUploadHandler registers the route on the
 	// server's mux, which only exists after NewServer).
 	var (
-		uploadFilesURL   string
-		uploadToken      string
+		uploadFilesURL    string
+		uploadToken       string
 		uploadAttachStore *attachments.Store
 	)
 	if cfg.FileUpload.Enabled {
@@ -308,6 +308,12 @@ func run(cfg config.Config, logger *slog.Logger, eventHub *hub.Hub) error {
 		uploadAttachStore = attachments.NewStore(0) // 0 → default 1-hour TTL
 		defer uploadAttachStore.Close()
 		orchestrator.SetAttachmentStore(uploadAttachStore)
+		// mcp.PrefixedToolName matches mcp.Manager.Tools' own prefixing of
+		// every MCP tool name ("<serverName>_<toolName>") so executeTool can
+		// recognize a download_file result regardless of which MCP server
+		// entry the sandbox is configured under.
+		downloadRecordTTL := time.Duration(cfg.FileUpload.DownloadRecordTTLHours) * time.Hour
+		orchestrator.SetSandboxDownload(mcp.PrefixedToolName(cfg.FileUpload.SandboxMCPServerName, "download_file"), downloadRecordTTL)
 	}
 
 	var webHandler http.Handler

@@ -4,11 +4,14 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
 	"github.com/robfig/cron/v3"
 
+	"github.com/archer-developer/miranda/internal/attachments"
 	"github.com/archer-developer/miranda/internal/history"
 	"github.com/archer-developer/miranda/internal/hub"
 	"github.com/archer-developer/miranda/internal/llm"
@@ -30,6 +33,151 @@ const searchHistoryLimit = 8
 type turnControl struct {
 	endRequested    bool
 	forgetRequested bool
+	// downloadedFiles accumulates one entry per successful call to the
+	// sandbox's download_file MCP tool this turn (see executeTool's
+	// sandboxDownloadToolName check) — Handle reads this after the loop
+	// finishes to append a <download>...</download> marker per file via
+	// appendDownloadMarkers, deterministically, regardless of what the
+	// model's own reply text says.
+	downloadedFiles []downloadedFile
+}
+
+// downloadedFile captures the metadata the sandbox's download_file MCP tool
+// reports in its result text (see downloadFileHandler in
+// ../../miranda-code-execution-sandbox/internal/mcpserver/sessions.go).
+type downloadedFile struct {
+	fileID    string
+	filename  string
+	sizeBytes int64
+	mimeType  string
+}
+
+// parseDownloadFileResult extracts file_id/filename/size_bytes/mime_type from
+// the sandbox download_file tool's plain-text result. internal/mcp only ever
+// surfaces MCP TextContent blocks (see SDKClient.CallTool) — there is no
+// structured JSON to parse instead, so this reads the "key: value" lines
+// download_file's handler formats its result as. ok is false if file_id or
+// filename is missing, e.g. because the call itself failed and returned an
+// error string instead of the success format.
+//
+// Only the FIRST line matching each key is kept, never the last: the
+// sandbox's result text embeds the model-supplied filename verbatim (its
+// only sanitization is filepath.Base(filepath.Clean(...)), which does not
+// strip embedded newlines), so a session can create a file whose name is
+// itself a crafted "\nfile_id: <victim-file-id>" line. Since the real
+// file_id is always emitted before filename in the sandbox's fixed format,
+// first-match-wins means an injected line appearing inside filename's own
+// value can never override the genuine, server-generated file_id that
+// already-attachStore.Put would otherwise associate with the wrong owner —
+// see executeTool.
+func parseDownloadFileResult(text string) (downloadedFile, bool) {
+	var df downloadedFile
+	for _, line := range strings.Split(text, "\n") {
+		key, value, found := strings.Cut(line, ": ")
+		if !found {
+			continue
+		}
+		switch key {
+		case "file_id":
+			if df.fileID == "" {
+				df.fileID = value
+			}
+		case "filename":
+			if df.filename == "" {
+				df.filename = value
+			}
+		case "size_bytes":
+			if df.sizeBytes == 0 {
+				if n, err := strconv.ParseInt(value, 10, 64); err == nil {
+					df.sizeBytes = n
+				}
+			}
+		case "mime_type":
+			if df.mimeType == "" {
+				df.mimeType = value
+			}
+		}
+	}
+	return df, df.fileID != "" && df.filename != ""
+}
+
+// appendDownloadMarkers deterministically appends one <download>...</download>
+// marker per file the model retrieved via download_file this turn, so the web
+// UI chat screen (chat.js's extractDownloadBlocks) can always render a working
+// download chip instead of trusting the model to reproduce a link verbatim —
+// the same "server, not the model, owns the reliable presentation" reasoning
+// processAttachments applies on the inbound side. Each marker's payload is one
+// line of JSON (not pipe-delimited) so a filename containing "|" or ">" can't
+// break the client-side parse.
+func appendDownloadMarkers(text string, files []downloadedFile) string {
+	for _, f := range files {
+		payload, err := json.Marshal(struct {
+			FileID    string `json:"file_id"`
+			Filename  string `json:"filename"`
+			SizeBytes int64  `json:"size_bytes"`
+			MIMEType  string `json:"mime_type"`
+		}{f.fileID, f.filename, f.sizeBytes, f.mimeType})
+		if err != nil {
+			continue
+		}
+		text += "\n\n<download>" + string(payload) + "</download>"
+	}
+	return text
+}
+
+// downloadMarkerPattern matches one marker appendDownloadMarkers injects.
+var downloadMarkerPattern = regexp.MustCompile(`\n\n<download>([\s\S]*?)</download>`)
+
+// renderDownloadMarkersForChannel converts every <download>{json}</download>
+// marker in text into a form the given source's client can actually render.
+// Only the web UI's chat screen (chat.js's extractDownloadBlocks) knows to
+// parse the raw marker syntax into a clickable chip, so it's passed through
+// unchanged for source == webUISource; every other channel — ha_assist (HA's
+// Assist pipeline speaks/displays the reply text as-is) and Telegram
+// (telegram.go sends resp.Reply verbatim via the Bot API, with no
+// client-side JS to parse anything) — would otherwise show or speak the
+// literal JSON tag. Those channels get a plain-text line instead.
+//
+// text is expected to already carry markers from appendDownloadMarkers.
+// Handle always persists the raw-marker form to history regardless of
+// source, so the web UI's history browser can still render a chip for a
+// conversation that originated on another channel — only the outbound reply
+// for a non-web channel needs converting, not what's stored.
+func renderDownloadMarkersForChannel(text, source string) string {
+	if source == webUISource {
+		return text
+	}
+	return downloadMarkerPattern.ReplaceAllStringFunc(text, func(match string) string {
+		sub := downloadMarkerPattern.FindStringSubmatch(match)
+		if len(sub) < 2 {
+			return ""
+		}
+		var df struct {
+			Filename  string `json:"filename"`
+			SizeBytes int64  `json:"size_bytes"`
+		}
+		if err := json.Unmarshal([]byte(sub[1]), &df); err != nil || df.Filename == "" {
+			return ""
+		}
+		if df.SizeBytes > 0 {
+			return fmt.Sprintf("\n\n📎 %s (%s)", df.Filename, formatByteSize(df.SizeBytes))
+		}
+		return fmt.Sprintf("\n\n📎 %s", df.Filename)
+	})
+}
+
+// formatByteSize renders a byte count as a short human-readable string,
+// mirroring the web UI's formatFileSize (internal/webui/static/js/downloads.js)
+// for the plain-text fallback renderDownloadMarkersForChannel produces.
+func formatByteSize(n int64) string {
+	switch {
+	case n < 1024:
+		return fmt.Sprintf("%d B", n)
+	case n < 1024*1024:
+		return fmt.Sprintf("%d KB", n/1024)
+	default:
+		return fmt.Sprintf("%.1f MB", float64(n)/(1024*1024))
+	}
 }
 
 // resolveConversation either continues the user's currently open
@@ -689,6 +837,28 @@ func (o *Orchestrator) executeTool(ctx context.Context, userID string, tc llm.To
 	if err != nil {
 		return fmt.Sprintf("error: %v", err)
 	}
+
+	// Recognize the sandbox's download_file tool by its namespaced MCP name
+	// (set via SetSandboxDownload) and, on success, both remember who
+	// requested it (attachStore, so GET /api/files/{file_id} can reject a
+	// different household member fetching it) and queue it for
+	// appendDownloadMarkers to inject into the final reply.
+	if o.sandboxDownloadToolName != "" && tc.Name == o.sandboxDownloadToolName {
+		if df, ok := parseDownloadFileResult(result); ok {
+			control.downloadedFiles = append(control.downloadedFiles, df)
+			if o.attachStore != nil {
+				o.attachStore.Put(attachments.Record{
+					UserID:   userID,
+					FileID:   df.fileID,
+					Filename: df.filename,
+					MIMEType: df.mimeType,
+					Size:     df.sizeBytes,
+					TTL:      o.downloadRecordTTL,
+				})
+			}
+		}
+	}
+
 	return result
 }
 

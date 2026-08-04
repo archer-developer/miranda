@@ -177,8 +177,25 @@ type Orchestrator struct {
 	// tools are never offered and RunScheduledTasks is a no-op.
 	schedule *schedule.Store
 	// attachStore is set via SetAttachmentStore; nil means Attachments in
-	// InputRequest are ignored (file_upload.enabled is false).
+	// InputRequest are ignored (file_upload.enabled is false). Also doubles
+	// as the ownership record for files retrieved via download_file (see
+	// sandboxDownloadToolName) so GET /api/files/{file_id} can reject a
+	// household member fetching another member's file, the same check
+	// processAttachments already does for uploaded files.
 	attachStore *attachments.Store
+	// sandboxDownloadToolName is set via SetSandboxDownload to the namespaced
+	// MCP tool name (mcp.Manager's "<serverName>_download_file") of the
+	// sandbox's download_file tool; "" means executeTool never recognizes a
+	// download_file result, so no <download>...</download> marker is ever
+	// injected into a reply. See appendDownloadMarkers in agent_loop.go.
+	sandboxDownloadToolName string
+	// downloadRecordTTL is set via SetSandboxDownload from
+	// config.FileUploadConfig.DownloadRecordTTLHours and stamped onto every
+	// download ownership record's Record.TTL (see executeTool) — longer than
+	// attachStore's own short upload-oriented default TTL, since a download
+	// marker is embedded durably in persisted conversation history and can be
+	// revisited long after the turn that created it.
+	downloadRecordTTL time.Duration
 	// speakerHA is set via SetSpeakerHA; nil means pre-alice-tool speaker
 	// coordination (WaitIdle + alice_state polling) is skipped entirely.
 	speakerHA speakerHA
@@ -229,6 +246,22 @@ func (o *Orchestrator) SetSpeakerHA(ha speakerHA) {
 // any Attachments field in an InputRequest is ignored silently.
 func (o *Orchestrator) SetAttachmentStore(s *attachments.Store) {
 	o.attachStore = s
+}
+
+// SetSandboxDownload wires the sandbox's download_file MCP tool name in,
+// mirroring SetAttachmentStore's post-construction style — call it once from
+// cmd/miranda with mcp.PrefixedToolName(SandboxMCPServerName, "download_file")
+// and config.FileUploadConfig.DownloadRecordTTLHours, only when
+// config.FileUploadConfig.Enabled (the same gate that creates o.attachStore;
+// both directions share the one config block since they proxy the same
+// sandbox "/files" HTTP namespace — see FileUploadConfig's doc comment).
+// Leaving it uncalled (the default, "") means executeTool never special-cases
+// a download_file result, so no download marker is ever injected and
+// GET /api/files/{file_id} has nothing to serve anyway (the route itself is
+// gated by SetUploadHandler, not this).
+func (o *Orchestrator) SetSandboxDownload(toolName string, recordTTL time.Duration) {
+	o.sandboxDownloadToolName = toolName
+	o.downloadRecordTTL = recordTTL
 }
 
 // NewOrchestrator wires the agent loop's dependencies together.
@@ -321,8 +354,31 @@ func (o *Orchestrator) Handle(ctx context.Context, req InputRequest) (InputRespo
 	control := &turnControl{}
 	finalText, providerUsed, err := o.runAgentLoop(ctx, userID, convID, req.Source, messages, tools, control)
 	if err != nil {
+		// An earlier tool-call iteration in this same loop may have already
+		// called download_file successfully (attachStore.Put and
+		// control.downloadedFiles both happen synchronously at call time in
+		// executeTool) before a *later* iteration errored out. Without this,
+		// that file would be staged and ownership-recorded with no marker
+		// ever written anywhere the user could discover it through normal
+		// use — see appendDownloadMarkers below for the success path this
+		// mirrors. Best-effort: the turn still reports its original error.
+		if len(control.downloadedFiles) > 0 {
+			recovered := appendDownloadMarkers("", control.downloadedFiles)
+			if _, recErr := o.history.AppendMessage(ctx, convID, "assistant", recovered); recErr != nil {
+				o.hub.Publish(hub.Event{Source: "error", Message: "record recovered download markers: " + recErr.Error()})
+			}
+		}
 		return InputResponse{}, err
 	}
+	// Deterministically append a marker for every file the model retrieved
+	// via download_file this turn, regardless of what the model's own text
+	// says — mirrors processAttachments' deterministic file-block injection
+	// on the inbound side. See appendDownloadMarkers. The raw-marker form is
+	// always what's persisted to history, regardless of req.Source, so the
+	// web UI's history browser can render a chip for a conversation that
+	// originated on any channel; only the outbound reply below is converted
+	// per-channel.
+	finalText = appendDownloadMarkers(finalText, control.downloadedFiles)
 
 	assistantMsgID, err := o.history.AppendMessage(ctx, convID, "assistant", finalText)
 	if err != nil {
@@ -350,7 +406,7 @@ func (o *Orchestrator) Handle(ctx context.Context, req InputRequest) (InputRespo
 
 	return InputResponse{
 		ConversationID:     convID,
-		Reply:              finalText,
+		Reply:              renderDownloadMarkersForChannel(finalText, req.Source),
 		ProviderUsed:       providerUsed,
 		UserMessageID:      userMsgID,
 		AssistantMessageID: assistantMsgID,

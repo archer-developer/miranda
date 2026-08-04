@@ -42,8 +42,16 @@ type Record struct {
 	// blobs and PDFs that the sandbox processes, which are accessed via
 	// FileID rather than inlined into the prompt.
 	Data []byte
-	// StoredAt is when this record was inserted; compared against the
-	// store's TTL by the background sweeper.
+	// TTL overrides the store's default TTL for this one record when
+	// non-zero. Upload-staging records rely on the store default (built for
+	// a turn still being composed); a download's ownership record instead
+	// backs a link embedded durably in persisted conversation history, which
+	// a user may revisit long after the default TTL would otherwise evict
+	// it — see internal/httpapi's executeTool, which sets this for
+	// download_file results.
+	TTL time.Duration
+	// StoredAt is when this record was inserted; compared against TTL (or
+	// the store's default) by the background sweeper.
 	StoredAt time.Time
 }
 
@@ -118,12 +126,17 @@ func (s *Store) sweep() {
 	}
 }
 
-// evictExpired removes all records whose age exceeds the store's TTL.
+// evictExpired removes all records whose age exceeds their TTL — a record's
+// own Record.TTL if set, otherwise the store's default.
 func (s *Store) evictExpired() {
-	cutoff := time.Now().Add(-s.ttl)
+	now := time.Now()
 	s.mu.Lock()
 	for id, rec := range s.records {
-		if rec.StoredAt.Before(cutoff) {
+		ttl := s.ttl
+		if rec.TTL > 0 {
+			ttl = rec.TTL
+		}
+		if rec.StoredAt.Before(now.Add(-ttl)) {
 			delete(s.records, id)
 		}
 	}

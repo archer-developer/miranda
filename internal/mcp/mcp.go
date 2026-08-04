@@ -28,6 +28,16 @@ import (
 // transient error to retry next turn on the same, still-live session.
 var ErrDisconnected = errors.New("mcp: server disconnected")
 
+// PrefixedToolName builds the tool name Manager.Tools advertises for a given
+// server/tool pair — the single source of truth for that "<serverName>_<toolName>"
+// convention, so callers that need to recognize a specific well-known MCP
+// tool by name from outside this package (e.g. cmd/miranda wiring the
+// sandbox's download_file tool into Orchestrator.SetSandboxDownload) don't
+// have to hand-reconstruct the format and risk drifting from Tools/Call below.
+func PrefixedToolName(serverName, toolName string) string {
+	return serverName + "_" + toolName
+}
+
 // Client is one MCP server's tool source: it can list its tools and invoke
 // them by name.
 type Client interface {
@@ -168,7 +178,7 @@ func (m *Manager) Tools(ctx context.Context) []llm.ToolDef {
 			continue
 		}
 		for _, t := range tools {
-			t.Name = name + "_" + t.Name
+			t.Name = PrefixedToolName(name, t.Name)
 			out = append(out, t)
 		}
 	}
@@ -184,7 +194,7 @@ func (m *Manager) Call(ctx context.Context, prefixedName, argumentsJSON string) 
 	order, clients := m.snapshot()
 
 	for _, name := range order {
-		prefix := name + "_"
+		prefix := PrefixedToolName(name, "")
 		if strings.HasPrefix(prefixedName, prefix) {
 			c, ok := clients[name]
 			if !ok {

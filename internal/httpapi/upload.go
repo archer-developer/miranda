@@ -10,6 +10,7 @@ import (
 	"mime/multipart"
 	"net/http"
 	"net/textproto"
+	"net/url"
 	"strings"
 	"time"
 
@@ -20,6 +21,17 @@ import (
 // to accept and stage the file. The sandbox may be under CPU/IO pressure from
 // concurrent container execs; 60 seconds is generous but still bounded.
 const sandboxUploadTimeout = 60 * time.Second
+
+// sandboxDownloadTimeout caps how long handleDownload will wait on the
+// sandbox, including the time spent streaming the body back to the caller —
+// longer than sandboxUploadTimeout because a download_file result can be a
+// video or other large artifact (sandbox default max_download_size_bytes is
+// 200 MB) rather than the smaller uploads this endpoint's sibling handles.
+// 30 minutes gives a ~200MB transfer room to complete over a slow/mobile
+// client (5 minutes required an unrealistic ~700KB/s sustained minimum);
+// the deadline still bounds the request so a genuinely stalled sandbox or
+// client can't hold the connection open indefinitely.
+const sandboxDownloadTimeout = 30 * time.Minute
 
 // UploadResponse is the JSON body POST /api/upload returns to the web UI on
 // a successful upload. It mirrors the sandbox's POST /files response shape so
@@ -225,4 +237,109 @@ func (s *Server) forwardToSandbox(ctx context.Context, filename, mimeType string
 // buffered here without a separate edit — the two functions stay in sync.
 func shouldBufferData(mimeType string) bool {
 	return isTextMIME(mimeType) || mimeTypePrefix(mimeType) == "image"
+}
+
+// handleDownload proxies a GET request for a file the model retrieved from a
+// sandbox session via the download_file MCP tool (see
+// ../../miranda-code-execution-sandbox/CLAUDE.md's "File download flow").
+// The file_id path value is what that tool call returned and what
+// appendDownloadMarkers (internal/httpapi/agent_loop.go) embeds in a
+// <download>...</download> marker in the assistant's reply — the web UI chat
+// screen (chat.js's extractDownloadBlocks) turns that marker into a chip
+// linking straight to this route.
+//
+// Auth: same dual bearer-token / session-cookie check as /api/v1/input and
+// POST /api/upload. The file's recorded owner (o.attachStore, populated by
+// executeTool at download_file call time with the actual resolved userID,
+// not just the session identity — see executeTool) must match the
+// requesting user — a mismatched or unknown file_id 404s rather than
+// revealing whether it exists, the same IDOR-safe pattern GET
+// /api/dialogs/{id} uses. Session-cookie auth identifies the requester as
+// the logged-in user, same as every other endpoint. Bearer-token auth has
+// no identity of its own, so (mirroring how POST /api/v1/input lets a
+// bearer-token caller supply InputRequest.UserID) the caller must pass a
+// "user_id" query parameter to be recognized as anyone in particular; with
+// none given, requestingUser is "" and only ever matches an ownerless
+// record (rec.UserID == ""), the same fail-closed default processAttachments
+// applies for an anonymous bearer-token upload.
+//
+// Unlike handleUpload, the staged file on the sandbox side is NOT deleted by
+// this GET (mirroring the sandbox's own GET /files/{id} semantics — see that
+// repo's CLAUDE.md), so a dropped connection or retry can re-fetch the same
+// file_id until the sandbox's own TTL sweeper removes it.
+func (s *Server) handleDownload(w http.ResponseWriter, r *http.Request) {
+	sessionUser, ok := s.authorize(r)
+	if !ok {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+	if s.upload == nil {
+		// Safety valve: the route should not be registered when upload/download
+		// is nil, but guard here so a misconfigured mux never panics.
+		http.Error(w, "file download is not configured", http.StatusNotImplemented)
+		return
+	}
+	if s.orchestrator.attachStore == nil {
+		http.Error(w, "attachment store is not configured", http.StatusInternalServerError)
+		return
+	}
+
+	fileID := r.PathValue("file_id")
+	if fileID == "" {
+		http.Error(w, "missing file_id", http.StatusBadRequest)
+		return
+	}
+
+	requestingUser := sessionUser
+	if requestingUser == "" && s.users != nil {
+		requestingUser = s.users.ResolveUserID(r.URL.Query().Get("source"), r.URL.Query().Get("user_id"))
+	}
+
+	rec, found := s.orchestrator.attachStore.Get(fileID)
+	if !found || (rec.UserID != "" && rec.UserID != requestingUser) {
+		http.Error(w, "not found", http.StatusNotFound)
+		return
+	}
+
+	downloadCtx, cancel := context.WithTimeout(r.Context(), sandboxDownloadTimeout)
+	defer cancel()
+
+	req, err := http.NewRequestWithContext(downloadCtx, http.MethodGet, s.upload.sandboxURL+"/"+url.PathEscape(fileID), nil)
+	if err != nil {
+		http.Error(w, "failed to build sandbox request: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	if s.upload.sandboxToken != "" {
+		req.Header.Set("Authorization", "Bearer "+s.upload.sandboxToken)
+	}
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		s.logger.Error("download: sandbox request failed", "error", err, "file_id", fileID)
+		http.Error(w, "failed to fetch file from sandbox: "+err.Error(), http.StatusBadGateway)
+		return
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode != http.StatusOK {
+		errBody, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
+		http.Error(w, fmt.Sprintf("sandbox returned HTTP %d: %s", resp.StatusCode, strings.TrimSpace(string(errBody))), resp.StatusCode)
+		return
+	}
+
+	// Forward only the specific headers a file download needs — never copy
+	// resp.Header wholesale, which would let the sandbox dictate arbitrary
+	// response headers (e.g. Set-Cookie) to this handler's caller.
+	if ct := resp.Header.Get("Content-Type"); ct != "" {
+		w.Header().Set("Content-Type", ct)
+	}
+	if cd := resp.Header.Get("Content-Disposition"); cd != "" {
+		w.Header().Set("Content-Disposition", cd)
+	}
+	if cl := resp.Header.Get("Content-Length"); cl != "" {
+		w.Header().Set("Content-Length", cl)
+	}
+	if _, err := io.Copy(w, resp.Body); err != nil {
+		s.logger.Warn("download: failed streaming file to client", "error", err, "file_id", fileID)
+	}
 }

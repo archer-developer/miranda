@@ -3,6 +3,7 @@
 // them — see internal/webui.handleDialogs), click to expand messages.
 import { t } from "../i18n.js";
 import { icon } from "../icons.js";
+import { extractDownloadBlocks, downloadChip } from "../downloads.js";
 
 let listEl;
 
@@ -33,19 +34,38 @@ function renderMessages(container, messages) {
   }
   for (const m of turns) {
     const line = document.createElement("div");
-    line.className = "flex gap-2 py-1.5 text-sm leading-relaxed";
+    line.className = "py-1.5";
+
+    const row = document.createElement("div");
+    row.className = "flex gap-2 text-sm leading-relaxed";
 
     const roleSpan = document.createElement("span");
     roleSpan.className = `mt-0.5 shrink-0 text-xs font-medium ${m.role === "user" ? "text-(--color-text-muted)" : "text-(--color-accent-emphasis)"}`;
     roleSpan.textContent = m.role === "user" ? t("history_role_user", "You") : "Miranda";
 
+    // extractDownloadBlocks strips any <download>{json}</download> marker
+    // (internal/httpapi/agent_loop.go's appendDownloadMarkers) before display
+    // — otherwise a past conversation containing a download would show the
+    // raw JSON marker verbatim instead of a chip (see downloads.js).
+    let content = m.content;
+    let downloads = [];
+    if (m.role === "assistant") {
+      const extracted = extractDownloadBlocks(content);
+      content = extracted.displayText;
+      downloads = extracted.downloads;
+    }
+
     // Content is untrusted user/assistant text — set via textContent, never
     // interpolated into innerHTML, so it can never be interpreted as markup.
     const contentSpan = document.createElement("span");
     contentSpan.className = "min-w-0 flex-1 whitespace-pre-wrap text-(--color-text-muted)";
-    contentSpan.textContent = m.content;
+    contentSpan.textContent = content;
 
-    line.append(roleSpan, contentSpan);
+    row.append(roleSpan, contentSpan);
+    line.appendChild(row);
+    for (const { fileId, filename, sizeBytes } of downloads) {
+      line.appendChild(downloadChip(fileId, filename, sizeBytes));
+    }
     container.appendChild(line);
   }
 }

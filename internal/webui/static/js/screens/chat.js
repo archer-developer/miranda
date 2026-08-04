@@ -5,6 +5,7 @@
 import { t } from "../i18n.js";
 import { icon } from "../icons.js";
 import * as chatWs from "../chat-ws.js";
+import { formatFileSize, extractDownloadBlocks, downloadChip } from "../downloads.js";
 
 let messagesEl, scrollEl, formEl, textEl, sendBtn, fileInput, attachBtn, attachChip, unsubscribeWs, unsubscribeReconnect;
 // Non-null while a file upload XHR is in flight — aborted by clearAttachment().
@@ -65,12 +66,6 @@ function formatTime(iso) {
   } catch {
     return "";
   }
-}
-
-function formatFileSize(bytes) {
-  if (bytes < 1024) return `${bytes} B`;
-  if (bytes < 1024 * 1024) return `${Math.round(bytes / 1024)} KB`;
-  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }
 
 /** Scale an image File down to at most maxPx on both axes and return a compact
@@ -206,12 +201,17 @@ function bubble(role, text, timeIso) {
   wrap.className = `flex flex-col ${role === "user" ? "items-end" : "items-start"}`;
 
   let displayText = text;
+  let downloads = [];
   if (role === "user") {
     const { displayText: dt, chips } = extractFileAttachments(text);
     displayText = dt;
     for (const { filename, size } of chips) {
       wrap.appendChild(attachmentChip(filename, size));
     }
+  } else if (role === "assistant") {
+    const { displayText: dt, downloads: dl } = extractDownloadBlocks(text);
+    displayText = dt;
+    downloads = dl;
   }
 
   if (displayText) {
@@ -222,6 +222,10 @@ function bubble(role, text, timeIso) {
         : "max-w-[85%] whitespace-pre-wrap rounded-2xl rounded-bl-md border border-(--color-border) bg-(--color-surface)/70 px-4 py-2.5 text-sm leading-relaxed text-(--color-text) sm:max-w-[75%]";
     b.textContent = displayText;
     wrap.appendChild(b);
+  }
+
+  for (const { fileId, filename, sizeBytes } of downloads) {
+    wrap.appendChild(downloadChip(fileId, filename, sizeBytes));
   }
 
   if (timeIso) {

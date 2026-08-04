@@ -15,17 +15,17 @@ import (
 // a value set in Default() so a missing or partial config.yaml still yields a
 // fully runnable configuration.
 type Config struct {
-	Server   ServerConfig   `yaml:"server"`
-	Storage  StorageConfig  `yaml:"storage"`
-	Logging  LoggingConfig  `yaml:"logging"`
-	LLM      LLMConfig      `yaml:"llm"`
-	Agent    AgentConfig    `yaml:"agent"`
-	Memory   MemoryConfig   `yaml:"memory"`
-	MCP      MCPConfig      `yaml:"mcp"`
-	Tavily   TavilyConfig   `yaml:"tavily"`
-	TTS      TTSConfig      `yaml:"tts"`
-	WebUI    WebUIConfig    `yaml:"web_ui"`
-	WebAuthn WebAuthnConfig `yaml:"webauthn"`
+	Server     ServerConfig     `yaml:"server"`
+	Storage    StorageConfig    `yaml:"storage"`
+	Logging    LoggingConfig    `yaml:"logging"`
+	LLM        LLMConfig        `yaml:"llm"`
+	Agent      AgentConfig      `yaml:"agent"`
+	Memory     MemoryConfig     `yaml:"memory"`
+	MCP        MCPConfig        `yaml:"mcp"`
+	Tavily     TavilyConfig     `yaml:"tavily"`
+	TTS        TTSConfig        `yaml:"tts"`
+	WebUI      WebUIConfig      `yaml:"web_ui"`
+	WebAuthn   WebAuthnConfig   `yaml:"webauthn"`
 	Telegram   TelegramConfig   `yaml:"telegram"`
 	Schedule   ScheduleConfig   `yaml:"schedule"`
 	FileUpload FileUploadConfig `yaml:"file_upload"`
@@ -179,25 +179,43 @@ type ScheduleConfig struct {
 	Enabled bool `yaml:"enabled"`
 }
 
-// FileUploadConfig controls the optional POST /api/upload endpoint and
-// client-side file attachment support in the web UI. Opt-in (Enabled
+// FileUploadConfig controls the optional POST /api/upload and
+// GET /api/files/{file_id} endpoints and client-side file attachment/download
+// support in the web UI — both directions of file transfer with the sandbox's
+// "/files" HTTP namespace share this one config block. Opt-in (Enabled
 // defaults false) because it requires a configured sandbox MCP server to
-// proxy uploads to.
+// proxy uploads/downloads to.
 type FileUploadConfig struct {
-	// Enabled activates POST /api/upload and attachment processing in the
-	// agent loop. Requires SandboxMCPServerName to be set.
+	// Enabled activates POST /api/upload, GET /api/files/{file_id}, and
+	// attachment processing in the agent loop. Requires SandboxMCPServerName
+	// to be set.
 	Enabled bool `yaml:"enabled"`
 	// SandboxMCPServerName is the name of an MCP server entry in
-	// MCPConfig.Servers whose URL hosts the sandbox's file-upload API.
+	// MCPConfig.Servers whose URL hosts the sandbox's file transfer API.
 	// The files endpoint URL is derived by replacing the "/mcp" suffix of
 	// that server's URL with "/files" — e.g.
 	// "http://192.168.1.50:8788/mcp" → "http://192.168.1.50:8788/files".
-	// The same server's TokenEnv is used to authenticate upload requests.
+	// The same server's TokenEnv is used to authenticate both upload and
+	// download requests, and this same name is what SetSandboxDownload
+	// namespaces the download_file MCP tool name against.
 	SandboxMCPServerName string `yaml:"sandbox_mcp_server_name"`
 	// MaxFileSizeBytes is the maximum size of a single uploaded file.
 	// Defaults to 50 MB. Applies both to the /api/upload read limit and
-	// to what Miranda proxies to the sandbox.
+	// to what Miranda proxies to the sandbox. Downloads are bounded
+	// separately, by the sandbox's own max_download_size_bytes — a
+	// download_file call already rejects an oversized file before Miranda
+	// ever proxies a GET /api/files/{file_id} for it.
 	MaxFileSizeBytes int64 `yaml:"max_file_size_bytes"`
+	// DownloadRecordTTLHours is how long a download_file ownership record
+	// (internal/attachments.Store, Record.TTL) stays valid before
+	// GET /api/files/{file_id} starts 404ing it. Unlike an upload-staging
+	// record — which only needs to outlive the turn still composing a
+	// prompt — a download's <download>...</download> marker is embedded
+	// durably in persisted conversation history and can be clicked again
+	// whenever that conversation is reopened, so it needs a much longer
+	// window than the store's own short upload-oriented default TTL.
+	// Defaults to 720 hours (30 days).
+	DownloadRecordTTLHours int `yaml:"download_record_ttl_hours"`
 }
 
 // LoggingConfig controls file logging: the general application log (a
@@ -713,8 +731,9 @@ func Default() Config {
 			// Opt-in, same posture as Telegram/WebAuthn — requires a
 			// configured sandbox MCP server URL to proxy uploads to, so
 			// there's no safe auto-detected default.
-			Enabled:          false,
-			MaxFileSizeBytes: 50 * 1024 * 1024, // 50 MB
+			Enabled:                false,
+			MaxFileSizeBytes:       50 * 1024 * 1024, // 50 MB
+			DownloadRecordTTLHours: 720,              // 30 days
 		},
 		// No default Users: web UI login is mandatory and fails closed until
 		// config.yaml lists at least one account (see internal/users).
