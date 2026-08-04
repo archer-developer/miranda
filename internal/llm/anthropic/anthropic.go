@@ -245,12 +245,25 @@ func toAnthropicTools(tools []llm.ToolDef) []anthropic.ToolUnionParam {
 	}
 	out := make([]anthropic.ToolUnionParam, 0, len(tools))
 	for _, t := range tools {
+		// Properties must never be a nil interface: anthropic.ToolInputSchemaParam
+		// has no fields of its own besides Properties/Required/Type, so a tool
+		// whose schema omits "properties" entirely (e.g. an MCP tool that takes
+		// no arguments, like {"type":"object","additionalProperties":false})
+		// would otherwise leave every field at its Go zero value — the SDK's
+		// `omitzero` tag on ToolParam.InputSchema then treats the whole struct
+		// as absent and drops "input_schema" from the request entirely, which
+		// Anthropic rejects with "input_schema: Field required". An empty map
+		// is a non-nil interface value, so the struct is never all-zero.
+		properties := t.Parameters["properties"]
+		if properties == nil {
+			properties = map[string]any{}
+		}
 		out = append(out, anthropic.ToolUnionParam{
 			OfTool: &anthropic.ToolParam{
 				Name:        t.Name,
 				Description: anthropic.String(t.Description),
 				InputSchema: anthropic.ToolInputSchemaParam{
-					Properties: t.Parameters["properties"],
+					Properties: properties,
 					Required:   requiredFields(t.Parameters),
 				},
 			},

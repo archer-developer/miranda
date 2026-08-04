@@ -472,11 +472,14 @@ func TestToGeminiContents_EchoesThoughtSignatureOnReplay(t *testing.T) {
 	require.Equal(t, sigBytes, assistantContent.Parts[0].ThoughtSignature)
 }
 
-// TestToGeminiContents_NoProviderMetadataLeavesSignatureNil confirms a
+// TestToGeminiContents_NoProviderMetadataUsesPlaceholderSignature confirms a
 // tool call with no captured signature (older stored history, or a
-// synthetic router-built call) doesn't error or fabricate one — it's sent
-// with an empty/nil ThoughtSignature, same as before this fix existed.
-func TestToGeminiContents_NoProviderMetadataLeavesSignatureNil(t *testing.T) {
+// synthetic router-built call, e.g. router.appendEscalationTurn's handoff
+// acknowledgment) falls back to Google's documented placeholder rather than
+// sending an empty ThoughtSignature — an empty one is a hard 400 from the
+// real API ("Function call is missing a thought_signature..."), confirmed
+// in production when an escalation handoff replayed to gemini-strong.
+func TestToGeminiContents_NoProviderMetadataUsesPlaceholderSignature(t *testing.T) {
 	msgs := []llm.Message{
 		{Role: llm.RoleAssistant, ToolCalls: []llm.ToolCall{
 			{ID: "call-1", Name: "get_weather", Arguments: `{"city":"Paris"}`},
@@ -484,5 +487,5 @@ func TestToGeminiContents_NoProviderMetadataLeavesSignatureNil(t *testing.T) {
 	}
 	_, contents := toGeminiContents(msgs)
 	require.Len(t, contents, 1)
-	require.Empty(t, contents[0].Parts[0].ThoughtSignature)
+	require.Equal(t, geminiThoughtSignaturePlaceholder, contents[0].Parts[0].ThoughtSignature)
 }
