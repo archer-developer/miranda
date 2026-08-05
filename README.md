@@ -86,14 +86,18 @@ one-time server setup (`loginctl enable-linger`) it depends on.
 
 ## Configuration
 
-Copy `config/config.example.yaml` to `config/config.yaml` and edit it — every
-field has a built-in default (see `internal/config/config.go`), so you only
-need to override what differs. Secrets (API keys, tokens) are never put in
-the file directly: each provider/server entry names one or more environment
+Copy `config/config.yaml.dist` — the one config file actually committed to
+this repo, documenting every field inline — to `config/config.yaml` (or
+split it into several `config/*.yaml` fragments, one per concern; both work
+identically, since `internal/config.Load` merges every `*.yaml` file in the
+directory — see **Building** above) and edit it. Every field has a built-in
+default (see `internal/config/config.go`), so you only need to override
+what differs. Secrets (API keys, tokens) are never put in the file
+directly: each provider/server entry names one or more environment
 variables (`api_key_envs`, `token_env`) to read at startup instead.
 
 ```bash
-cp config/config.example.yaml config/config.yaml
+cp config/config.yaml.dist config/config.yaml
 ```
 
 For local development, those environment variables don't need to be
@@ -124,9 +128,17 @@ first entry — see below.
 An `anthropic`-type provider can also opt into Claude's own server-executed
 tools via `anthropic_tools` (`web_search`, `web_fetch`, `code_execution` —
 all default to `false`). These run entirely on Anthropic's side, not
-through Miranda's own tool loop. `code_execution` has no self-hosted
-equivalent (yet — a sandboxed MCP service is planned separately) so it's
-still worth enabling here; **`web_search`/`web_fetch` are not** — prefer
+through Miranda's own tool loop. A self-hosted equivalent to
+`code_execution` also exists now — a sandboxed code-execution MCP server
+(configured under `mcp.servers` like any other, e.g. named
+`code_exec_sandbox`) runs Python/bash through Miranda's ordinary tool loop,
+available identically to every provider in the chain, not just Claude.
+`code_execution` is still worth enabling on top of that for an
+`anthropic`-type provider specifically, since it runs server-side in
+Anthropic's own sandbox rather than round-tripping through Miranda, and
+(per the note below) lets code running there call Claude's own native
+`web_search`/`web_fetch` directly — something the self-hosted MCP sandbox
+can't do. **`web_search`/`web_fetch` are not** worth enabling here — prefer
 `tavily.web_search`/`tavily.web_fetch` (see **Web tools** below) instead,
 since those run identically on every provider in the chain rather than
 only on Claude, and enabling both here and there is a real conflict, not
@@ -368,6 +380,39 @@ own username directly; the debug form no longer asks for `user_id` or a
 bearer token — your identity comes entirely from being logged in, and the
 same-origin session cookie is sent automatically.
 
+### Passkey (WebAuthn) login
+
+Optional passwordless/biometric sign-in (Face ID, Touch ID, a phone's
+screen lock, a USB security key) alongside the password form above — off
+by default, since (like `telegram`) there's no safe auto-detected
+`rp_id`/`rp_origins` for a given deployment:
+
+```yaml
+webauthn:
+  enabled: true
+  rp_id: "miranda.example.com" # bare hostname, no scheme/port
+  rp_display_name: "Miranda"
+  rp_origins: ["https://miranda.example.com"]
+```
+
+WebAuthn only works in a secure browser context — HTTPS, or
+`http://localhost` for local dev — so `rp_id`/`rp_origins` must point at
+whatever hostname actually terminates TLS in front of Miranda (the same
+reverse proxy `telegram` needs), not at `server.http_addr` directly.
+**Changing `rp_id` later orphans every already-registered passkey** — pick
+the hostname you intend to keep.
+
+Once enabled, each user registers their own passkey from the web UI's
+profile screen ("Add passkey on this device") — no config-file step per
+user. The login page (`/login`) then offers a biometric button below the
+password form; since login is usernameless (the browser's own passkey
+picker resolves who's signing in, not a typed username), the page can't
+know server-side who's about to sign in, so it falls back to a
+browser-local memory of which method (`password` or `passkey`) last
+succeeded here, leading with that one and tucking the other behind a
+one-click toggle — a wrong guess (e.g. a shared household device) costs
+one click, never a dead end.
+
 ### Language
 
 The dashboard and login page are available in Russian (default), Belarusian,
@@ -543,9 +588,14 @@ is behind a reverse proxy (the same one `webauthn` needs).
 5. **Restart Miranda.** On startup it generates a fresh webhook
    authentication secret and registers `public_base_url + webhook_path`
    with Telegram automatically — there's no manual `setWebhook` call to
-   make, and nothing else to rotate by hand. Check the logs for `telegram:
-   webhook registered` (or an error if Telegram couldn't be reached, which
-   is retried on the next restart, not fatal).
+   make, and nothing else to rotate by hand *for the one process that
+   should own this bot's webhook*. Check the logs for `telegram: webhook
+   registered` (or an error if Telegram couldn't be reached, which is
+   retried on the next restart, not fatal). If you ever run a second,
+   non-production instance against this same token/`public_base_url` (see
+   **Building** above), set `telegram.register_webhook: false` on that
+   instance — otherwise its startup steals the webhook registration from
+   whichever instance is actually deployed.
 6. **Say something to the bot.** The first message from a mapped user is
    what teaches Miranda that account's chat id (Telegram gives bots no way
    to look this up otherwise) — this is also what makes proactive sends

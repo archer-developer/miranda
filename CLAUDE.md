@@ -158,8 +158,9 @@ Optional (`config.TelegramConfig.Enabled`, default false — see
 path: Telegram POSTs an update to `webhook_path` → `handleTelegramWebhook`
 checks the `X-Telegram-Bot-Api-Secret-Token` header against a secret
 generated fresh at every process startup (`telegram.RandomSecret`, then
-re-registered with Telegram via `setWebhook` — nothing to configure or
-rotate by hand) → the sender's `@username` is resolved to a configured
+re-registered with Telegram via `setWebhook` — nothing to rotate by hand
+for the one process that's meant to own this bot's webhook) →
+the sender's `@username` is resolved to a configured
 `Username` via `users.Registry.ResolveByTelegramName`. **An unmatched
 account is logged as a warning and dropped before `Orchestrator.Handle` is
 ever called** — there's no history/memory identity for an unrecognized
@@ -171,6 +172,18 @@ except from a message they sent — this is also what makes the
 via `telegram.Client.SendMessage` (the Bot API), not this handler's HTTP
 response body, which Telegram never reads.
 
+`TelegramConfig.RegisterWebhook` (default true) is the escape hatch for
+that "one process" assumption: a second, non-production instance sharing a
+real deployment's `TELEGRAM_BOT_TOKEN`/`PublicBaseURL` (e.g. `go run
+./cmd/miranda` locally against otherwise-real config via
+`MIRANDA_CONFIG_DIR`, for something unrelated to Telegram) still gets a
+working `telegram.Client`/`ChatStore` with this set to `false`, it just
+never calls `setWebhook` — set this way, `setupTelegram` (`cmd/miranda`)
+can't steal webhook ownership from whichever instance is actually deployed
+(see git history for the incident that prompted this — a stray local run
+re-registered the real bot's secret and broke inbound delivery until the
+real instance restarted).
+
 The `send_telegram` tool (`Orchestrator.SetTelegram`,
 `config.TelegramConfig.SendMessageTool`) is the *outbound* half: it lets the
 model push a message to any household member's Telegram — the current user
@@ -179,6 +192,42 @@ matching what the user said (e.g. "Аня") against that user's `FullName`/
 `Username`. It fails with a clear error (relayed back to the model, not the
 caller) if the target has never messaged the bot, since that's the only way
 `ChatStore` ever learns a chat id.
+
+### WebAuthn / passkey login
+
+Optional (`config.WebAuthnConfig.Enabled`, default false — same
+no-safe-default reasoning as `telegram`, here for `rp_id`/`rp_origins`).
+`internal/webauthn` wraps `github.com/go-webauthn/webauthn`: `Service`
+orchestrates registration/login ceremonies, `Store` persists credentials
+(and each user's stable, random WebAuthn "user handle") in its own SQLite
+file (`Storage.WebAuthnSQLitePath`), `CeremonyStore` holds transient
+challenge state between a ceremony's begin/finish calls. `internal/webui`
+only ever talks to `Service` — registration from the profile screen
+(`POST /api/webauthn/register/{begin,finish}`), and login from `/login`'s
+biometric button, which is *discoverable/usernameless*
+(`BeginDiscoverableLogin`/`FinishDiscoverableLogin`): the browser's own
+platform authenticator resolves which resident credential to use before
+Miranda knows who's signing in, so there's no per-account signal available
+on the anonymous login page at all (see `Store.LookupByCredentialID`, and
+`/login`'s own client-side "remembered last method" heuristic, which exists
+for exactly this reason).
+
+`Store.ReconcileFlags` works around a real Android quirk: some Android
+platform authenticators (Google Password Manager passkeys) report
+`BackupEligible=false` at the exact moment a passkey is registered, then
+`BackupEligible=true` on every login afterward once the credential finishes
+syncing to the cloud. go-webauthn hard-fails any `BackupEligible` mismatch
+against what was stored at registration with no config escape hatch
+(`go-webauthn/webauthn#240`); `FinishDiscoverableLogin` resyncs the stored
+flags to the assertion's actual value before validation runs instead — the
+library maintainer's own documented workaround
+(`go-webauthn/webauthn#351`). Separately, `/login`'s biometric button
+retries once, automatically, on a failure that lands in under 800ms — a
+distinct Android/Chrome quirk (a stale WebAuthn request left pending by an
+earlier ceremony makes the *next* `navigator.credentials.get()` reject
+instantly, before the OS picker even opens; a second call right after
+clears it). Both were found debugging the same real bug report and are
+unrelated to each other — see git history for the incident.
 
 ### Scheduled tasks
 
