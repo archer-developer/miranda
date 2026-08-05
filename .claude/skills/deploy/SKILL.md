@@ -1,6 +1,6 @@
 ---
 name: deploy
-description: Build Miranda for linux/amd64 and ship it to the production server (archer@192.168.1.50) over SSH, then restart the systemd --user service. Use when the user asks to deploy, release, ship, push to the server, or restart the remote miranda process.
+description: Build Miranda for linux/amd64 and ship it to the production server (archer@miranda) over SSH, then restart the systemd --user service. Use when the user asks to deploy, release, ship, push to the server, or restart the remote miranda process.
 ---
 
 # Deploying Miranda
@@ -15,7 +15,7 @@ it.
 Run `scripts/deploy.sh` from the repo root. It:
 
 1. Builds `dist/miranda-linux-amd64` with `GOOS=linux GOARCH=amd64 CGO_ENABLED=0`.
-2. Uploads the binary to `archer@192.168.1.50:~/miranda/miranda.new`, then
+2. Uploads the binary to `archer@miranda:~/miranda/miranda.new`, then
    `mv`s it into place on the server (atomic rename, not a truncate-in-place
    write — safe even while the old binary is still running).
 3. Generates and uploads a `systemd --user` unit
@@ -43,8 +43,8 @@ separately, outside this skill.
 - Make sure the working tree is in the state the user wants shipped (check
   `git status`; ask before deploying uncommitted or unpushed changes if
   that seems unintentional).
-- SSH auth to `archer@192.168.1.50` must already work key-based
-  (`ssh archer@192.168.1.50` with no password prompt) — this skill doesn't
+- SSH auth to `archer@miranda` must already work key-based
+  (`ssh archer@miranda` with no password prompt) — this skill doesn't
   set that up.
 
 ## One-time server setup (not part of every deploy)
@@ -55,7 +55,7 @@ but can't fix it remotely without a password prompt. If the warning
 appears, run once:
 
 ```bash
-ssh archer@192.168.1.50 loginctl enable-linger archer
+ssh archer@miranda loginctl enable-linger archer
 ```
 
 ## If something goes wrong
@@ -67,7 +67,7 @@ ssh archer@192.168.1.50 loginctl enable-linger archer
   `logs/miranda.log` (that file only gets Miranda's own app-level log
   mirror, not startup crashes):
   ```bash
-  ssh archer@192.168.1.50 journalctl --user -u miranda -n 100 --no-pager
+  ssh archer@miranda journalctl --user -u miranda -n 100 --no-pager
   ```
 - To roll back, re-run this skill after `git checkout` to the last-good
   commit — there's no separate rollback path; redeploying an old commit is

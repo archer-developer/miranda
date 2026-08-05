@@ -7,7 +7,7 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-remote_host="archer@192.168.1.50"
+remote_host="archer@miranda"
 remote_dir="miranda"           # relative to the SSH user's $HOME
 service_name="miranda"
 build_out="dist/miranda-linux-amd64"
