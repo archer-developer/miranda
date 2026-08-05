@@ -258,6 +258,14 @@ telegram:
   # телефон ..."). Only works for someone who has messaged the bot at least
   # once — Telegram gives bots no way to message a user who hasn't.
   send_message_tool: true
+  # Leave true for the one process that should own this bot's webhook
+  # (the normal case). Set to false for a second, non-production instance
+  # pointed at this same config directory via MIRANDA_CONFIG_DIR (e.g.
+  # local debugging unrelated to Telegram) — otherwise its startup steals
+  # the webhook registration from whichever instance is actually deployed,
+  # and that one stops receiving messages until it restarts. See
+  # TelegramConfig.RegisterWebhook in internal/config/config.go.
+  register_webhook: true
 
 # Web UI login is mandatory — with no users listed here, the dashboard is
 # unreachable (fails closed by design, not a bug). Generate a password hash

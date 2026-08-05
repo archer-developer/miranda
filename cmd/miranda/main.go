@@ -593,6 +593,16 @@ func setupTelegram(cfg config.TelegramConfig, storageCfg config.StorageConfig, l
 
 	client := telegram.New(token)
 	webhookURL := strings.TrimRight(cfg.PublicBaseURL, "/") + cfg.WebhookPath
+	if !cfg.RegisterWebhook {
+		// See TelegramConfig.RegisterWebhook's doc comment: this instance
+		// still gets a working outbound Client/ChatStore above, it just
+		// never tells Telegram to redirect the bot's webhook here — set
+		// this way for a second, non-production instance sharing a real
+		// deployment's token/PublicBaseURL, so it can't hijack the real
+		// instance's webhook registration.
+		logger.Info("telegram: register_webhook is false, skipping setWebhook", "url", webhookURL)
+		return client, chats, secret, nil
+	}
 	if err := client.SetWebhook(context.Background(), webhookURL, secret); err != nil {
 		logger.Error("telegram: failed to register webhook — the bot will not receive messages until this succeeds on a later restart",
 			"error", err, "url", webhookURL)

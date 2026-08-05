@@ -167,6 +167,19 @@ type TelegramConfig struct {
 	// телефон ...", "отправь Ане на телефон ...". Only works for a user who
 	// has messaged the bot at least once (see StorageConfig.TelegramChatsPath).
 	SendMessageTool bool `yaml:"send_message_tool"`
+	// RegisterWebhook controls whether setupTelegram (cmd/miranda) actually
+	// calls Telegram's setWebhook API at startup. Defaults to true — the
+	// normal case where this is the one process that should own the bot's
+	// webhook registration. Set to false for a second, non-production
+	// instance that shares the same TELEGRAM_BOT_TOKEN/PublicBaseURL as a
+	// real deployment (e.g. a developer running `go run ./cmd/miranda`
+	// locally against otherwise-real config — see MIRANDA_CONFIG_DIR in
+	// README.md — while debugging something unrelated to Telegram): with
+	// Enabled true and this false, the outbound send_telegram tool and
+	// ChatStore still work, but startup skips setWebhook, so it never
+	// clobbers the real deployment's webhook secret and breaks its inbound
+	// delivery until that one restarts.
+	RegisterWebhook bool `yaml:"register_webhook"`
 }
 
 // ScheduleConfig controls the create_scheduled_task/list_scheduled_tasks/
@@ -723,6 +736,7 @@ func Default() Config {
 			Enabled:         false,
 			WebhookPath:     "/telegram/webhook",
 			SendMessageTool: true,
+			RegisterWebhook: true,
 		},
 		Schedule: ScheduleConfig{
 			Enabled: true,

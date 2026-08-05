@@ -38,8 +38,25 @@ GOOS=linux GOARCH=arm64 go build -o miranda-linux-arm64 ./cmd/miranda
 Run it with `make run` (builds then runs), or directly:
 
 ```bash
-MIRANDA_CONFIG=./config/config.yaml ./miranda
+./miranda
 ```
+
+Config is assembled from every `*.yaml` file in `./config/` (glob'd and
+merged — see `internal/config.Load`), not a single file. Point that at a
+different directory with `MIRANDA_CONFIG_DIR`, e.g. to run a second,
+isolated instance against scratch config without touching the real one:
+
+```bash
+MIRANDA_CONFIG_DIR=./config-dev ./miranda
+```
+
+If that scratch config still shares a real `TELEGRAM_BOT_TOKEN`/
+`public_base_url` with a live deployment (e.g. testing something unrelated
+to Telegram against otherwise-real config), also set
+`telegram.register_webhook: false` in it — otherwise this instance's
+startup will re-register the bot's webhook with a secret only it knows,
+breaking inbound delivery to the real deployment until *that* one restarts.
+See `TelegramConfig`'s doc comment in `internal/config/config.go`.
 
 ## Testing
 
