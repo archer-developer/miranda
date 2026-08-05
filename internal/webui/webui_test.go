@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -20,6 +22,13 @@ import (
 	"github.com/archer-developer/miranda/internal/session"
 	"github.com/archer-developer/miranda/internal/users"
 )
+
+// testLogger discards everything — these tests assert on HTTP
+// responses/state, not log output, and a real logger would just add noise
+// to `go test -v`.
+func testLogger() *slog.Logger {
+	return slog.New(slog.NewTextHandler(io.Discard, nil))
+}
 
 type fakeHistory struct {
 	conversations []history.Conversation
@@ -91,7 +100,7 @@ func newTestHandlerWithMemory(t *testing.T, fake *fakeHistory) (*Handler, *sessi
 	sessions := session.NewStore(time.Hour)
 	mem := newFakeMemory()
 
-	h, err := New(fake, mem, nil, registry, sessions, "ru", "")
+	h, err := New(fake, mem, nil, registry, sessions, "ru", "", testLogger())
 	require.NoError(t, err)
 	return h, sessions, mem
 }
@@ -238,7 +247,7 @@ func TestServesLocalAvatarFiles(t *testing.T) {
 	registry, err := users.NewRegistry([]config.UserConfig{{Username: "alex", PasswordHash: mustHash(t, "555")}})
 	require.NoError(t, err)
 	sessions := session.NewStore(time.Hour)
-	h, err := New(&fakeHistory{}, newFakeMemory(), nil, registry, sessions, "ru", dir)
+	h, err := New(&fakeHistory{}, newFakeMemory(), nil, registry, sessions, "ru", dir, testLogger())
 	require.NoError(t, err)
 
 	req := httptest.NewRequest(http.MethodGet, "/static/avatars/alex.png", nil)

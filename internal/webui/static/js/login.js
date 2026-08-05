@@ -61,12 +61,40 @@ if (button && isSupported()) {
     errorEl.classList.add("hidden");
     button.disabled = true;
     try {
-      const { redirect } = await loginWithPasskey();
+      const { redirect } = await loginWithPasskeyRetryingStaleRequest();
       location.href = redirect || "/";
     } catch (err) {
+      console.error("webauthn: biometric login failed", err);
       errorEl.textContent = t("login_biometric_error", "Biometric sign-in failed. Try your password instead.");
       errorEl.classList.remove("hidden");
       button.disabled = false;
     }
   });
+}
+
+// Some Android/Chrome builds (routed through Google Play Services' FIDO2
+// API, out-of-process from the tab) leave a WebAuthn request "stuck
+// pending" from an earlier ceremony — this ceremony's own registration, an
+// earlier failed login, or a previous visit navigated away from mid-picker
+// — which makes the *next* navigator.credentials.get() reject instantly,
+// before the OS picker sheet ever opens. A second call right after clears
+// it and opens the picker normally — this is the exact "first tap: red
+// error with no picker, second tap: picker opens" bug report this works
+// around, by making that second tap automatic instead of requiring the
+// user to notice and retry it themselves.
+//
+// The under-800ms check is what tells that failure apart from a user who
+// saw the picker and deliberately tapped Cancel (which also rejects with
+// the same DOMException name, but only after the sheet has rendered and
+// they've reacted to it) — only the near-instant, picker-never-appeared
+// case is worth silently retrying; a deliberate cancel should surface as a
+// real error immediately, not silently reopen the sheet on them.
+async function loginWithPasskeyRetryingStaleRequest() {
+  const start = performance.now();
+  try {
+    return await loginWithPasskey();
+  } catch (err) {
+    if (performance.now() - start > 800) throw err;
+    return await loginWithPasskey();
+  }
 }

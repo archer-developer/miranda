@@ -18,6 +18,7 @@ import (
 	"html/template"
 	"io"
 	"io/fs"
+	"log/slog"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -82,6 +83,7 @@ type Handler struct {
 	sessions        *session.Store
 	defaultLanguage string
 	assetVersion    string // see staticAssetVersion; templates embed this in /static/v<version>/ URLs
+	logger          *slog.Logger
 }
 
 // staticAssetVersion hashes every embedded static file's content into a
@@ -126,7 +128,7 @@ func staticAssetVersion(fsys fs.FS) (string, error) {
 // never registered at all, and the frontend's own capability check
 // (window.PublicKeyCredential) keeps the passkey UI hidden; nothing in this
 // package needs a separate "is it enabled" branch beyond this one nil check.
-func New(h History, mem Memory, webauthnSvc WebAuthnService, usersRegistry *users.Registry, sessions *session.Store, defaultLanguage, avatarsDir string) (*Handler, error) {
+func New(h History, mem Memory, webauthnSvc WebAuthnService, usersRegistry *users.Registry, sessions *session.Store, defaultLanguage, avatarsDir string, logger *slog.Logger) (*Handler, error) {
 	indexTmpl, err := template.ParseFS(templatesFS, "templates/index.html")
 	if err != nil {
 		return nil, fmt.Errorf("webui: parse index template: %w", err)
@@ -155,6 +157,7 @@ func New(h History, mem Memory, webauthnSvc WebAuthnService, usersRegistry *user
 		sessions:        sessions,
 		defaultLanguage: defaultLanguage,
 		assetVersion:    assetVersion,
+		logger:          logger,
 	}
 
 	mux := http.NewServeMux()

@@ -93,7 +93,7 @@ func newTestHandlerWithWebAuthn(t *testing.T, fake *fakeWebAuthnService) (*Handl
 	require.NoError(t, err)
 	sessions := session.NewStore(time.Hour)
 
-	h, err := New(&fakeHistory{}, newFakeMemory(), fake, registry, sessions, "ru", "")
+	h, err := New(&fakeHistory{}, newFakeMemory(), fake, registry, sessions, "ru", "", testLogger())
 	require.NoError(t, err)
 	return h, sessions
 }

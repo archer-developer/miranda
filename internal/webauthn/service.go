@@ -148,6 +148,20 @@ func (s *Service) FinishDiscoverableLogin(ctx context.Context, ceremonyID string
 		return "", fmt.Errorf("webauthn: login ceremony expired or not found")
 	}
 
+	// Resync our stored flags to this assertion's actual flags before the
+	// library's own validation runs — see Store.ReconcileFlags for the
+	// Android BackupEligible quirk this works around (github.com/go-webauthn/
+	// webauthn#335, #351). Parsing here is a peek, not the authoritative
+	// parse — FinishPasskeyLogin below parses body again itself (from a
+	// fresh reader) and does the real signature/challenge verification; a
+	// parse failure here just means nothing to reconcile, and that same
+	// malformed body fails again there with a proper error.
+	if parsed, perr := protocol.ParseCredentialRequestResponseBytes(body); perr == nil {
+		if err := s.store.ReconcileFlags(ctx, s.rpid, parsed.RawID, parsed.Response.AuthenticatorData.Flags); err != nil {
+			return "", err
+		}
+	}
+
 	req, err := http.NewRequest(http.MethodPost, "/", bytes.NewReader(body))
 	if err != nil {
 		return "", fmt.Errorf("webauthn: build verification request: %w", err)

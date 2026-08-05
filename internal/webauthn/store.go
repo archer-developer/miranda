@@ -290,6 +290,30 @@ func (s *Store) LookupByCredentialID(ctx context.Context, rpid string, rawID []b
 	return username, true, nil
 }
 
+// ReconcileFlags overwrites credentialID's stored flags to match authData —
+// the current assertion's actual flags — before login validation runs. See
+// Service.FinishDiscoverableLogin for why: some Android platform
+// authenticators (Google Password Manager passkeys) report
+// BackupEligible=false at the exact moment a credential is registered,
+// before it's finished syncing to the cloud, then BackupEligible=true on
+// every login afterward once sync completes. go-webauthn's validateLogin
+// hard-fails any BackupEligible mismatch against what was stored at
+// registration (by design — see go-webauthn/webauthn#240 — a changed BE is
+// a real signal on a well-behaved authenticator), which would otherwise
+// permanently lock that credential out the moment Android's sync finishes.
+// A no-op UPDATE (0 rows affected, no error) if credentialID isn't
+// registered — the caller's subsequent lookup surfaces that properly.
+func (s *Store) ReconcileFlags(ctx context.Context, rpid string, credentialID []byte, authData protocol.AuthenticatorFlags) error {
+	flags := webauthnlib.NewCredentialFlags(authData)
+	_, err := s.db.ExecContext(ctx,
+		`UPDATE webauthn_credentials SET flags = ? WHERE rpid = ? AND credential_id = ?`,
+		flags.MsgpByte(), rpid, credentialID)
+	if err != nil {
+		return fmt.Errorf("webauthn: reconcile flags: %w", err)
+	}
+	return nil
+}
+
 // UpdateSignCount writes back the fields the library mutates on every
 // successful login (sign_count, clone_warning, flags — notably BackupState
 // can change over the life of a credential) but never persists itself. This

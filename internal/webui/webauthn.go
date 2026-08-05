@@ -62,6 +62,8 @@ func (h *Handler) handleWebAuthnRegisterFinish(w http.ResponseWriter, r *http.Re
 
 	info, err := h.webauthn.FinishRegistration(r.Context(), user.Username, cookie.Value, req.Nickname, body)
 	if err != nil {
+		h.logger.Warn("webauthn: registration failed",
+			"error", err, "username", user.Username, "remote_addr", r.RemoteAddr, "user_agent", r.UserAgent())
 		http.Error(w, "registration failed: "+err.Error(), http.StatusBadRequest)
 		return
 	}
@@ -74,6 +76,8 @@ func (h *Handler) handleWebAuthnRegisterFinish(w http.ResponseWriter, r *http.Re
 func (h *Handler) handleWebAuthnLoginBegin(w http.ResponseWriter, r *http.Request) {
 	assertion, ceremonyID, err := h.webauthn.BeginDiscoverableLogin(r.Context())
 	if err != nil {
+		h.logger.Warn("webauthn: discoverable login begin failed",
+			"error", err, "remote_addr", r.RemoteAddr, "user_agent", r.UserAgent())
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
 	}
@@ -110,6 +114,16 @@ func (h *Handler) handleWebAuthnLoginFinish(w http.ResponseWriter, r *http.Reque
 
 	username, err := h.webauthn.FinishDiscoverableLogin(r.Context(), req.CeremonyID, body)
 	if err != nil {
+		// The client only ever shows a generic "biometric sign-in failed"
+		// message (see login.js) — this is the only place the actual
+		// failure reason (which credential, which validation step) is
+		// visible at all, which matters a lot for a ceremony this hard to
+		// reproduce from a desk (it depends on a specific phone's
+		// authenticator/OS behavior, e.g. Android's Google Password
+		// Manager — see Store.ReconcileFlags for one such quirk already
+		// worked around).
+		h.logger.Warn("webauthn: discoverable login failed",
+			"error", err, "remote_addr", r.RemoteAddr, "user_agent", r.UserAgent())
 		http.Error(w, "login failed: "+err.Error(), http.StatusUnauthorized)
 		return
 	}

@@ -103,6 +103,73 @@ func TestService_RegistrationAndDiscoverableLoginRoundTrip(t *testing.T) {
 	require.NotEmpty(t, list[0].LastUsedAt, "last_used_at must be stamped after a successful login")
 }
 
+// TestService_DiscoverableLogin_SurvivesBackupEligibleFlip reproduces a
+// real Android quirk (see Store.ReconcileFlags's doc comment): some Android
+// platform authenticators report BackupEligible=false at the exact moment a
+// passkey is registered, then BackupEligible=true on every login afterward
+// once the credential finishes syncing to Google Password Manager. Without
+// FinishDiscoverableLogin's reconcile step, go-webauthn's validateLogin
+// hard-fails that second login with "Backup Eligible flag inconsistency
+// detected during login validation" — the exact bug report this test
+// guards against regressing.
+func TestService_DiscoverableLogin_SurvivesBackupEligibleFlip(t *testing.T) {
+	ctx := context.Background()
+	svc, store := newTestService(t)
+	username := "archer"
+	ceremonyKey := "session-token-1"
+
+	creation, err := svc.BeginRegistration(ctx, username, ceremonyKey)
+	require.NoError(t, err)
+	creationJSON, err := json.Marshal(creation)
+	require.NoError(t, err)
+	attestationOptions, err := virtualwebauthn.ParseAttestationOptions(string(creationJSON))
+	require.NoError(t, err)
+
+	handle, ok, err := store.UserHandle(ctx, testRPID, username)
+	require.NoError(t, err)
+	require.True(t, ok)
+
+	rp := virtualwebauthn.RelyingParty{ID: testRPID, Name: "Miranda Test", Origin: testOrigin}
+	// BackupEligible: false at registration — simulating Android reporting
+	// this before the credential has synced to the cloud.
+	authenticator := virtualwebauthn.NewAuthenticatorWithOptions(virtualwebauthn.AuthenticatorOptions{UserHandle: handle, BackupEligible: false})
+	credential := virtualwebauthn.NewCredential(virtualwebauthn.KeyTypeEC2)
+
+	attestationResponse := virtualwebauthn.CreateAttestationResponse(rp, authenticator, credential, *attestationOptions)
+	_, err = svc.FinishRegistration(ctx, username, ceremonyKey, "Android passkey", []byte(attestationResponse))
+	require.NoError(t, err)
+	authenticator.AddCredential(credential)
+
+	stored, err := store.CredentialsForUser(ctx, testRPID, username)
+	require.NoError(t, err)
+	require.Len(t, stored, 1)
+	require.False(t, stored[0].Flags.BackupEligible, "precondition: registration stored BackupEligible=false")
+
+	// Same authenticator, same credential — but now reporting
+	// BackupEligible=true, as Android does once sync completes. This is
+	// the "log out and log back in" step from the bug report.
+	authenticator.Options.BackupEligible = true
+
+	assertion, ceremonyID, err := svc.BeginDiscoverableLogin(ctx)
+	require.NoError(t, err)
+	assertionJSON, err := json.Marshal(assertion)
+	require.NoError(t, err)
+	assertionOptions, err := virtualwebauthn.ParseAssertionOptions(string(assertionJSON))
+	require.NoError(t, err)
+
+	credential.Counter++
+	assertionResponse := virtualwebauthn.CreateAssertionResponse(rp, authenticator, credential, *assertionOptions)
+
+	loggedInUsername, err := svc.FinishDiscoverableLogin(ctx, ceremonyID, []byte(assertionResponse))
+	require.NoError(t, err, "second login must not fail on a BackupEligible flag that legitimately changed after registration")
+	require.Equal(t, username, loggedInUsername)
+
+	updated, err := store.CredentialsForUser(ctx, testRPID, username)
+	require.NoError(t, err)
+	require.Len(t, updated, 1)
+	require.True(t, updated[0].Flags.BackupEligible, "stored flag must catch up to the authenticator's current report")
+}
+
 func TestService_FinishRegistration_RejectsUnknownCeremonyKey(t *testing.T) {
 	ctx := context.Background()
 	svc, _ := newTestService(t)
