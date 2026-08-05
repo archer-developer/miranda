@@ -93,7 +93,7 @@
            inputs inside instead of blocking an unrelated submit (a form
            merely styled invisible would still validate them). -->
       <div id="password-section">
-        <form method="POST" action="/login" class="space-y-4" novalidate>
+        <form id="password-form" method="POST" action="/login" class="space-y-4" novalidate>
           <div>
             <label class="mb-1.5 block text-xs font-medium text-(--color-text-muted)" for="username">{{.Strings.login_username_label}}</label>
             <input id="username" name="username" type="text" autocomplete="username" required autofocus
@@ -125,13 +125,14 @@
         <span class="h-px flex-1 bg-(--color-border)"></span>
       </div>
 
-      <!-- login.js swaps this button's class list wholesale between this
-           (secondary, alternative-method) look and an accent-filled
-           primary look when it collapses #password-section above — see
-           PRIMARY_CLASSES there. Keep this markup's classes as the
-           canonical "secondary" variant; login.js reads them once at load
-           to know what to restore if the user expands the password form
-           back open. -->
+      <!-- This markup's classes are the canonical "secondary,
+           alternative-method" look. The synchronous inline script a few
+           lines down swaps this button's class list to an accent-filled
+           primary look (and collapses #password-section above) before
+           first paint, if applicable; login.js's SECONDARY_CLASSES
+           constant restores this exact look if the user later expands the
+           password form back open. Keep all three in sync by hand if this
+           markup's classes ever change. -->
       <button id="biometric-login" type="button" hidden
               class="flex w-full items-center justify-center gap-2 rounded-lg border border-(--color-border-strong) px-3.5 py-2.5 text-sm font-medium text-(--color-text) transition-colors hover:border-(--color-text-faint) hover:bg-(--color-surface-2)/60 focus-visible:outline-none">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="h-4 w-4" aria-hidden="true"><circle cx="7" cy="15" r="4"/><path d="M9.5 12.5 20 2"/><path d="M17 5l3 3"/><path d="M14 8l2.5 2.5"/></svg>
@@ -142,12 +143,59 @@
       <!-- Only ever shown once login.js has collapsed #password-section
            (starts hidden even though this element doesn't depend on
            .WebAuthnEnabled's own JS gate) — the one way back to the
-           password form when the passwordless-first guess doesn't apply to
-           whoever is actually sitting down at this browser right now. -->
+           password form when the remembered method doesn't apply to
+           whoever is actually sitting down at this browser right now.
+           Same bordered/secondary look as #biometric-login's own default
+           state above — this button is always the alternative-method
+           action when visible, so unlike that button it never swaps to the
+           accent-filled primary look. -->
       <button id="password-toggle-link" type="button" hidden
-              class="mt-4 block w-full text-center text-xs font-medium text-(--color-text-faint) transition-colors hover:text-(--color-text-muted) focus-visible:outline-none">
+              class="mt-3 flex w-full items-center justify-center gap-2 rounded-lg border border-(--color-border-strong) px-3.5 py-2.5 text-sm font-medium text-(--color-text) transition-colors hover:border-(--color-text-faint) hover:bg-(--color-surface-2)/60 focus-visible:outline-none">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="h-4 w-4" aria-hidden="true"><path d="M15 3h4a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2h-4"/><polyline points="10 17 15 12 10 7"/><line x1="15" y1="12" x2="3" y2="12"/></svg>
         {{.Strings.login_use_password}}
       </button>
+
+      <script>
+        // Applies the passwordless-first layout (if applicable) synchronously,
+        // before the browser's first paint — the same "run before paint, can't
+        // be a module" reasoning as the theme script at the top of <head>.
+        // Without this, the password form would render in its default
+        // (expanded) state first and only collapse once login.js — a deferred
+        // module, so it only runs after the whole document is already parsed
+        // and painted — catches up a moment later, producing a one-frame flash
+        // of the form every time this layout applies.
+        //
+        // Duplicates a few constants from webauthn.js/login.js by hand (a
+        // plain <script> can't import an ES module) — keep LOGIN_METHOD_KEY,
+        // the query param names, and PRIMARY_CLASSES in sync with those files
+        // if any of them ever change.
+        (function () {
+          var supported = typeof window.PublicKeyCredential !== "undefined";
+          var biometricBtn = document.getElementById("biometric-login");
+          if (supported) biometricBtn.hidden = false;
+          if (!supported) return;
+
+          var lastMethod = null;
+          try {
+            lastMethod = localStorage.getItem("miranda-last-login-method");
+          } catch (e) {
+            /* Storage can throw in restricted contexts; falling through
+               leaves the default password-primary layout, same as no
+               remembered method at all. */
+          }
+
+          var params = new URLSearchParams(location.search);
+          var forcePasswordVisible = params.has("error") || params.has("expired");
+
+          if (!forcePasswordVisible && lastMethod === "passkey") {
+            document.getElementById("password-section").hidden = true;
+            document.getElementById("password-divider").hidden = true;
+            document.getElementById("password-toggle-link").hidden = false;
+            biometricBtn.className =
+              "flex w-full items-center justify-center gap-2 rounded-lg bg-(--color-accent) px-3.5 py-2.5 text-sm font-medium text-white transition-colors hover:bg-(--color-accent-hover) focus-visible:outline-none active:bg-(--color-accent-active)";
+          }
+        })();
+      </script>
       {{end}}
     </div>
 
