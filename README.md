@@ -14,6 +14,30 @@ by Gemini's TTS API and played back through the same station. See
 HA (voice input, MCP tools, TTS output) <---> Miranda Agent Service <---> LLM providers
 ```
 
+## Contents
+
+- [Building](#building)
+- [Testing](#testing)
+- [Deploying](#deploying)
+- [Configuration](#configuration)
+  - [LLM routing, escalation, and key rotation](#llm-routing-escalation-and-key-rotation)
+- [Web tools](#web-tools)
+- [TTS](#tts)
+- [Logging](#logging)
+- [Web UI](#web-ui)
+  - [Login](#login)
+  - [Passkey (WebAuthn) login](#passkey-webauthn-login)
+  - [Language](#language)
+- [Home Assistant integration](#home-assistant-integration)
+  - [Connecting Home Assistant as an MCP server](#connecting-home-assistant-as-an-mcp-server)
+  - [Connecting Miranda to Home Assistant (thin conversation client)](#connecting-miranda-to-home-assistant-thin-conversation-client)
+  - [Testing the full loop](#testing-the-full-loop)
+  - [Troubleshooting](#troubleshooting)
+- [Telegram bot](#telegram-bot)
+  - [The `send_telegram` tool](#the-send_telegram-tool)
+- [Scheduled tasks](#scheduled-tasks)
+- [Project layout](#project-layout)
+
 ---
 
 ## Building
@@ -87,14 +111,15 @@ one-time server setup (`loginctl enable-linger`) it depends on.
 ## Configuration
 
 Copy `config/config.yaml.dist` — the one config file actually committed to
-this repo, documenting every field inline — to `config/config.yaml` (or
-split it into several `config/*.yaml` fragments, one per concern; both work
-identically, since `internal/config.Load` merges every `*.yaml` file in the
-directory — see **Building** above) and edit it. Every field has a built-in
-default (see `internal/config/config.go`), so you only need to override
-what differs. Secrets (API keys, tokens) are never put in the file
-directly: each provider/server entry names one or more environment
-variables (`api_key_envs`, `token_env`) to read at startup instead.
+this repo, and the authoritative field-by-field reference (every field
+documented inline, including defaults and the non-obvious gotchas — kept
+in sync with the code, unlike prose here that can drift) — to
+`config/config.yaml` (or split it into several `config/*.yaml` fragments,
+one per concern; both work identically, since `internal/config.Load`
+merges every `*.yaml` file in the directory — see **Building** above) and
+edit it. Secrets (API keys, tokens) are never put in the file directly:
+each provider/server entry names one or more environment variables
+(`api_key_envs`, `token_env`) to read at startup instead.
 
 ```bash
 cp config/config.yaml.dist config/config.yaml
@@ -111,117 +136,45 @@ way.
 cp .env.example .env
 ```
 
-Key sections: `llm.providers` (the fallback chain — one entry per model
-backend, `type: openai_compat` for any OpenAI Chat Completions compatible
-server — Ollama, vLLM, LM Studio, OpenRouter — `type: anthropic` for
-Claude, or `type: gemini` for native Gemini), `mcp.servers` (tool sources,
-see below), `tts` (Yandex Station routing, and the opt-in `gemini_tts`
-provider — see **TTS** below), `storage` (SQLite + memory file + TTS audio
-cache paths), `users` (web UI login accounts — see **Web UI** below).
-`llm.default_provider`, if set, is honored regardless of `providers`' own
-list order — the router moves that provider to the front of the fallback
-chain; leave it empty to just use list order as-is (first entry is the
-default). Every provider type takes `api_key_envs` (a list of environment
-variable names), but only `gemini` actually rotates across more than the
-first entry — see below.
+### LLM routing, escalation, and key rotation
 
-An `anthropic`-type provider can also opt into Claude's own server-executed
-tools via `anthropic_tools` (`web_search`, `web_fetch`, `code_execution` —
-all default to `false`). These run entirely on Anthropic's side, not
-through Miranda's own tool loop. A self-hosted equivalent to
-`code_execution` also exists now — a sandboxed code-execution MCP server
-(configured under `mcp.servers` like any other, e.g. named
-`code_exec_sandbox`) runs Python/bash through Miranda's ordinary tool loop,
-available identically to every provider in the chain, not just Claude.
-`code_execution` is still worth enabling on top of that for an
-`anthropic`-type provider specifically, since it runs server-side in
-Anthropic's own sandbox rather than round-tripping through Miranda, and
-(per the note below) lets code running there call Claude's own native
-`web_search`/`web_fetch` directly — something the self-hosted MCP sandbox
-can't do. **`web_search`/`web_fetch` are not** worth enabling here — prefer
-`tavily.web_search`/`tavily.web_fetch` (see **Web tools** below) instead,
-since those run identically on every provider in the chain rather than
-only on Claude, and enabling both here and there is a real conflict, not
-just redundancy: Anthropic requires unique tool names on one request, and
-Miranda's own tools are deliberately named `web_search`/`web_fetch` too.
-Enabling `code_execution` alongside Claude's own native `web_search`/
-`web_fetch` (if you do enable those instead of `tavily`'s) also lets code
-running in Anthropic's sandbox call them itself as a helper (fetch a page,
-then parse or compute over it) — Miranda's own tools have no equivalent
-sandbox-calls-tool wiring, since they're plain function-call tools, not
-Anthropic server tools.
+`llm.providers` is a fallback chain, one entry per model backend
+(`type: openai_compat` for any OpenAI Chat Completions compatible server —
+Ollama, vLLM, LM Studio, OpenRouter; `type: anthropic` for Claude;
+`type: gemini` for native Gemini). `llm.default_provider`, if set, is
+moved to the front of that chain regardless of the list's own order.
 
-A `gemini`-type provider (`internal/llm/gemini`, on the official
-`google.golang.org/genai` SDK) is the native equivalent for Google's
-models — full function-calling support combined with Grounding with
-Google Search in one request, unlike routing Gemini through the
-`openai_compat` shim. Its own native tools live under `gemini_tools`
-(currently just `google_search`; `context_caching` exists as a config field
-but isn't implemented yet — `gemini.New` refuses to start if it's set to
-`true`, rather than silently ignoring it). **`google_search` is not
-recommended** — see the verified-broken note below; prefer
-`tavily.web_search`/`tavily.web_fetch` (**Web tools**) instead, same
-reasoning as `anthropic_tools.web_search` above. Unlike Claude, there's no `code_execution` option
-here: Gemini's code-execution tool only works on Vertex AI (GCP-project
-billing/auth), not the plain API-key-based Gemini Developer API this
-provider type targets — confirmed against the `google.golang.org/genai`
-SDK's own source, which marks it (consistently with every other
-genuinely-Vertex-only field in that package) as unsupported outside
-Vertex AI on the `generateContent`/`streamGenerateContent` API this
-provider calls. `api_key_envs` is where this provider
-type actually matters as a list: free-tier Gemini keys have a low
-per-key quota, so `internal/llm/gemini` rotates across every resolved key
-on a quota error (HTTP 429 / `RESOURCE_EXHAUSTED`) **or a 5xx server
-error** — broader than `gemini_tts`'s quota-only rotation (see **TTS**
-below), since a conversational turn can't afford to drop the whole turn on
-a transient upstream failure the way one TTS chunk request can.
-`gemini_rotation.cooldown_seconds`/`max_retry_cycles` tune that behavior,
-mirroring `gemini_tts`'s equivalent fields.
+```mermaid
+flowchart TD
+    A(["Turn starts"]) --> B["Try the current provider<br/>(default_provider, else next<br/>untried entry in llm.providers)"]
+    B --> C{"Result?"}
+    C -->|"success"| Z(["Reply streamed to caller"])
+    C -->|"connection/request error"| D["Move to the next<br/>provider in the chain"]
+    D --> B
+    C -->|"gemini provider only:<br/>quota error (429 /<br/>RESOURCE_EXHAUSTED) or 5xx"| E["Rotate to the next key in<br/>api_key_envs — anthropic/<br/>openai_compat only ever<br/>use the first entry"]
+    E --> F{"Untried key left?"}
+    F -->|"yes"| B
+    F -->|"no"| G{"gemini_rotation.max_retry_cycles<br/>left?"}
+    G -->|"yes"| H["Wait gemini_rotation.<br/>cooldown_seconds, retry<br/>the whole key list"]
+    H --> B
+    G -->|"no"| D
+```
 
-Manually verified against the live API (real free-tier keys): plain text
-turns, tool calling, and multi-turn tool-result follow-ups all work.
-Multi-turn tool calling required a real fix, not just design: Gemini
-returns each function-call `Part` with a `thoughtSignature` that **must**
-be echoed back verbatim on the next turn's replayed call, or the API
-returns a hard 400 — not just "degraded quality" as some of the SDK's own
-doc comments elsewhere might suggest. This is why `llm.ToolCall` and
-`history.ToolCallRef` both carry a generic `ProviderMetadata` field
-(opaque, base64 when binary) — `internal/llm/gemini` is the only current
-user, but the field is provider-agnostic so history storage doesn't
-special-case Gemini. Grounding with Google Search is wired and
-structurally correct (confirmed via the SDK's own types), but confirmed
-**broken in practice on the free-tier Gemini Developer API**: its quota
-there is zero, not merely tighter than plain `generateContent` calls, so
-every request that triggers it fails with `RESOURCE_EXHAUSTED` — including
-the very first call of the day, on a key that's otherwise well under its
-normal quota. `internal/llm/gemini`'s key rotation can't route around this
-(the exhaustion isn't per-key, it's per-feature), so leave
-`gemini_tools.google_search` off and use `tavily.web_search`/
-`tavily.web_fetch` (**Web tools** below) instead — verified working against
-the real API (see that section).
+Separately, each provider entry can carry its own `escalation` block
+(`tool_name`, `target_provider`) — not one global setting — so the model
+itself can hand a turn it judges too hard off mid-conversation, one hop at
+a time, and each hop only sees its own escalation tool:
 
-Each provider entry also carries its own `escalation` block (`enabled`,
-`tool_name`, `target_provider`, optional `description`) — not one global
-setting — so a chain of providers can each pick their own hand-off target
-and the model sees only the tool for whichever provider is currently
-handling the turn. This is what makes a graduated ladder possible: a cheap
-model escalates to a stronger one, which escalates to Claude, instead of
-every hard turn skipping straight to the most expensive model. See
-`config/llm.yaml` for a worked 3-tier example (`gemini-3.5-flash-lite` →
-`gemini-3.6-flash` → Claude), including `description` overrides on both
-Gemini tiers that explicitly name code execution as an escalation
-trigger — since neither Gemini tier has a working code-execution tool (see
-above), calling it out by name in the tool's own description is what makes
-the model reliably hand off for it, rather than leaving that to the
-generic "too complex" wording to somehow imply. Both tiers' descriptions
-also explicitly say escalating is *not* needed just to search the web or
-read a page, now that `tavily.web_search`/`tavily.web_fetch` (**Web tools**
-below) are offered directly to every hop in the chain — without that line,
-a model that used to only reach live web info by escalating (back when
-that meant Claude's `anthropic_tools` or `gemini-strong`'s now-disabled
-`google_search`) has no way to know the calculus changed. The router walks
-a chain of any depth (capped at a small hop limit purely to catch a
-misconfigured cycle, not to limit a legitimate ladder).
+```mermaid
+flowchart LR
+    A["Cheap default provider<br/>(e.g. local Ollama model)"] -->|"model calls its own<br/>escalation.tool_name"| B["escalation.target_provider<br/>(e.g. Gemini)"]
+    B -->|"can itself escalate again<br/>(its own escalation block)"| C["...to any depth<br/>(e.g. Claude)"]
+```
+
+See `config/llm.yaml` for a worked 3-tier example, including
+`description` overrides that name a specific missing capability (e.g. "you
+can't run code, escalate for that") instead of a generic "too complex"
+default — worth doing wherever a hop has a known gap.
 
 ## Web tools
 
@@ -233,8 +186,11 @@ through the ordinary custom-tool path (`Orchestrator.availableTools`/
 any one provider's own native web tool. This is what replaced Gemini's
 `gemini_tools.google_search` as this project's way of giving a cheap/
 free-tier model live web access, after Grounding with Google Search turned
-out to have a zero quota on the free tier (see above) — a self-hosted
-implementation sidesteps that per-provider quota entirely and works the
+out to have a zero quota on the free tier — not merely a low one, so every
+request touching it fails with `RESOURCE_EXHAUSTED` regardless of key
+rotation (see `config/config.yaml.dist`'s `llm:` comments for the full
+story) — a self-hosted implementation sidesteps that per-provider quota
+entirely and works the
 same way no matter which model in the chain handles the turn, which also
 means it's cheaper than paying for Claude's native `anthropic_tools`
 equivalents on every escalated turn just to look something up.
@@ -263,10 +219,11 @@ the real Tavily API (a live free-tier key): both endpoints return the
 expected result shape end to end.
 
 Both tool names (`web_search`, `web_fetch`) are shared with
-`anthropic_tools`'/`gemini_tools`' own native equivalents on purpose (see
-above) — don't enable a provider's native web tool alongside these on the
-same provider, since a duplicate tool name is a hard conflict on Anthropic
-specifically, not just wasted redundancy.
+`anthropic_tools`'/`gemini_tools`' own native equivalents on purpose — see
+`config/config.yaml.dist`'s `llm:` comments — so don't enable a provider's
+native web tool alongside these on the same provider: a duplicate tool
+name is a hard conflict on Anthropic specifically, not just wasted
+redundancy.
 
 ## TTS
 
