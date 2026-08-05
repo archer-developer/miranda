@@ -100,10 +100,16 @@ type indexPageData struct {
 }
 
 type loginPageData struct {
-	Lang            string
-	Strings         map[string]string
-	StringsJSON     template.JS
-	Error           bool
+	Lang        string
+	Strings     map[string]string
+	StringsJSON template.JS
+	Error       bool
+	// Expired distinguishes a bounce-back from auth-fetch.js's global 401/403
+	// handler (session died server-side, e.g. a process restart wiped
+	// internal/session.Store's in-memory map) from a wrong-password Error —
+	// same alert box, a message that doesn't imply the user typed something
+	// wrong.
+	Expired         bool
 	Languages       []languageOption
 	WebAuthnEnabled bool
 	AssetVersion    string

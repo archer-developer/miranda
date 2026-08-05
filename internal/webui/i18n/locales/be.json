@@ -38,6 +38,7 @@
   "memory_save_button": "Захаваць",
   "memory_saving_ellipsis": "Захаванне…",
   "memory_saved": "Захавана",
+  "memory_draft_restored": "Адноўлена незахаваная праўка з моманту выхаду з сесіі.",
   "logs_tab_app": "Лог праграмы",
   "logs_tab_llm": "Трэйс LLM",
   "logs_empty": "Пакуль няма запісаў.",
@@ -70,6 +71,7 @@
   "login_password_hide": "Схаваць пароль",
   "login_button": "Увайсці",
   "login_error": "Няправільнае імя карыстальніка або пароль.",
+  "login_expired": "Сесія скончылася. Калі ласка, увайдзіце зноў.",
   "login_or_divider": "або",
   "login_biometric_button": "Увайсці па біяметрыі",
   "login_biometric_error": "Не атрымалася ўвайсці па біяметрыі. Паспрабуйце пароль."

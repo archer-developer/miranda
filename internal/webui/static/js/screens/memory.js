@@ -2,8 +2,38 @@
 // the logged-in user server-side (see internal/webui.handleGetMemory).
 import { t } from "../i18n.js";
 import { showToast } from "../toast.js";
+import { onSessionExpired } from "../auth-fetch.js";
 
 let textEl, saveBtn, formEl;
+// The last content known to match the server, so the session-expiry hook
+// below can tell an actual unsaved edit apart from an untouched textarea
+// (nothing worth stashing) — set on both load() and a successful save().
+let loadedContent = "";
+
+// Scoped per-username: sessionStorage has no notion of "which account was
+// this for", and a shared household browser can have a different member
+// log back in on the same tab after the redirect below — without the
+// username in the key, that person would see the previous user's unsaved
+// draft.
+function draftKey() {
+  const username = window.MIRANDA_USER?.username;
+  return username ? `miranda:memory-draft:${username}` : null;
+}
+
+// Registered once at module load (not per-mount): the closure reads
+// `textEl`/`loadedContent` at call time, so it stays correct across
+// mount/unmount cycles without needing to re-register, and Set.add is a
+// no-op for a function reference it already holds.
+onSessionExpired(() => {
+  const key = draftKey();
+  if (!key || !textEl || textEl.value === loadedContent) return;
+  try {
+    sessionStorage.setItem(key, textEl.value);
+  } catch {
+    /* storage can throw in restricted contexts (private browsing quirks,
+       full quota) — losing the draft is no worse than not having this at all */
+  }
+});
 
 function setSaving(saving) {
   saveBtn.disabled = saving;
@@ -19,7 +49,18 @@ async function load() {
     const res = await fetch("/api/memory");
     if (!res.ok) throw new Error(String(res.status));
     const data = await res.json();
-    textEl.value = data.content || "";
+    loadedContent = data.content || "";
+    const key = draftKey();
+    const draft = key ? sessionStorage.getItem(key) : null;
+    if (draft !== null) {
+      sessionStorage.removeItem(key);
+      textEl.value = draft;
+      if (draft !== loadedContent) {
+        showToast(t("memory_draft_restored", "Restored an edit you hadn't saved before you were signed out."), "info");
+      }
+    } else {
+      textEl.value = loadedContent;
+    }
   } catch (err) {
     showToast(`${t("failed_to_load", "Failed to load:")} ${err}`, "error");
   } finally {
@@ -37,6 +78,7 @@ async function save() {
       body: JSON.stringify({ content: textEl.value }),
     });
     if (!res.ok) throw new Error(String(res.status));
+    loadedContent = textEl.value;
     showToast(t("memory_saved", "Saved"), "success");
   } catch (err) {
     showToast(`${t("request_failed", "Request failed:")} ${err}`, "error");

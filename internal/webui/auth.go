@@ -39,6 +39,18 @@ func (h *Handler) requireAuthAPI(next http.Handler) http.Handler {
 	})
 }
 
+// handleSessionCheck is a deliberately trivial authenticated GET —
+// requireAuthAPI does all the actual work — that reconnecting-ws.js pings
+// after a WebSocket close. A WS handshake the server rejected for a dead
+// session (see internal/httpapi/server.go's authorize()) surfaces to the
+// browser as a generic, reason-less close (browsers don't expose the HTTP
+// status a rejected Upgrade request got); this endpoint gives that dead-end
+// a way back into the ordinary fetch()-based 401/403 handling in
+// auth-fetch.js instead of retrying the WS forever with no explanation.
+func (h *Handler) handleSessionCheck(w http.ResponseWriter, r *http.Request) {
+	w.WriteHeader(http.StatusNoContent)
+}
+
 // authenticatedUser validates the session cookie, if any, against the
 // session store and resolves it to the full User record.
 func (h *Handler) authenticatedUser(r *http.Request) (users.User, bool) {
@@ -76,6 +88,7 @@ func (h *Handler) handleLoginPage(w http.ResponseWriter, r *http.Request) {
 		Strings:         strings,
 		StringsJSON:     stringsJSON(strings),
 		Error:           r.URL.Query().Get("error") == "1",
+		Expired:         r.URL.Query().Get("expired") == "1",
 		Languages:       languageOptions(lang),
 		WebAuthnEnabled: h.webauthn != nil,
 		AssetVersion:    h.assetVersion,

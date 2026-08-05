@@ -38,6 +38,7 @@
   "memory_save_button": "Сохранить",
   "memory_saving_ellipsis": "Сохранение…",
   "memory_saved": "Сохранено",
+  "memory_draft_restored": "Восстановлена несохранённая правка с момента выхода из сессии.",
   "logs_tab_app": "Лог приложения",
   "logs_tab_llm": "Трейс LLM",
   "logs_empty": "Записей пока нет.",
@@ -70,6 +71,7 @@
   "login_password_hide": "Скрыть пароль",
   "login_button": "Войти",
   "login_error": "Неверное имя пользователя или пароль.",
+  "login_expired": "Сессия истекла. Пожалуйста, войдите снова.",
   "login_or_divider": "или",
   "login_biometric_button": "Войти по биометрии",
   "login_biometric_error": "Не удалось войти по биометрии. Попробуйте пароль."

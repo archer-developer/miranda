@@ -38,6 +38,20 @@ export function connectReconnecting(url, handlers) {
       const delay = reconnectDelay;
       reconnectDelay = Math.min(reconnectDelay * 2, RECONNECT_MAX_MS);
       handlers.onClose?.({ upSecs, code: event.code, reason: event.reason, wasClean: event.wasClean, nextDelayMs: delay });
+      // A server-side session that died (e.g. a process restart wiping
+      // internal/session.Store — see auth-fetch.js) makes every future
+      // Upgrade request here get rejected before the WS handshake even
+      // completes, which the browser exposes to us as nothing more than an
+      // opaque, reason-less close (code 1006, no `reason` — WebSocket
+      // doesn't carry the HTTP status the server actually sent). Left
+      // alone, that's indistinguishable from a plain network blip and this
+      // driver would just keep retrying forever at growing backoff,
+      // explaining nothing. Piggyback a cheap authenticated GET on the
+      // fetch() this app already has wrapped (see auth-fetch.js): if the
+      // session really is gone, its own 401/403 handling redirects to
+      // /login on its own — nothing to do here either way, so the result
+      // is intentionally ignored and never blocks the reconnect below.
+      fetch("/api/session").catch(() => {});
       setTimeout(open, delay);
     };
     // onerror fires alongside (just before) onclose on a failed/dropped

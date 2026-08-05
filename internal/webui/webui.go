@@ -190,6 +190,7 @@ func New(h History, mem Memory, webauthnSvc WebAuthnService, usersRegistry *user
 	mux.Handle("GET /api/dialogs/{id}", handler.requireAuthAPI(http.HandlerFunc(handler.handleDialogMessages)))
 	mux.Handle("GET /api/memory", handler.requireAuthAPI(http.HandlerFunc(handler.handleGetMemory)))
 	mux.Handle("PUT /api/memory", handler.requireAuthAPI(http.HandlerFunc(handler.handlePutMemory)))
+	mux.Handle("GET /api/session", handler.requireAuthAPI(http.HandlerFunc(handler.handleSessionCheck)))
 
 	if webauthnSvc != nil {
 		// Registration/management require being logged in already (adding a

@@ -38,6 +38,7 @@
   "memory_save_button": "Save",
   "memory_saving_ellipsis": "Saving…",
   "memory_saved": "Saved",
+  "memory_draft_restored": "Restored an edit you hadn't saved before you were signed out.",
   "logs_tab_app": "App log",
   "logs_tab_llm": "LLM trace",
   "logs_empty": "No log lines yet.",
@@ -70,6 +71,7 @@
   "login_password_hide": "Hide password",
   "login_button": "Log in",
   "login_error": "Invalid username or password.",
+  "login_expired": "Your session has expired. Please log in again.",
   "login_or_divider": "or",
   "login_biometric_button": "Sign in with biometrics",
   "login_biometric_error": "Biometric sign-in failed. Try your password instead."

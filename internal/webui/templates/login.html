@@ -76,6 +76,14 @@
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="mt-0.5 h-4 w-4 shrink-0" aria-hidden="true"><circle cx="12" cy="12" r="9"/><line x1="12" y1="8" x2="12" y2="13"/><line x1="12" y1="16" x2="12" y2="16.01"/></svg>
         <span>{{.Strings.login_error}}</span>
       </div>
+      {{else if .Expired}}
+      <!-- Reached via auth-fetch.js's global 401/403 redirect (static/js/auth-fetch.js),
+           not a wrong-password submit — same alert box, a message that
+           doesn't imply the user mistyped anything. -->
+      <div role="alert" class="mb-5 flex items-start gap-2.5 rounded-lg border border-(--color-danger-border) bg-(--color-danger-bg) px-3.5 py-3 text-sm text-(--color-danger-text)">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="mt-0.5 h-4 w-4 shrink-0" aria-hidden="true"><circle cx="12" cy="12" r="9"/><line x1="12" y1="8" x2="12" y2="13"/><line x1="12" y1="16" x2="12" y2="16.01"/></svg>
+        <span>{{.Strings.login_expired}}</span>
+      </div>
       {{end}}
 
       <form method="POST" action="/login" class="space-y-4" novalidate>
