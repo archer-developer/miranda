@@ -86,43 +86,68 @@
       </div>
       {{end}}
 
-      <form method="POST" action="/login" class="space-y-4" novalidate>
-        <div>
-          <label class="mb-1.5 block text-xs font-medium text-(--color-text-muted)" for="username">{{.Strings.login_username_label}}</label>
-          <input id="username" name="username" type="text" autocomplete="username" required autofocus
-                 class="w-full rounded-lg border border-(--color-border-strong) bg-(--color-bg) px-3.5 py-2.5 text-sm text-(--color-text) transition-colors placeholder:text-(--color-text-faint) hover:border-(--color-text-faint) focus:border-(--color-accent-emphasis) focus:outline-none focus-visible:outline-none" />
-        </div>
-        <div>
-          <label class="mb-1.5 block text-xs font-medium text-(--color-text-muted)" for="password">{{.Strings.login_password_label}}</label>
-          <div class="relative">
-            <input id="password" name="password" type="password" autocomplete="current-password" required
-                   class="w-full rounded-lg border border-(--color-border-strong) bg-(--color-bg) px-3.5 py-2.5 pr-11 text-sm text-(--color-text) transition-colors placeholder:text-(--color-text-faint) hover:border-(--color-text-faint) focus:border-(--color-accent-emphasis) focus:outline-none focus-visible:outline-none" />
-            <button type="button" id="password-toggle" tabindex="0"
-                    class="absolute inset-y-0 right-0 flex w-11 items-center justify-center text-(--color-text-faint) transition-colors hover:text-(--color-text-muted) focus-visible:outline-none"
-                    aria-label="{{.Strings.login_password_show}}" aria-pressed="false">
-              <svg id="password-toggle-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="h-4 w-4" aria-hidden="true"><path d="M1 12s4-7 11-7 11 7 11 7-4 7-11 7-11-7-11-7z"/><circle cx="12" cy="12" r="3"/></svg>
-            </button>
+      <!-- #password-section is what login.js collapses (via the `hidden`
+           attribute, not a class) when this browser has a remembered
+           passkey — the `hidden` attribute specifically, so the browser's
+           own constraint validation exempts the required username/password
+           inputs inside instead of blocking an unrelated submit (a form
+           merely styled invisible would still validate them). -->
+      <div id="password-section">
+        <form method="POST" action="/login" class="space-y-4" novalidate>
+          <div>
+            <label class="mb-1.5 block text-xs font-medium text-(--color-text-muted)" for="username">{{.Strings.login_username_label}}</label>
+            <input id="username" name="username" type="text" autocomplete="username" required autofocus
+                   class="w-full rounded-lg border border-(--color-border-strong) bg-(--color-bg) px-3.5 py-2.5 text-sm text-(--color-text) transition-colors placeholder:text-(--color-text-faint) hover:border-(--color-text-faint) focus:border-(--color-accent-emphasis) focus:outline-none focus-visible:outline-none" />
           </div>
-        </div>
-        <button type="submit" id="login-submit"
-                class="flex w-full items-center justify-center gap-2 rounded-lg bg-(--color-accent) px-3.5 py-2.5 text-sm font-medium text-white transition-colors hover:bg-(--color-accent-hover) focus-visible:outline-none active:bg-(--color-accent-active)">
-          {{.Strings.login_button}}
-        </button>
-      </form>
+          <div>
+            <label class="mb-1.5 block text-xs font-medium text-(--color-text-muted)" for="password">{{.Strings.login_password_label}}</label>
+            <div class="relative">
+              <input id="password" name="password" type="password" autocomplete="current-password" required
+                     class="w-full rounded-lg border border-(--color-border-strong) bg-(--color-bg) px-3.5 py-2.5 pr-11 text-sm text-(--color-text) transition-colors placeholder:text-(--color-text-faint) hover:border-(--color-text-faint) focus:border-(--color-accent-emphasis) focus:outline-none focus-visible:outline-none" />
+              <button type="button" id="password-toggle" tabindex="0"
+                      class="absolute inset-y-0 right-0 flex w-11 items-center justify-center text-(--color-text-faint) transition-colors hover:text-(--color-text-muted) focus-visible:outline-none"
+                      aria-label="{{.Strings.login_password_show}}" aria-pressed="false">
+                <svg id="password-toggle-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="h-4 w-4" aria-hidden="true"><path d="M1 12s4-7 11-7 11 7 11 7-4 7-11 7-11-7-11-7z"/><circle cx="12" cy="12" r="3"/></svg>
+              </button>
+            </div>
+          </div>
+          <button type="submit" id="login-submit"
+                  class="flex w-full items-center justify-center gap-2 rounded-lg bg-(--color-accent) px-3.5 py-2.5 text-sm font-medium text-white transition-colors hover:bg-(--color-accent-hover) focus-visible:outline-none active:bg-(--color-accent-active)">
+            {{.Strings.login_button}}
+          </button>
+        </form>
+      </div>
 
       {{if .WebAuthnEnabled}}
-      <div class="my-5 flex items-center gap-3 text-xs text-(--color-text-faint)">
+      <div id="password-divider" class="my-5 flex items-center gap-3 text-xs text-(--color-text-faint)">
         <span class="h-px flex-1 bg-(--color-border)"></span>
         {{.Strings.login_or_divider}}
         <span class="h-px flex-1 bg-(--color-border)"></span>
       </div>
 
+      <!-- login.js swaps this button's class list wholesale between this
+           (secondary, alternative-method) look and an accent-filled
+           primary look when it collapses #password-section above — see
+           PRIMARY_CLASSES there. Keep this markup's classes as the
+           canonical "secondary" variant; login.js reads them once at load
+           to know what to restore if the user expands the password form
+           back open. -->
       <button id="biometric-login" type="button" hidden
               class="flex w-full items-center justify-center gap-2 rounded-lg border border-(--color-border-strong) px-3.5 py-2.5 text-sm font-medium text-(--color-text) transition-colors hover:border-(--color-text-faint) hover:bg-(--color-surface-2)/60 focus-visible:outline-none">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="h-4 w-4" aria-hidden="true"><circle cx="7" cy="15" r="4"/><path d="M9.5 12.5 20 2"/><path d="M17 5l3 3"/><path d="M14 8l2.5 2.5"/></svg>
         {{.Strings.login_biometric_button}}
       </button>
       <p id="biometric-error" role="alert" class="mt-3 hidden text-center text-xs text-(--color-danger-icon)"></p>
+
+      <!-- Only ever shown once login.js has collapsed #password-section
+           (starts hidden even though this element doesn't depend on
+           .WebAuthnEnabled's own JS gate) — the one way back to the
+           password form when the passwordless-first guess doesn't apply to
+           whoever is actually sitting down at this browser right now. -->
+      <button id="password-toggle-link" type="button" hidden
+              class="mt-4 block w-full text-center text-xs font-medium text-(--color-text-faint) transition-colors hover:text-(--color-text-muted) focus-visible:outline-none">
+        {{.Strings.login_use_password}}
+      </button>
       {{end}}
     </div>
 

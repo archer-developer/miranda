@@ -74,5 +74,6 @@
   "login_expired": "Your session has expired. Please log in again.",
   "login_or_divider": "or",
   "login_biometric_button": "Sign in with biometrics",
-  "login_biometric_error": "Biometric sign-in failed. Try your password instead."
+  "login_biometric_error": "Biometric sign-in failed. Try your password instead.",
+  "login_use_password": "Use username and password instead"
 }

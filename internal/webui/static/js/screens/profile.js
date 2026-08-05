@@ -114,9 +114,14 @@ async function renderCredentials(listEl) {
     const creds = await webauthn.listCredentials();
     listEl.innerHTML = "";
     if (!creds || creds.length === 0) {
+      // Keeps login.js's passwordless-first heuristic in sync with reality
+      // whenever this screen loads, not just at registration time — e.g.
+      // after removing this account's last passkey below.
+      webauthn.forgetPasskey();
       listEl.innerHTML = `<p class="rounded-lg border border-dashed border-(--color-border) px-4 py-6 text-center text-sm text-(--color-text-faint)">${t("profile_no_passkeys", "No passkeys registered yet.")}</p>`;
       return;
     }
+    webauthn.rememberPasskey();
     for (const c of creds) {
       listEl.appendChild(passkeyRow(c, () => renderCredentials(listEl)));
     }

@@ -2,7 +2,9 @@
 // (navigator.credentials — no library needed on this side at all) and
 // Miranda's /api/webauthn/* endpoints (internal/webui/webauthn.go). Shared
 // by the profile screen (registering a new passkey) and the login page
-// (passwordless/usernameless sign-in).
+// (passwordless/usernameless sign-in). Also owns the browser-local
+// "remembered passkey" hint (see REMEMBER_KEY below) that login.js uses to
+// decide whether to default to a passwordless-first layout.
 //
 // The server's JSON (github.com/go-webauthn/webauthn/protocol) encodes byte
 // fields — challenge, user.id, credential ids — as base64url strings;
@@ -79,6 +81,49 @@ export function isSupported() {
   return typeof window.PublicKeyCredential !== "undefined";
 }
 
+// REMEMBER_KEY backs a browser-local (not account-local) hint that *some*
+// passkey has worked from this browser before — login.js's only way to
+// guess, on the anonymous /login page, whether to default to a
+// passwordless-first layout. Discoverable/usernameless login means the
+// server can't tell who's about to sign in until the ceremony finishes, so
+// there's no per-account signal to read here at all; a shared household
+// device can carry one family member's "yes" into another member's visit,
+// but that only costs them one click on the "use password instead" toggle,
+// never a dead end.
+const REMEMBER_KEY = "miranda-has-passkey";
+
+/** Whether this browser has a remembered passkey — see REMEMBER_KEY. */
+export function hasRememberedPasskey() {
+  try {
+    return localStorage.getItem(REMEMBER_KEY) === "1";
+  } catch {
+    return false;
+  }
+}
+
+/** Records that this browser has a working passkey (a successful login or
+ * registration, or the profile screen finding a non-empty credential list).
+ * Best-effort: storage can throw in restricted contexts (e.g. Safari
+ * private browsing's quota), and the flag is a UX nicety, not required for
+ * correctness. */
+export function rememberPasskey() {
+  try {
+    localStorage.setItem(REMEMBER_KEY, "1");
+  } catch {
+    /* see doc comment above */
+  }
+}
+
+/** Clears the remembered-passkey hint — called when the profile screen
+ * finds this account has no passkeys left registered. */
+export function forgetPasskey() {
+  try {
+    localStorage.removeItem(REMEMBER_KEY);
+  } catch {
+    /* see rememberPasskey's doc comment */
+  }
+}
+
 /** Registers a new passkey for the logged-in user (profile screen). */
 export async function registerPasskey(nickname) {
   const beginRes = await fetch("/api/webauthn/register/begin", { method: "POST" });
@@ -96,6 +141,7 @@ export async function registerPasskey(nickname) {
     body: JSON.stringify(body),
   });
   if (!finishRes.ok) throw new Error(`registration failed: ${finishRes.status} ${await finishRes.text()}`);
+  rememberPasskey();
   return finishRes.json();
 }
 
@@ -118,6 +164,7 @@ export async function loginWithPasskey() {
     body: JSON.stringify(body),
   });
   if (!finishRes.ok) throw new Error(`login failed: ${finishRes.status}`);
+  rememberPasskey();
   return finishRes.json();
 }
 

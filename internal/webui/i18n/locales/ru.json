@@ -74,5 +74,6 @@
   "login_expired": "Сессия истекла. Пожалуйста, войдите снова.",
   "login_or_divider": "или",
   "login_biometric_button": "Войти по биометрии",
-  "login_biometric_error": "Не удалось войти по биометрии. Попробуйте пароль."
+  "login_biometric_error": "Не удалось войти по биометрии. Попробуйте пароль.",
+  "login_use_password": "Войти с логином и паролем"
 }
