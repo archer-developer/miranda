@@ -236,13 +236,23 @@ func (o *Orchestrator) resolveConversation(ctx context.Context, userID, source s
 // of the household it is talking to — it can only guess from what gets said,
 // which is exactly the kind of thing that should never need guessing.
 //
+// Both the display name and the raw userID are spelled out explicitly. The
+// display name alone isn't enough: several MCP tools (e.g. the yazio food
+// diary) take a technical "user" argument that is the userID itself, not the
+// display name, and the two only coincide by lexical accident (e.g. "Аня"
+// vs. "anna") for some household members and not others (e.g. "Саша" vs.
+// "archer" — no relation at all). Without the userID spelled out, the model
+// has been observed defaulting to whichever username it saw most recently in
+// context rather than the current speaker's, silently misattributing tool
+// calls like food log entries to the wrong account.
+//
 // The user's current local time is injected so the model can correctly
 // interpret relative time references ("в 22:00", "через 10 минут") and
 // generate proper RFC3339 timestamps for create_scheduled_task.
 func (o *Orchestrator) buildSystemPrompt(userID, sharedMemory, userMemory string) string {
 	prompt := o.baseSystemPrompt
 	if name := o.currentUserName(userID); name != "" {
-		prompt += "\n\nСейчас с тобой разговаривает: " + name + "."
+		prompt += "\n\nСейчас с тобой разговаривает: " + name + " (технический username: " + userID + "; используй именно это значение как user в тулах вроде yazio)."
 	}
 	now := time.Now().In(o.userLocation(userID))
 	prompt += "\n\nТекущее время пользователя: " + now.Format("2006-01-02 15:04 MST") + "."
