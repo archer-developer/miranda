@@ -1,26 +1,48 @@
 # Miranda
 
-Miranda is the "brain" behind a custom home voice assistant built around
-Home Assistant — a standalone Go **Agent Service**, not a custom_component
-living inside HA. It compiles to a single self-contained binary (no Docker,
-no cgo), routes conversations across multiple LLM providers, keeps dialog
-history in embedded SQLite and long-term memory as per-user markdown files,
-calls tools over MCP (Home Assistant and others), and speaks replies through
-Yandex Station — either its own built-in voice, or (opt-in) a voice rendered
-by Gemini's TTS API and played back through the same station. See
-`docs/PROJECT_PREREQUISITES.md` for the full design rationale.
+**The "brain" behind a custom home voice assistant, built around Home Assistant.**
 
+Miranda is a standalone Go service — not a Home Assistant add-on — that plugs
+into HA's voice pipeline, talks to whichever LLM you point it at, remembers
+who it's talking to, and calls tools (Home Assistant, web search, Telegram,
+its own scheduler) to actually get things done. One static binary, no
+Docker, no cgo.
+
+```mermaid
+flowchart LR
+    Voice(["HA Voice Assist"]) <--> M
+    Chat(["Telegram"]) <--> M
+    Web(["Web dashboard"]) <--> M
+    M(["Miranda"]) <--> LLM["LLM providers"]
+    M <--> HA["Home Assistant"]
+    M --> Speaker["Yandex Station"]
 ```
-HA (voice input, MCP tools, TTS output) <---> Miranda Agent Service <---> LLM providers
-```
+
+> 📖 This README is for people setting up and running Miranda. If you're an
+> AI coding agent (or a human) working on Miranda's internals, read
+> `CLAUDE.md` instead — and `docs/PROJECT_PREREQUISITES.md` for the
+> original design rationale.
+
+## Features at a glance
+
+| | |
+|---|---|
+| 🧠 **Any LLM** | Claude, Gemini, or anything OpenAI-compatible (Ollama, vLLM, OpenRouter, ...) — with automatic fallback and escalation |
+| 🏠 **Home Assistant** | Talks over HA's Voice Assist pipeline, and controls HA entities as a tool |
+| 🔊 **Yandex Station** | Speaks replies out loud — built-in voice or a Gemini-rendered one |
+| 💬 **Telegram** | Household members can chat with it from their phone |
+| 🌐 **Web dashboard** | Live logs, dialog history, passwordless login |
+| 🔍 **Web search** | Looks things up online when it doesn't know |
+| ⏰ **Scheduler** | One-off reminders and recurring routines, in plain language |
+| 🧩 **MCP tools** | Anything exposed over MCP — Home Assistant and beyond |
+| 🧾 **Memory** | Remembers facts and past conversations per person |
 
 ## Contents
 
-- [Building](#building)
-- [Testing](#testing)
-- [Deploying](#deploying)
+- [Getting started](#getting-started)
 - [Configuration](#configuration)
   - [LLM routing, escalation, and key rotation](#llm-routing-escalation-and-key-rotation)
+  - [MCP servers](#mcp-servers)
 - [Web tools](#web-tools)
 - [TTS](#tts)
 - [Logging](#logging)
@@ -29,108 +51,78 @@ HA (voice input, MCP tools, TTS output) <---> Miranda Agent Service <---> LLM pr
   - [Passkey (WebAuthn) login](#passkey-webauthn-login)
   - [Language](#language)
 - [Home Assistant integration](#home-assistant-integration)
-  - [Connecting Home Assistant as an MCP server](#connecting-home-assistant-as-an-mcp-server)
-  - [Connecting Miranda to Home Assistant (thin conversation client)](#connecting-miranda-to-home-assistant-thin-conversation-client)
+  - [Home Assistant as an MCP server](#home-assistant-as-an-mcp-server)
+  - [Miranda as a Home Assistant conversation agent](#miranda-as-a-home-assistant-conversation-agent)
   - [Testing the full loop](#testing-the-full-loop)
   - [Troubleshooting](#troubleshooting)
 - [Telegram bot](#telegram-bot)
-  - [The `send_telegram` tool](#the-send_telegram-tool)
 - [Scheduled tasks](#scheduled-tasks)
-- [Project layout](#project-layout)
+- [How it works](#how-it-works)
 
 ---
 
-## Building
+## Getting started
 
-Requires Go 1.25+ (the module pins `go 1.25.0`; with `GOTOOLCHAIN=auto` —
-the default — `go build` fetches a matching toolchain automatically if your
-installed `go` is older).
+Requires Go 1.25+ (fetched automatically via `GOTOOLCHAIN=auto` if yours is older).
 
 ```bash
-go build -o miranda ./cmd/miranda
-# or
-make build
-```
-
-The binary is fully static (`CGO_ENABLED=0`, pure-Go SQLite driver via
-`modernc.org/sqlite`), so cross-compiling for another host is just:
-
-```bash
-GOOS=linux GOARCH=arm64 go build -o miranda-linux-arm64 ./cmd/miranda
-```
-
-Run it with `make run` (builds then runs), or directly:
-
-```bash
+go build -o miranda ./cmd/miranda   # or: make build
+cp config/config.yaml.dist config/config.yaml   # every field documented inline
+cp .env.example .env                             # fill in API keys/tokens
 ./miranda
 ```
 
-Config is assembled from every `*.yaml` file in `./config/` (glob'd and
-merged — see `internal/config.Load`), not a single file. Point that at a
-different directory with `MIRANDA_CONFIG_DIR`, e.g. to run a second,
-isolated instance against scratch config without touching the real one:
+The binary is fully static (`CGO_ENABLED=0`, pure-Go SQLite), so
+cross-compiling is a one-liner: `GOOS=linux GOARCH=arm64 go build -o miranda-linux-arm64 ./cmd/miranda`.
+
+Config is assembled from **every `*.yaml` file** in `./config/`, merged
+together — not one single file. Split it into `llm.yaml`, `telegram.yaml`,
+`mcp.yaml`, etc. if that's tidier, or keep it as one `config.yaml`; both
+work identically. Point at a different directory with `MIRANDA_CONFIG_DIR`
+to run a second, isolated instance against scratch config without touching
+a real deployment:
 
 ```bash
 MIRANDA_CONFIG_DIR=./config-dev ./miranda
 ```
 
-If that scratch config still shares a real `TELEGRAM_BOT_TOKEN`/
-`public_base_url` with a live deployment (e.g. testing something unrelated
-to Telegram against otherwise-real config), also set
-`telegram.register_webhook: false` in it — otherwise this instance's
-startup will re-register the bot's webhook with a secret only it knows,
-breaking inbound delivery to the real deployment until *that* one restarts.
-See `TelegramConfig`'s doc comment in `internal/config/config.go`.
+> ⚠️ If that scratch config shares a real Telegram bot token/URL with a live
+> deployment, also set `telegram.register_webhook: false` in it — otherwise
+> its startup hijacks the bot's webhook from whichever instance is actually
+> deployed.
 
-## Testing
+### Testing
 
 ```bash
-make test        # go test ./... -race — unit tests + the black-box agent-loop
-                  # integration test in test/integration (fake LLM + fake MCP,
-                  # real SQLite/history/memory, real HTTP server)
-make lint         # golangci-lint run ./...
-make fmt          # gofmt + goimports
-make check        # fmt + lint + test — run this before committing
+make test    # unit tests + a black-box agent-loop integration test
+make check   # fmt + lint + test — run before committing
 ```
 
-`make lint`/`make check` need `golangci-lint` and `goimports` on `PATH` —
-`make tools` installs both (plus the Tailwind CLI, see below).
-
-## Deploying
+### Deploying
 
 ```bash
 ./scripts/deploy.sh
 ```
 
-Cross-compiles for `linux/amd64`, ships the binary to the production server
-over SSH, and restarts the `systemd --user` service that runs it —
-`config.yaml`, `data/`, `logs/`, and `.env` on the server are never touched.
-See `.claude/skills/deploy/SKILL.md` for the full breakdown and the
-one-time server setup (`loginctl enable-linger`) it depends on.
+Cross-compiles for `linux/amd64`, ships the binary over SSH, and restarts
+the `systemd --user` service that runs it. Never touches `config.yaml`,
+`data/`, `logs/`, or `.env` on the server.
 
 ## Configuration
 
-Copy `config/config.yaml.dist` — the one config file actually committed to
-this repo, and the authoritative field-by-field reference (every field
-documented inline, including defaults and the non-obvious gotchas — kept
-in sync with the code, unlike prose here that can drift) — to
-`config/config.yaml` (or split it into several `config/*.yaml` fragments,
-one per concern; both work identically, since `internal/config.Load`
-merges every `*.yaml` file in the directory — see **Building** above) and
-edit it. Secrets (API keys, tokens) are never put in the file directly:
-each provider/server entry names one or more environment variables
-(`api_key_envs`, `token_env`) to read at startup instead.
+`config/config.yaml.dist` is the single source of truth for every
+setting — every field documented inline, including defaults and the
+non-obvious gotchas. Copy it and edit what differs:
 
 ```bash
 cp config/config.yaml.dist config/config.yaml
 ```
 
-For local development, those environment variables don't need to be
-exported by hand every session: copy `.env.example` to `.env` and fill it
-in — Miranda loads it at startup (`internal/envfile`). A variable already
-set in the real environment always wins over `.env`, so this has no effect
-in production setups (systemd, etc.) that already set secrets some other
-way.
+Secrets (API keys, tokens) never go in the YAML directly — each entry
+names an environment variable to read instead (`api_key_envs`,
+`token_env`). For local development, put those in `.env` instead of
+exporting them by hand every session (a real environment variable always
+wins, so this has no effect in production):
 
 ```bash
 cp .env.example .env
@@ -138,211 +130,162 @@ cp .env.example .env
 
 ### LLM routing, escalation, and key rotation
 
-`llm.providers` is a fallback chain, one entry per model backend
-(`type: openai_compat` for any OpenAI Chat Completions compatible server —
-Ollama, vLLM, LM Studio, OpenRouter; `type: anthropic` for Claude;
-`type: gemini` for native Gemini). `llm.default_provider`, if set, is
-moved to the front of that chain regardless of the list's own order.
+`llm.providers` is a fallback chain — `type: openai_compat` for any OpenAI
+Chat Completions compatible backend, `type: anthropic` for Claude, or
+`type: gemini` for native Gemini. `llm.default_provider`, if set, jumps to
+the front of that chain regardless of list order.
 
 ```mermaid
 flowchart TD
-    A(["Turn starts"]) --> B["Try the current provider<br/>(default_provider, else next<br/>untried entry in llm.providers)"]
-    B --> C{"Result?"}
-    C -->|"success"| Z(["Reply streamed to caller"])
-    C -->|"connection/request error"| D["Move to the next<br/>provider in the chain"]
+    A(["Turn starts"]) --> B["Try current provider"]
+    B --> C{"Result"}
+    C -->|"success"| Z(["Reply sent"])
+    C -->|"connection error"| D["Next provider<br/>in the chain"]
     D --> B
-    C -->|"gemini provider only:<br/>quota error (429 /<br/>RESOURCE_EXHAUSTED) or 5xx"| E["Rotate to the next key in<br/>api_key_envs — anthropic/<br/>openai_compat only ever<br/>use the first entry"]
-    E --> F{"Untried key left?"}
+    C -->|"Gemini: quota or<br/>server error"| E["Rotate to next<br/>API key"]
+    E --> F{"Keys left?"}
     F -->|"yes"| B
-    F -->|"no"| G{"gemini_rotation.max_retry_cycles<br/>left?"}
-    G -->|"yes"| H["Wait gemini_rotation.<br/>cooldown_seconds, retry<br/>the whole key list"]
+    F -->|"no"| G{"Retry cycles left?"}
+    G -->|"yes"| H["Wait, then retry<br/>the whole key list"]
     H --> B
     G -->|"no"| D
 ```
 
-Separately, each provider entry can carry its own `escalation` block
-(`tool_name`, `target_provider`) — not one global setting — so the model
-itself can hand a turn it judges too hard off mid-conversation, one hop at
-a time, and each hop only sees its own escalation tool:
+Separately, each provider can carry its own `escalation` block — the model
+itself hands a hard turn off mid-conversation, one hop at a time, seeing
+only its own escalation tool at each step:
 
 ```mermaid
 flowchart LR
-    A["Cheap default provider<br/>(e.g. local Ollama model)"] -->|"model calls its own<br/>escalation.tool_name"| B["escalation.target_provider<br/>(e.g. Gemini)"]
-    B -->|"can itself escalate again<br/>(its own escalation block)"| C["...to any depth<br/>(e.g. Claude)"]
+    A["Cheap default model"] -->|"model escalates"| B["Stronger model"]
+    B -->|"can escalate again"| C["Even stronger model"]
 ```
 
-See `config/llm.yaml` for a worked 3-tier example, including
+See `config/llm.yaml` for a worked 3-tier example, including per-hop
 `description` overrides that name a specific missing capability (e.g. "you
-can't run code, escalate for that") instead of a generic "too complex"
-default — worth doing wherever a hop has a known gap.
+can't run code, escalate for that") instead of a generic "too complex" default.
+
+### MCP servers
+
+`mcp.servers` is how any [MCP](https://modelcontextprotocol.io) server
+becomes a set of tools the model can call — Home Assistant (see below) is
+one example among many. A few purpose-built ones pair well with Miranda:
+
+| Server | Adds |
+|---|---|
+| [miranda-code-execution-sandbox](https://github.com/archer-developer/miranda-code-execution-sandbox) | Sandboxed Python/bash execution, plus the file upload/download the web UI uses |
+| [miranda-diary](https://github.com/archer-developer/miranda-diary) | Personal journal entries |
+| [miranda-yazio](https://github.com/archer-developer/miranda-yazio) | Nutrition/calorie tracking via YAZIO |
+
+```yaml
+mcp:
+  servers:
+    - name: code_exec_sandbox
+      url: "http://127.0.0.1:8788/mcp"
+      token_env: "SANDBOX_MCP_TOKEN"
+      enabled: true
+```
+
+A server that's down at startup never blocks it — Miranda retries in the
+background until it comes up, no restart needed.
 
 ## Web tools
 
-`web_search` and `web_fetch` (`internal/tools`, backed by
-`internal/tavily` — the [Tavily](https://tavily.com) API) are Miranda's own
-tools for live web access, offered to every LLM provider identically
-through the ordinary custom-tool path (`Orchestrator.availableTools`/
-`executeTool`, same as `remember_this` or an MCP tool) rather than through
-any one provider's own native web tool. This is what replaced Gemini's
-`gemini_tools.google_search` as this project's way of giving a cheap/
-free-tier model live web access, after Grounding with Google Search turned
-out to have a zero quota on the free tier — not merely a low one, so every
-request touching it fails with `RESOURCE_EXHAUSTED` regardless of key
-rotation (see `config/config.yaml.dist`'s `llm:` comments for the full
-story) — a self-hosted implementation sidesteps that per-provider quota
-entirely and works the
-same way no matter which model in the chain handles the turn, which also
-means it's cheaper than paying for Claude's native `anthropic_tools`
-equivalents on every escalated turn just to look something up.
-
-Configure under `tavily:` — both default to `false` (opt-in, needs a real
-API key):
+`web_search`/`web_fetch` give every model live web access via
+[Tavily](https://tavily.com), identically no matter which provider handles
+the turn — this is what a cheap/free-tier model reaches for instead of a
+provider-native search tool with its own separate quota.
 
 ```yaml
 tavily:
   api_key_env: "TAVILY_API_KEY" # from https://app.tavily.com
   web_search:
     enabled: true
-    max_results: 5 # bounds how many results are spent into the model's context per search
+    max_results: 5
   web_fetch:
     enabled: true
 ```
 
-`web_search` calls Tavily's `/search` endpoint and returns each result's
-title, URL, and a content snippet; `web_fetch` calls Tavily's `/extract`
-endpoint (reusing Tavily rather than Miranda doing its own HTTP GET +
-HTML-to-text extraction, so both tools share one dependency, one API key,
-and one failure mode) to fetch a specific URL's readable text — typically
-one the user gave directly, or one from a prior `web_search` result, since
-`web_fetch` alone can't discover a URL itself. Manually verified against
-the real Tavily API (a live free-tier key): both endpoints return the
-expected result shape end to end.
-
-Both tool names (`web_search`, `web_fetch`) are shared with
-`anthropic_tools`'/`gemini_tools`' own native equivalents on purpose — see
-`config/config.yaml.dist`'s `llm:` comments — so don't enable a provider's
-native web tool alongside these on the same provider: a duplicate tool
-name is a hard conflict on Anthropic specifically, not just wasted
-redundancy.
+`web_search` returns titles, URLs, and snippets; `web_fetch` pulls a
+specific URL's readable text (typically one from a search result, or one
+the user gave directly). Both names are shared with `anthropic_tools`'/
+`gemini_tools`' own native equivalents on purpose — don't enable a
+provider's native web tool *and* these on the same provider, since a
+duplicate tool name is a hard conflict, not just redundancy.
 
 ## TTS
 
-Two providers, selected via `tts.primary` (and an optional `tts.fallback`
-tried if the primary reports its quota exhausted): `yandex_station_text`
-(the default — Yandex Station's own built-in voice, no external dependency)
-and `gemini_tts` (opt-in — renders audio via Gemini's speech-generation API
-and plays it back through the same station as a fetched file, for a
-different voice than Yandex's own).
+| Provider | | |
+|---|---|---|
+| `yandex_station_text` | default | Yandex Station's built-in voice, zero external dependency |
+| `gemini_tts` | opt-in | Renders audio via Gemini and plays it back as a fetched file, for a different voice |
 
-Dispatch is always asynchronous: a reply is enqueued onto a background
-player and the turn continues immediately — it never blocks on synthesis or
-on the physical speaker's actual playback duration. A new `ha_assist` voice
-turn always interrupts (stops) whatever a previous turn's speech is still
-finishing, rather than queuing after it, and the model can also stop
-speaking mid-reply itself via the `stop_speech` tool (e.g. "хватит", "замолчи").
+Selected via `tts.primary`, with an optional `tts.fallback` if the primary's
+quota is exhausted. Dispatch is always asynchronous — a reply is queued and
+the turn continues immediately, never blocking on synthesis or playback. A
+new voice turn always interrupts whatever's still speaking; the model can
+also stop itself mid-reply via the `stop_speech` tool.
 
-`gemini_tts` needs:
+```yaml
+tts:
+  primary: yandex_station_text
+  gemini_tts:
+    enabled: false
+    api_key_envs: ["GEMINI_API_KEY_1", "GEMINI_API_KEY_2"] # rotates on quota
+    public_base_url: "http://192.168.1.50:8787" # where the Station fetches audio from
+    audio_format: "wav" # or "mp3" — try mp3 first if replies don't play
+```
 
-- One or more Gemini API keys, each in its own environment variable named
-  under `tts.gemini_tts.api_key_envs` (see `.env.example`). Listing several
-  lets Miranda rotate across them when one hits its quota, retrying the
-  whole list again after a cooldown before giving up.
-- `tts.gemini_tts.public_base_url` — the URL the Yandex Station can reach
-  Miranda through, so it can fetch a rendered file from
-  `GET /tts-audio/{key}.{ext}`.
-- A choice of `tts.gemini_tts.audio_format`: `"wav"` (default, no extra
-  dependency) or `"mp3"`. Whether a real Yandex Station's
-  `media_player.play_media` URL playback accepts WAV isn't verified against
-  actual hardware yet — the AlexxIT/YandexStation integration's own docs
-  only list AAC/FLAC/MP3 for URL playback — so try `"mp3"` first if replies
-  don't play.
-
-Every rendered file is cached permanently (content-addressed by model +
-voice + format + text, under `storage.tts_cache_dir`, `./data/storage` by
-default) — a cache hit skips calling Gemini entirely, which matters more
-for quota than chunk size.
+Every rendered file is cached permanently (content-addressed by model,
+voice, format, and text) — a cache hit skips calling Gemini entirely.
 
 ## Logging
 
-Everything printed to the terminal is also mirrored to
-`logging.dir/miranda.log` (`./logs/miranda.log` by default), rotated by size
-so it never grows unbounded (`logging.max_size_mb` / `max_backups` /
-`max_age_days`).
+| File | Contents |
+|---|---|
+| `logs/miranda.log` | Everything printed to the terminal, mirrored, size-rotated |
+| `logs/llm.log` | Every LLM request/response — system prompt, messages, tools, reply or error — tagged `conversation=<id>` |
 
-Separately, `logging.dir/llm.log` traces every single LLM request and
-response: the exact system prompt, message history, and tools sent, plus
-the model's reply text/tool calls (or the error, if the call failed) —
-this is the tool for figuring out *why* a prompt didn't produce the tool
-call or answer you expected. It's written by `internal/llm/router`
-regardless of which provider handled the turn (including both legs of an
-escalation handoff), and each block is tagged with `conversation=<id>` so
-you can grep one dialog's turns out of the file.
+`llm.log` is the tool for "why didn't the model do what I expected" —
+grep one dialog's turns out by its conversation id, across every provider
+hop including escalation.
 
 ## Web UI
 
-Miranda serves a monitoring dashboard at its configured `server.http_addr`
-(default `http://localhost:8787`) — live log tail over WebSocket, dialog
-history browser, and a debug text input that hits the same unified command
-interface HA uses. It's server-rendered Go (`html/template` + vanilla JS,
-`internal/webui`), styled with Tailwind CSS v4.
-
-Tailwind is compiled ahead of time by its **standalone CLI** (no Node/npm
-needed, not even at build time for the Go binary — the generated
-`internal/webui/static/css/styles.css` is committed and embedded via
-`go:embed`). Only regenerate it after changing markup in
-`internal/webui/templates` or `internal/webui/static`:
-
-```bash
-./scripts/download-tailwindcli.sh   # once, installs bin/tailwindcss
-make css                             # regenerates styles.css
-```
+A monitoring dashboard at `server.http_addr` (`http://localhost:8787` by
+default) — live log tail, dialog history, and a debug text box hitting the
+same input path Home Assistant uses.
 
 ### Login
 
-The web UI requires signing in — there's no anonymous access, and no
-opt-out (unlike `server.auth_token`'s bearer-token auth for HA/curl, which
-stays open when unset for LAN-only dev use). With no `users` configured, the
-dashboard is unreachable by design; that's the fail-closed default, not a
-bug to work around.
-
-Add accounts under `users` in `config.yaml`:
+Signing in is mandatory — no anonymous access, no opt-out. With no `users`
+configured, the dashboard is simply unreachable (fail-closed by design).
 
 ```yaml
 users:
   - username: alex
     password_hash: "$2a$10$..." # go run ./cmd/hashpw <password>
     full_name: "Alex"
-    avatar: "" # https URL, or a filename under storage.avatars_dir
-    ha_user_id: "" # see below
-    telegram_name: ""
-    language: "ru" # ru | be | en, this user's default after login
+    ha_user_id: "" # links this account to HA's speaker recognition — see below
+    telegram_name: "" # see Telegram bot
+    language: "ru" # ru | be | en
 ```
-
-Generate a password hash (plaintext passwords are never stored or logged):
 
 ```bash
 go run ./cmd/hashpw 'your-password'
 ```
 
-**Username is the canonical identity for memory/history** — the same
-`data/memory/<username>.md` and SQLite rows are used whether a person talks
-to Miranda by logging into the web UI or by speaking through HA. The two
-channels are reconciled via `ha_user_id`: HA's speaker-recognition system
-sends its own (HA-internal) user id with every voice turn, and if it matches
-a configured user's `ha_user_id`, Miranda maps it to that user's `username`
-before touching history/memory. Find the right value by checking what HA
-sends — Miranda logs the raw incoming `user_id` for unmatched HA requests —
-or from the HA person/user's own id. A web UI login session always uses its
-own username directly; the debug form no longer asks for `user_id` or a
-bearer token — your identity comes entirely from being logged in, and the
-same-origin session cookie is sent automatically.
+**Username is the canonical identity** — the same memory file and history
+rows are used whether someone talks to Miranda by logging into the web UI
+or by speaking through HA. `ha_user_id` bridges the two: HA sends its own
+speaker-recognition id with every voice turn, and if it matches, Miranda
+maps it to that user automatically (an unmatched id is logged so you can
+find the right value).
 
 ### Passkey (WebAuthn) login
 
-Optional passwordless/biometric sign-in (Face ID, Touch ID, a phone's
-screen lock, a USB security key) alongside the password form above — off
-by default, since (like `telegram`) there's no safe auto-detected
-`rp_id`/`rp_origins` for a given deployment:
+Passwordless sign-in — Face ID, Touch ID, a phone's screen lock, a USB key —
+alongside the password form:
 
 ```yaml
 webauthn:
@@ -352,72 +295,51 @@ webauthn:
   rp_origins: ["https://miranda.example.com"]
 ```
 
-WebAuthn only works in a secure browser context — HTTPS, or
-`http://localhost` for local dev — so `rp_id`/`rp_origins` must point at
-whatever hostname actually terminates TLS in front of Miranda (the same
-reverse proxy `telegram` needs), not at `server.http_addr` directly.
-**Changing `rp_id` later orphans every already-registered passkey** — pick
-the hostname you intend to keep.
+Needs a secure context — HTTPS, or `http://localhost` for local dev — so
+these must point at whatever actually terminates TLS in front of Miranda.
+**Changing `rp_id` later orphans every registered passkey.**
 
-Once enabled, each user registers their own passkey from the web UI's
-profile screen ("Add passkey on this device") — no config-file step per
-user. The login page (`/login`) then offers a biometric button below the
-password form; since login is usernameless (the browser's own passkey
-picker resolves who's signing in, not a typed username), the page can't
-know server-side who's about to sign in, so it falls back to a
-browser-local memory of which method (`password` or `passkey`) last
-succeeded here, leading with that one and tucking the other behind a
-one-click toggle — a wrong guess (e.g. a shared household device) costs
-one click, never a dead end.
+Register from the web UI's profile screen; the login page then leads with
+whichever method (password or passkey) last worked on that browser,
+tucking the other one behind a single click.
 
 ### Language
 
-The dashboard and login page are available in Russian (default), Belarusian,
-and English — switch with the header's RU/BE/EN links (stored in a cookie,
-no reload-losing-state JS needed) or set a per-user default via `language`
-in their `users` entry. This only affects UI chrome; it has nothing to do
-with what language you can talk to Miranda in, which is unconstrained.
+Russian (default), Belarusian, and English — switch with the header's
+RU/BE/EN links, or set a per-user default via `language`. UI chrome only;
+what language you can *talk to Miranda in* is unconstrained.
 
 ---
 
 ## Home Assistant integration
 
-There are **two independent integration points** between Miranda and Home
-Assistant, covered in the two sections below. They use separate tokens and
-separate HA integrations — don't mix them up.
+Two **independent** integration points — separate tokens, separate HA
+integrations:
 
-1. **Home Assistant as an MCP server** — gives Miranda's agent loop the
-   ability to call HA services and read entity state as tools (turn on
-   lights, read sensors, etc).
-2. **Miranda as a Home Assistant conversation agent** — a thin
-   custom_component (`ha-integration/miranda`) that forwards Assist
-   pipeline text to Miranda and speaks its reply back. No LLM logic lives in
-   HA; everything (routing, memory, tool calls, TTS chunking) happens in the
-   Agent Service.
+```mermaid
+flowchart LR
+    HA1["Home Assistant<br/>entities & services"] -->|"MCP server"| M1(["Miranda"])
+    M2(["Miranda"]) -->|"Conversation agent"| HA2["HA Assist pipeline"]
+```
 
-### Connecting Home Assistant as an MCP server
+### Home Assistant as an MCP server
 
-1. **Settings → Devices & Services → Add Integration**, search for
-   **"Model Context Protocol Server"**, and add it. This exposes an MCP
-   endpoint at `http://<ha-host>:8123/api/mcp` (Streamable HTTP transport).
-2. **Choose what Miranda can control**: the MCP server only exposes entities
-   that are **exposed to Assist** — go to **Settings → Voice Assistants →
-   Expose** and toggle on whatever you want Miranda to query/control.
-   Anything not exposed there is invisible to Miranda's tool calls.
-3. **Create a Long-Lived Access Token**: click your profile (bottom-left) →
-   **Security** tab → **Long-lived access tokens** → **Create token**. Copy
-   it immediately — HA only shows it once. Treat it like a password;
-   consider a dedicated, limited HA user for Miranda rather than an admin
-   account's token.
-4. **Wire the token into Miranda** via an environment variable (never in
-   `config.yaml` directly):
+Gives Miranda's agent loop the ability to call HA services and read entity
+state.
+
+1. **Settings → Devices & Services → Add Integration** → **"Model Context
+   Protocol Server"**. Exposes an MCP endpoint at
+   `http://<ha-host>:8123/api/mcp`.
+2. **Settings → Voice Assistants → Expose** — toggle on whatever you want
+   Miranda to see. Anything not exposed there is invisible to it.
+3. **Create a Long-Lived Access Token**: profile → Security → Long-lived
+   access tokens. Consider a dedicated, limited HA user rather than an
+   admin's token.
+4. Wire it in:
    ```bash
    export HA_MCP_TOKEN="<the long-lived access token>"
    ```
-   (or, for local development, add `HA_MCP_TOKEN=<token>` to `.env` instead —
-   see Configuration above.)
    ```yaml
-   # config.yaml
    mcp:
      servers:
        - name: ha
@@ -425,209 +347,139 @@ separate HA integrations — don't mix them up.
          token_env: "HA_MCP_TOKEN"
          enabled: true
    ```
-   Restart Miranda. A server that fails to connect never blocks startup —
-   it's retried in the background (with backoff) until it comes up, with no
-   restart needed once it does. Check Miranda's logs or the web UI's live log
-   tail if HA's tools aren't showing up.
-5. **(Optional) TTS needs its own HA credentials.** Yandex Station dispatch
-   talks to HA's REST API directly (`media_player.play_media`) and needs its
-   own token via the `HA_BASE_URL` / `HA_TOKEN` environment variables. You
-   can reuse the token from step 3, or create a separate one to revoke
-   independently.
+5. *(Optional)* TTS talks to HA's REST API directly and needs its own
+   `HA_BASE_URL`/`HA_TOKEN` — reuse the token above, or mint a separate one.
 
-### Connecting Miranda to Home Assistant (thin conversation client)
+### Miranda as a Home Assistant conversation agent
 
-The custom_component lives in `ha-integration/miranda`.
+A thin custom_component (`ha-integration/miranda`) that forwards Assist
+pipeline text to Miranda and speaks its reply back — no LLM logic lives in
+HA itself.
 
-**Prerequisites**: Home Assistant 2024.6+ (needed for the config-entry-based
-Conversation entity platform), and a running Miranda instance reachable from
-your HA host, e.g. `http://192.168.1.50:8787`.
+**Requires**: Home Assistant 2024.6+, and a Miranda instance reachable from
+your HA host.
 
-1. Copy the `ha-integration/miranda` folder into your HA config's
-   `custom_components` directory, so you end up with
-   `<config>/custom_components/miranda/...` (on Container/Core installs
-   that's typically `/config/custom_components/miranda/`).
-2. Restart Home Assistant.
-3. **Settings → Devices & Services → Add Integration**, search for
-   **"Miranda"**. Fill in:
-   - **Base URL**: where Miranda is reachable (`server.http_addr` from
-     `config.yaml`, with a real host instead of just a port).
-   - **Bearer token**: only if `server.auth_token` is set in Miranda's
-     `config.yaml`; leave empty for LAN-only dev setups.
-
-   The form validates connectivity against Miranda's `/healthz` endpoint
-   before saving.
-4. **Settings → Voice Assistants**, open (or create) a pipeline, and set
-   **Conversation agent** to **Miranda**. Voice input transcribed by that
-   pipeline's STT step is now forwarded to Miranda (`source: ha_assist`);
-   its reply is spoken back through that pipeline's TTS step *and*
-   dispatched to Miranda's own Yandex Station channel (see **TTS** above) —
-   `ha_assist` is the only source that gets the direct TTS dispatch
-   automatically, since it's the only channel with a physical speaker to
-   answer through, and every new `ha_assist` turn interrupts whatever a
-   previous one is still finishing. Every other channel (the web UI, the
-   Telegram bot, a future mobile app) only gets its reply back over its own
-   connection (the HTTP response) unless the user explicitly asks to hear
-   it, via the model's `speak_reply` tool — and any turn can be stopped
-   mid-reply via `stop_speech`.
-5. The integration ships with English, Russian, and Belarusian translations
-   for its config flow; Home Assistant picks the one matching your user
-   profile's language automatically.
-
-Reopening the integration's entry (**Configure**) lets you adjust the
-per-request timeout (default 30s — the agent loop can call an LLM and
-several tools in one turn).
+1. Copy `ha-integration/miranda` into HA's `custom_components/` directory
+   and restart HA.
+2. **Settings → Devices & Services → Add Integration** → **"Miranda"**.
+   Fill in the base URL (and bearer token, if `server.auth_token` is set).
+   Validated live against Miranda's `/healthz` before saving.
+3. **Settings → Voice Assistants**, set **Conversation agent** to
+   **Miranda**. Voice replies are spoken back through both the pipeline's
+   own TTS *and* Miranda's Yandex Station channel — every other channel
+   (web UI, Telegram) stays silent unless the model explicitly calls
+   `speak_reply`.
+4. Ships with English, Russian, and Belarusian config-flow translations,
+   matched to your HA profile's language automatically.
 
 ### Testing the full loop
 
-- **No voice hardware needed**: **Settings → Voice Assistants**, open your
-  pipeline, use the **"Try"** text box.
-- **Bypass HA entirely** (isolates thin-client vs. Miranda issues):
+- **No hardware needed**: Voice Assistants → your pipeline → **"Try"**.
+- **Bypass HA entirely**:
   ```bash
   curl -X POST http://<miranda-host>:8787/api/v1/input \
     -H "Content-Type: application/json" \
     -d '{"source":"cli","user_id":"debug","text":"привет"}'
   ```
-- Watch Miranda's web UI for the live log tail while testing either path.
+- Watch the web UI's live log tail while testing either path.
 
 ### Troubleshooting
 
 | Symptom | Likely cause |
 |---|---|
-| Config flow shows "cannot_connect" | Wrong base URL, Miranda not running, or a network path issue between HA and Miranda's host. Test with `curl http://<host>:8787/healthz` from the HA host itself. |
-| Assist replies with "Не удалось связаться с Miranda" | Same as above, or Miranda returned a non-200 (check Miranda's logs — a 401 specifically means the bearer token in the integration doesn't match `server.auth_token`). |
-| Miranda's tool list from HA is missing an entity | That entity isn't toggled on under **Settings → Voice Assistants → Expose**. |
-| Miranda logs "mcp: failed to connect, will retry" for `ha` | Check the MCP Server integration is added in HA, the URL/port in `config.yaml` is correct, and `HA_MCP_TOKEN` is set and valid. Miranda keeps retrying in the background, so `ha`'s tools appear automatically once this is fixed — no restart needed. |
+| Config flow shows "cannot_connect" | Wrong base URL, Miranda not running, or a network path issue. Test `curl http://<host>:8787/healthz` from the HA host. |
+| Assist can't reach Miranda | Same as above, or a non-200 reply — a 401 means the bearer token doesn't match `server.auth_token`. |
+| An entity is missing from Miranda's tools | Not toggled on under Voice Assistants → Expose. |
+| Logs show "mcp: failed to connect, will retry" | Check the MCP Server integration, the URL/port, and that `HA_MCP_TOKEN` is valid. Retries automatically — no restart needed once fixed. |
 
 ---
 
 ## Telegram bot
 
-An optional channel: household members can talk to Miranda from a Telegram
-chat, exactly like the web UI or HA voice — same agent loop, same
-history/memory, keyed by the same canonical `username`. Off by default
-(`telegram.enabled: false`); needs HTTPS, so it's only usable once Miranda
-is behind a reverse proxy (the same one `webauthn` needs).
+Household members can talk to Miranda from Telegram — same agent loop,
+same memory, keyed by the same username. Needs HTTPS, so only usable
+behind a reverse proxy.
 
-1. **Create the bot**: message [@BotFather](https://t.me/BotFather) on
-   Telegram, `/newbot`, follow the prompts. It gives you a bot token —
-   treat it like a password.
-2. **Set the token** via an environment variable (never in `config.yaml`):
+```mermaid
+flowchart LR
+    U["Household member"] --> TG["Telegram"]
+    TG -->|"webhook"| M(["Miranda"])
+    M -->|"same agent loop<br/>as every channel"| TG
+    TG --> U
+```
+
+1. **Create the bot**: message [@BotFather](https://t.me/BotFather),
+   `/newbot`, follow the prompts.
+2. **Set the token**:
    ```bash
    export TELEGRAM_BOT_TOKEN="<the token from BotFather>"
    ```
-   (or add `TELEGRAM_BOT_TOKEN=<token>` to `.env` for local development —
-   see Configuration above.)
-3. **Configure `config.yaml`**:
+3. **Configure**:
    ```yaml
    telegram:
      enabled: true
-     webhook_path: "/telegram/webhook"
-     public_base_url: "https://miranda.example.com" # your reverse proxy's HTTPS hostname
+     public_base_url: "https://miranda.example.com" # your reverse proxy
      send_message_tool: true
    ```
-   Make sure your reverse proxy forwards `public_base_url + webhook_path`
-   to Miranda's `server.http_addr` — Telegram POSTs updates there directly;
-   Miranda does not terminate TLS itself.
-4. **Map household members**: set `telegram_name` on each user in
-   `users:` to their Telegram `@username` (with or without the leading
-   `@`):
+4. **Map household members** — one Telegram `@username` per account:
    ```yaml
    users:
      - username: alex
        telegram_name: "@alex_tg"
-       # ...
    ```
-   A message from a Telegram account whose `@username` doesn't match any
-   configured `telegram_name` is logged as a warning and dropped — it never
-   reaches the agent loop, so an unrecognized account can't rack up LLM
-   calls or create a history/memory entry under a raw Telegram username.
-5. **Restart Miranda.** On startup it generates a fresh webhook
-   authentication secret and registers `public_base_url + webhook_path`
-   with Telegram automatically — there's no manual `setWebhook` call to
-   make, and nothing else to rotate by hand *for the one process that
-   should own this bot's webhook*. Check the logs for `telegram: webhook
-   registered` (or an error if Telegram couldn't be reached, which is
-   retried on the next restart, not fatal). If you ever run a second,
-   non-production instance against this same token/`public_base_url` (see
-   **Building** above), set `telegram.register_webhook: false` on that
-   instance — otherwise its startup steals the webhook registration from
-   whichever instance is actually deployed.
-6. **Say something to the bot.** The first message from a mapped user is
-   what teaches Miranda that account's chat id (Telegram gives bots no way
-   to look this up otherwise) — this is also what makes proactive sends
-   possible afterward.
+   An unmapped account is dropped before it ever reaches the model.
+5. **Restart.** The webhook (and its auth secret) is registered with
+   Telegram automatically on every startup — nothing to rotate by hand,
+   *for the one instance that should own it*. Running a second,
+   non-production instance against the same token? Set
+   `telegram.register_webhook: false` on it, or its startup steals the
+   webhook from the real deployment.
+6. **Say something to the bot** — the first message is what teaches
+   Miranda that person's chat id, which also unlocks proactive sends.
 
-### The `send_telegram` tool
-
-With `telegram.send_message_tool: true`, the model can proactively push a
-message to a household member's Telegram — e.g. "отправь мне на телефон
-список покупок" (send to whoever is talking right now) or "отправь Ане на
-телефон купи молока" (send to a named household member, matched against
-that user's `full_name` or `username`). This only works for a user who has
-messaged the bot at least once, for the reason in step 6 above.
+With `send_message_tool: true`, the model can push a message on its own —
+*"отправь мне на телефон список покупок"*, or to a named household member
+by their full name or username.
 
 ---
 
 ## Scheduled tasks
 
-With `schedule.enabled: true` (the default — see Configuration above), the
-model gets three tools: `create_scheduled_task`, `list_scheduled_tasks`, and
-`delete_scheduled_task`, backed by their own SQLite file
-(`storage.schedule_sqlite_path`, `internal/schedule`). A background sweep
-(`cmd/miranda`, once a minute) checks for due tasks and, for each, replays
-its stored free-text prompt through the ordinary agent loop
-(`Orchestrator.Handle`, `source: "scheduled"`) exactly as if the user had
-just said it — Miranda's scheduler never interprets the prompt itself; the
-model decides what to do (and which of its own tools — `speak_reply`,
-`send_telegram`, an HA-facing MCP tool, etc. — to call) at fire time, the
-same as any live turn. A scheduled turn is never spoken live the way
-`ha_assist` turns are (see "Response routing" in `CLAUDE.md`) — the prompt
-has to explicitly ask for `speak_reply`/`send_telegram`/etc. if it wants
-output somewhere.
+On by default (`schedule.enabled: true`). Three tools —
+`create_scheduled_task`, `list_scheduled_tasks`, `delete_scheduled_task` —
+let the model set its own reminders and routines in plain language; a
+background sweep replays the stored prompt through the ordinary agent loop
+when it's due, exactly as if the user had just said it.
 
-Two worked examples:
+- **One-off**: *"сегодня в 22:00 напомни мне выпить тёмного пива — отправь
+  на телефон"* → a `run_at` timestamp, and a prompt that calls
+  `send_telegram` when it fires.
+- **Recurring**: *"каждое утро в 9:01 голосом пожелай доброго утра, получи
+  курс моих монет и зачитай голосом"* → a cron `schedule`
+  (`1 9 * * *`), decomposed by the model at fire time into `speak_reply` +
+  a web-search tool call.
 
-- One-off: *"сегодня в 22:00 напомни мне выпить тёмного пива — отправь на
-  телефон"* → `create_scheduled_task` with `run_at` (an RFC3339 datetime)
-  and a `task` prompt that itself calls for `send_telegram` when it fires.
-- Recurring: *"каждое утро в 9:01 голосом пожелай Ане, мне и Бяше доброго
-  утра, получи актуальный курс моих монет и зачитай голосом, а потом
-  попроси Алису включить Linkin Park"* → `create_scheduled_task` with
-  `schedule` (a standard 5-field cron expression, `1 9 * * *`) and a `task`
-  prompt the model decomposes itself at fire time using `speak_reply` (TTS
-  already broadcasts to every configured Yandex Station entity, so no
-  per-recipient targeting is needed), a web-search/fetch tool for exchange
-  rates, and whatever Alice-facing tool is configured.
-
-`schedule`/`run_at` are mutually exclusive — exactly one is required per
-task. Cron expressions are the standard `minute hour day-of-month month
-day-of-week` 5 fields, evaluated in the server's local time zone.
+`schedule`/`run_at` are mutually exclusive — exactly one per task. Cron is
+the standard 5-field format, evaluated in the server's local time zone. A
+fired task is silent by default — it has to explicitly call `speak_reply`/
+`send_telegram`/etc. if it wants output somewhere.
 
 ---
 
-## Project layout
+## How it works
 
+```mermaid
+flowchart LR
+    In(["Input:<br/>voice, text, Telegram"]) --> Loop["Agent loop"]
+    Loop -->|"needs a tool"| Tools["Tools:<br/>HA, search, memory, ..."]
+    Tools --> Loop
+    Loop -->|"too hard for<br/>this model"| Esc["Escalate to a<br/>stronger provider"]
+    Esc --> Loop
+    Loop --> Out(["Reply:<br/>spoken and/or written"])
 ```
-cmd/miranda/            entrypoint — wires config, storage, LLM router, MCP, TTS, HTTP server
-internal/config/        YAML config + defaults
-internal/httpapi/       unified command interface (POST /api/v1/input), the agent loop, /ws/logs
-internal/hub/           in-process log/event broadcast for the web UI
-internal/llm/           provider-agnostic chat interface
-  openaicompat/           client on the official openai-go SDK (any OpenAI-compatible backend)
-  anthropic/              client on the official anthropic-sdk-go SDK
-  gemini/                 client on the official google.golang.org/genai SDK, multi-key rotation
-  router/                 fallback chain + per-provider, chained escalation handoff
-internal/mcp/            MCP Client/Manager abstraction, multi-server tool-name prefixing
-internal/history/        SQLite (pure-Go, no cgo) dialog log with FTS5 search
-internal/memory/         per-user markdown long-term memory
-internal/schedule/       SQLite-backed scheduled tasks (one-off + cron recurrence)
-internal/tts/            sentence-boundary chunking, Yandex Station text + Gemini TTS providers,
-                           disk cache, async player, GET /tts-audio/ handler
-internal/ha/             minimal Home Assistant REST client (for TTS dispatch)
-internal/telegram/       Telegram Bot API client, webhook types, chat-id store
-internal/webui/          Tailwind v4 dashboard, embedded via go:embed
-test/integration/        black-box agent-loop test (fake LLM + fake MCP, real everything else)
-ha-integration/miranda/  the HA thin conversation client custom_component
-docs/                    design docs
-```
+
+Every channel — HA voice, the web UI, Telegram, scheduled tasks — feeds the
+same loop and the same per-person memory. What differs is only how a reply
+comes back: `ha_assist` turns are spoken automatically; everything else
+stays silent unless the model calls `speak_reply` or `send_telegram`
+itself.
