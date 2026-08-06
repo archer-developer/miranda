@@ -59,8 +59,7 @@ type Client interface {
 
 // Manager aggregates tools from multiple MCP Clients into one namespace,
 // prefixing each tool name with "<server>_" so identically named tools from
-// different servers can't collide (see PROJECT_PREREQUISITES.md's open
-// question on tool naming conventions across multiple MCP sources).
+// different servers can't collide.
 //
 // Clients can be added or dropped after construction (SetClient, and the
 // automatic eviction in Tools below) — a server that's unreachable at

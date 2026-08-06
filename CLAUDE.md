@@ -1,9 +1,10 @@
 # Miranda — project notes for Claude Code
 
-Miranda is a standalone Go Agent Service (the "brain" behind a home voice
-assistant built around Home Assistant) — see `README.md` for architecture,
-build/test commands, and the HA integration. `docs/PROJECT_PREREQUISITES.md`
-has the original design rationale in Russian.
+Miranda is a standalone Go Agent Service — a full personal assistant for
+home and family (smart home control, diary/notes/reminders, nutrition
+tracking, open-ended tasks, general conversation), not just a Home
+Assistant voice add-on — see `README.md` for architecture, build/test
+commands, and the HA integration.
 
 ## Environment facts to account for when checking documentation
 

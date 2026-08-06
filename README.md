@@ -1,27 +1,29 @@
 # Miranda
 
-**The "brain" behind a custom home voice assistant, built around Home Assistant.**
+**A full personal assistant for your home and family — not just a Home Assistant voice add-on.**
 
-Miranda is a standalone Go service — not a Home Assistant add-on — that plugs
-into HA's voice pipeline, talks to whichever LLM you point it at, remembers
-who it's talking to, and calls tools (Home Assistant, web search, Telegram,
-its own scheduler) to actually get things done. One static binary, no
-Docker, no cgo.
+Miranda controls your smart home (Home Assistant, noolite), keeps a
+personal diary, notes, and reminders, tracks nutrition (YAZIO), tackles
+open-ended tasks — including real data analysis — and just talks, about
+anything, not only the house. One static Go binary, no Docker, no cgo.
 
-```mermaid
-flowchart LR
-    Voice(["HA Voice Assist"]) <--> M
-    Chat(["Telegram"]) <--> M
-    Web(["Web dashboard"]) <--> M
-    M(["Miranda"]) <--> LLM["LLM providers"]
-    M <--> HA["Home Assistant"]
-    M --> Speaker["Yandex Station"]
+```
+   Talk to Miranda          Miranda          Pluggable via MCP
+
+  HA voice (STT) ----> +--------------------+ <---- Home Assistant
+Desktop / Web UI ----> |     agent loop     | <---- Code sandbox
+     Phone (PWA) ----> |  memory + history  | <---- Personal diary
+        Telegram ----> |     scheduler      | <---- YAZIO nutrition
+                       |    built-in TTS    |
+                       +--------------------+
+                                   |
+                                   v
+                             Yandex Station
 ```
 
 > 📖 This README is for people setting up and running Miranda. If you're an
 > AI coding agent (or a human) working on Miranda's internals, read
-> `CLAUDE.md` instead — and `docs/PROJECT_PREREQUISITES.md` for the
-> original design rationale.
+> `CLAUDE.md` instead.
 
 ## Features at a glance
 
