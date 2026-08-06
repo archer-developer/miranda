@@ -237,14 +237,21 @@ func (o *Orchestrator) resolveConversation(ctx context.Context, userID, source s
 // which is exactly the kind of thing that should never need guessing.
 //
 // Both the display name and the raw userID are spelled out explicitly. The
-// display name alone isn't enough: several MCP tools (e.g. the yazio food
-// diary) take a technical "user" argument that is the userID itself, not the
-// display name, and the two only coincide by lexical accident (e.g. "Аня"
+// display name alone isn't enough: several external MCP servers are
+// multi-tenant and take a technical user/user_id argument that is the
+// userID itself, not the display name — e.g. yazio's "user" on every
+// nutrition tool, or miranda-diary's "user_id" on add_record/search/remove
+// (the latter doesn't even validate it against a known list, so a wrong
+// value doesn't error, it just silently starts a new, unsearchable bucket).
+// The display name and userID only coincide by lexical accident (e.g. "Аня"
 // vs. "anna") for some household members and not others (e.g. "Саша" vs.
 // "archer" — no relation at all). Without the userID spelled out, the model
 // has been observed defaulting to whichever username it saw most recently in
 // context rather than the current speaker's, silently misattributing tool
-// calls like food log entries to the wrong account.
+// calls (e.g. food log entries) to the wrong account. Miranda's own built-in
+// tools don't have this problem — they take userID from the server-side
+// session, never as a model-supplied argument — this is only for
+// external/MCP tools whose schema asks the model for one explicitly.
 //
 // The user's current local time is injected so the model can correctly
 // interpret relative time references ("в 22:00", "через 10 минут") and
@@ -252,7 +259,9 @@ func (o *Orchestrator) resolveConversation(ctx context.Context, userID, source s
 func (o *Orchestrator) buildSystemPrompt(userID, sharedMemory, userMemory string) string {
 	prompt := o.baseSystemPrompt
 	if name := o.currentUserName(userID); name != "" {
-		prompt += "\n\nСейчас с тобой разговаривает: " + name + " (технический username: " + userID + "; используй именно это значение как user в тулах вроде yazio)."
+		prompt += "\n\nСейчас с тобой разговаривает: " + name + " (технический userID: \"" + userID + "\"). " +
+			"Если вызываешь MCP-тул с параметром user или user_id (yazio, diary и любой другой multi-tenant тул) — " +
+			"передавай туда именно эту строку, \"" + userID + "\", а не имя " + name + " и не чьё-либо ещё имя из контекста."
 	}
 	now := time.Now().In(o.userLocation(userID))
 	prompt += "\n\nТекущее время пользователя: " + now.Format("2006-01-02 15:04 MST") + "."
