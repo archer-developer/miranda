@@ -51,6 +51,7 @@ Desktop / Web UI ----> |     agent loop     | <---- Code sandbox
 - [Web UI](#web-ui)
   - [Login](#login)
   - [Passkey (WebAuthn) login](#passkey-webauthn-login)
+  - [Data encryption](#data-encryption)
   - [Language](#language)
 - [Home Assistant integration](#home-assistant-integration)
   - [Home Assistant as an MCP server](#home-assistant-as-an-mcp-server)
@@ -191,6 +192,10 @@ mcp:
 A server that's down at startup never blocks it — Miranda retries in the
 background until it comes up, no restart needed.
 
+A server entry can also opt into receiving a user's data-encryption key
+(`encryption_key_allowed: true`, requires `https://` — see [Data
+encryption](#data-encryption) below).
+
 ## Web tools
 
 `web_search`/`web_fetch` give every model live web access via
@@ -304,6 +309,33 @@ these must point at whatever actually terminates TLS in front of Miranda.
 Register from the web UI's profile screen; the login page then leads with
 whichever method (password or passkey) last worked on that browser,
 tucking the other one behind a single click.
+
+### Data encryption
+
+Optional per-user encryption for data handed to external MCP tools — today
+the [miranda-diary](https://github.com/archer-developer/miranda-diary)
+tool, but not tied to it specifically. Builds on passkey login above: a
+random master key is generated once per user and unlocked in memory at
+login, via a registered passkey's WebAuthn PRF output and/or your password
+as a fallback — never via the same hash your password is checked against.
+
+```yaml
+keyring:
+  enabled: true
+
+mcp:
+  servers:
+    - name: diary
+      url: "https://diary.example.com/mcp" # must be https://
+      encryption_key_allowed: true
+```
+
+Only a server explicitly marked `encryption_key_allowed: true` *and*
+reachable over `https://` ever receives the key, injected invisibly into
+that server's own tool calls. See **[`docs/encryption.md`](docs/encryption.md)**
+for the full design, threat model, and known limitations (there's no
+recovery key — losing every passkey and never having logged in with a
+password permanently loses access to anything encrypted this way).
 
 ### Language
 

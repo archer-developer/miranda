@@ -230,6 +230,35 @@ instantly, before the OS picker even opens; a second call right after
 clears it). Both were found debugging the same real bug report and are
 unrelated to each other — see git history for the incident.
 
+### Data encryption (keyring)
+
+Optional (`config.KeyringConfig.Enabled`, default false — same posture as
+`webauthn`, independent toggle) per-user encryption for data handed to
+external MCP tools, starting with the diary MCP tool
+(`github.com/archer-developer/miranda-diary`) but designed to generalize.
+`internal/keyring` implements the key-wrapping model 1Password/FileVault/
+BitLocker all use: one random 32-byte master key per user, wrapped
+independently under every registered WebAuthn passkey's PRF output and/or a
+password-derived Argon2id key as a fallback — deliberately **not** the same
+bcrypt hash `users.Registry.Authenticate` checks logins against, since an
+attacker with disk access must not be able to use that persisted hash to
+also unlock encrypted data. The unwrapped key lives only in an in-memory
+`keyring.Cache` (no persistence, no auto-lock timer — only explicit logout
+or a process restart clears it), reflecting the accepted threat model: disk
+access is what this defends against, not a live memory-dump attacker.
+`Orchestrator.executeTool` injects the key into a whitelisted, `https://`-only
+MCP server's tool-call arguments right before dispatch, on a local
+variable only — never mutating the `tc` that `history`/`llmtrace` already
+recorded — so the key structurally cannot leak into persisted history or
+`llm.log`. See **`docs/encryption.md`** for the full design: the wrap/unwrap
+sequencing (including the per-username lock that closes a real bootstrap
+race between two unlock methods), the PRF ceremony details (including a
+real client-side `ArrayBuffer`/`JSON.stringify` bug this had to fix), the
+MCP whitelist/HTTPS gating (`MCPServer.EncryptionKeyPermitted`, checked at
+both config-load and startup, held on `Orchestrator` rather than
+`mcp.Manager` since it's static config data, not connection state), and
+known limitations (no recovery-key mechanism, no change-password hook yet).
+
 ### Scheduled tasks
 
 Optional (`config.ScheduleConfig.Enabled`, default **true** — unlike
@@ -466,6 +495,12 @@ Config flags below live on `config.MemoryConfig` unless otherwise noted.
 | `web_fetch` | `config.TavilyConfig.WebFetch.Enabled` | Fetch a specific URL's readable text via Tavily's `/extract` endpoint — same package/reasoning as `web_search`. |
 | Escalation tool (name configurable per provider) | `config.LLMProvider.Escalation.Enabled` | Hand a hard turn off to that provider's own configured target; intercepted at the router level, transparent to the Orchestrator. See "LLM providers and escalation" above — each provider in the chain has its own target/tool name, and a chain can be more than one hop deep. |
 | MCP tools (e.g. `ha_*`) | `config.MCPConfig.Servers[].Enabled` | Home Assistant and other MCP-exposed device/service actions. |
+
+Not a separate tool, but worth noting alongside the MCP tools row above: a
+whitelisted server's calls (`MCPServer.EncryptionKeyAllowed`, see "Data
+encryption (keyring)" above) get a real `encryption_key` argument injected
+server-side, invisibly to the model — it never appears in what the model
+itself generated for that tool call, only on the wire to that one server.
 
 ### Web UI surface
 

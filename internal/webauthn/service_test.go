@@ -2,11 +2,13 @@ package webauthn
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"testing"
 	"time"
 
 	virtualwebauthn "github.com/descope/virtualwebauthn"
+	"github.com/go-webauthn/webauthn/protocol"
 	"github.com/stretchr/testify/require"
 
 	"github.com/archer-developer/miranda/internal/config"
@@ -86,9 +88,10 @@ func TestService_RegistrationAndDiscoverableLoginRoundTrip(t *testing.T) {
 	rp := virtualwebauthn.RelyingParty{ID: testRPID, Name: "Miranda Test", Origin: testOrigin}
 	assertionResponse := virtualwebauthn.CreateAssertionResponse(rp, authenticator, credential, *assertionOptions)
 
-	username, err := svc.FinishDiscoverableLogin(ctx, ceremonyID, []byte(assertionResponse))
+	username, credentialID, _, err := svc.FinishDiscoverableLogin(ctx, ceremonyID, []byte(assertionResponse))
 	require.NoError(t, err)
 	require.Equal(t, "archer", username)
+	require.Equal(t, credential.ID, credentialID)
 
 	// The sign count must have been written back so clone detection works
 	// on the next login.
@@ -160,7 +163,7 @@ func TestService_DiscoverableLogin_SurvivesBackupEligibleFlip(t *testing.T) {
 	credential.Counter++
 	assertionResponse := virtualwebauthn.CreateAssertionResponse(rp, authenticator, credential, *assertionOptions)
 
-	loggedInUsername, err := svc.FinishDiscoverableLogin(ctx, ceremonyID, []byte(assertionResponse))
+	loggedInUsername, _, _, err := svc.FinishDiscoverableLogin(ctx, ceremonyID, []byte(assertionResponse))
 	require.NoError(t, err, "second login must not fail on a BackupEligible flag that legitimately changed after registration")
 	require.Equal(t, username, loggedInUsername)
 
@@ -209,7 +212,7 @@ func TestService_FinishDiscoverableLogin_RejectsUnknownCredential(t *testing.T) 
 
 	assertionResponse := virtualwebauthn.CreateAssertionResponse(rp, rogueAuth, rogueCred, *assertionOptions)
 
-	_, err = svc.FinishDiscoverableLogin(ctx, ceremonyID, []byte(assertionResponse))
+	_, _, _, err = svc.FinishDiscoverableLogin(ctx, ceremonyID, []byte(assertionResponse))
 	require.Error(t, err)
 }
 
@@ -238,4 +241,108 @@ func TestNewService_FailsWithoutOrigins(t *testing.T) {
 
 	_, err = NewService(testRPID, "Miranda Test", nil, store, NewCeremonyStore(time.Minute), registry)
 	require.Error(t, err)
+}
+
+func TestService_FinishRegistration_ReturnsCredentialID(t *testing.T) {
+	ctx := context.Background()
+	svc, store := newTestService(t)
+
+	creation, err := svc.BeginRegistration(ctx, "archer", "session-token-1")
+	require.NoError(t, err)
+	creationJSON, err := json.Marshal(creation)
+	require.NoError(t, err)
+	attestationOptions, err := virtualwebauthn.ParseAttestationOptions(string(creationJSON))
+	require.NoError(t, err)
+
+	handle, ok, err := store.UserHandle(ctx, testRPID, "archer")
+	require.NoError(t, err)
+	require.True(t, ok)
+
+	rp := virtualwebauthn.RelyingParty{ID: testRPID, Name: "Miranda Test", Origin: testOrigin}
+	authenticator := virtualwebauthn.NewAuthenticatorWithOptions(virtualwebauthn.AuthenticatorOptions{UserHandle: handle})
+	credential := virtualwebauthn.NewCredential(virtualwebauthn.KeyTypeEC2)
+	attestationResponse := virtualwebauthn.CreateAttestationResponse(rp, authenticator, credential, *attestationOptions)
+
+	info, err := svc.FinishRegistration(ctx, "archer", "session-token-1", "Test passkey", []byte(attestationResponse))
+	require.NoError(t, err)
+	require.NotEmpty(t, info.ID, "must return the credential id so callers can target a follow-up PRF probe at it")
+
+	decoded, err := base64.RawURLEncoding.DecodeString(info.ID)
+	require.NoError(t, err)
+	require.Equal(t, credential.ID, decoded)
+}
+
+// TestService_KeyProbeRoundTrip exercises BeginKeyProbe/FinishKeyProbe using
+// the same simulated-authenticator harness as the login tests above.
+// virtualwebauthn doesn't simulate the PRF extension itself (see its
+// utils.go: "extensions not supported yet"), so this can't assert a real
+// PRF byte payload end-to-end — extractPRFOutput's own decoding logic is
+// covered separately below — but it does exercise the real ceremony
+// mechanics: WithAllowedCredentials scoping the assertion to one
+// credential, and FinishLogin succeeding against a real signed response.
+func TestService_KeyProbeRoundTrip(t *testing.T) {
+	ctx := context.Background()
+	svc, store := newTestService(t)
+
+	authenticator, credential := registerVirtualPasskey(t, ctx, svc, store, "archer", "session-token-1")
+
+	assertion, err := svc.BeginKeyProbe(ctx, "archer", "session-token-1", credential.ID)
+	require.NoError(t, err)
+
+	assertionJSON, err := json.Marshal(assertion)
+	require.NoError(t, err)
+	assertionOptions, err := virtualwebauthn.ParseAssertionOptions(string(assertionJSON))
+	require.NoError(t, err)
+
+	credential.Counter++
+	rp := virtualwebauthn.RelyingParty{ID: testRPID, Name: "Miranda Test", Origin: testOrigin}
+	assertionResponse := virtualwebauthn.CreateAssertionResponse(rp, authenticator, credential, *assertionOptions)
+
+	gotCredentialID, prfOutput, err := svc.FinishKeyProbe(ctx, "archer", "session-token-1", []byte(assertionResponse))
+	require.NoError(t, err)
+	require.Equal(t, credential.ID, gotCredentialID, "must return the id FinishLogin actually validated the assertion against")
+	require.Nil(t, prfOutput, "virtualwebauthn's simulated response carries no prf extension result")
+}
+
+func TestService_BeginKeyProbe_RejectsUnknownCredential(t *testing.T) {
+	ctx := context.Background()
+	svc, store := newTestService(t)
+
+	registerVirtualPasskey(t, ctx, svc, store, "archer", "session-token-1")
+
+	_, err := svc.BeginKeyProbe(ctx, "archer", "session-token-2", []byte("not-a-real-credential-id"))
+	require.Error(t, err)
+}
+
+func TestExtractPRFOutput(t *testing.T) {
+	first := base64.RawURLEncoding.EncodeToString([]byte("thirty-two-bytes-of-prf-output!"))
+
+	t.Run("decodes a present result", func(t *testing.T) {
+		results := protocol.AuthenticationExtensionsClientOutputs{
+			"prf": map[string]any{
+				"enabled": true,
+				"results": map[string]any{"first": first},
+			},
+		}
+		got := extractPRFOutput(results)
+		require.Equal(t, []byte("thirty-two-bytes-of-prf-output!"), got)
+	})
+
+	t.Run("nil when prf key absent", func(t *testing.T) {
+		require.Nil(t, extractPRFOutput(protocol.AuthenticationExtensionsClientOutputs{}))
+	})
+
+	t.Run("nil when results absent (capability probe only)", func(t *testing.T) {
+		results := protocol.AuthenticationExtensionsClientOutputs{
+			"prf": map[string]any{"enabled": true},
+		}
+		require.Nil(t, extractPRFOutput(results))
+	})
+
+	t.Run("nil on malformed base64", func(t *testing.T) {
+		results := protocol.AuthenticationExtensionsClientOutputs{
+			"prf": map[string]any{"results": map[string]any{"first": "not valid base64url!!"}},
+		}
+		require.Nil(t, extractPRFOutput(results))
+	})
 }

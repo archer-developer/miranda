@@ -100,9 +100,24 @@ func newTestHandlerWithMemory(t *testing.T, fake *fakeHistory) (*Handler, *sessi
 	sessions := session.NewStore(time.Hour)
 	mem := newFakeMemory()
 
-	h, err := New(fake, mem, nil, registry, sessions, "ru", "", testLogger())
+	h, err := New(fake, mem, nil, nil, registry, sessions, "ru", "", testLogger())
 	require.NoError(t, err)
 	return h, sessions, mem
+}
+
+// newTestHandlerWithKeyring is newTestHandler plus a fakeKeyringService, for
+// tests covering the password-login/logout keyring hooks (no WebAuthn).
+func newTestHandlerWithKeyring(t *testing.T, keyringFake *fakeKeyringService) (*Handler, *session.Store) {
+	t.Helper()
+	registry, err := users.NewRegistry([]config.UserConfig{
+		{Username: "alex", PasswordHash: mustHash(t, "555"), FullName: "Alex"},
+	})
+	require.NoError(t, err)
+	sessions := session.NewStore(time.Hour)
+
+	h, err := New(&fakeHistory{}, newFakeMemory(), nil, keyringFake, registry, sessions, "ru", "", testLogger())
+	require.NoError(t, err)
+	return h, sessions
 }
 
 func authedRequest(t *testing.T, sessions *session.Store, method, target string) *http.Request {
@@ -216,6 +231,51 @@ func TestLogout_DestroysSession(t *testing.T) {
 	require.False(t, ok, "session should be destroyed after logout")
 }
 
+func TestLoginFlow_UnlocksKeyringWithPassword(t *testing.T) {
+	keyringFake := &fakeKeyringService{}
+	h, _ := newTestHandlerWithKeyring(t, keyringFake)
+
+	form := url.Values{"username": {"alex"}, "password": {"555"}}
+	req := httptest.NewRequest(http.MethodPost, "/login", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusSeeOther, rec.Code)
+	require.Equal(t, "alex", keyringFake.gotUnlockPasswordUsername)
+	require.Equal(t, "555", keyringFake.gotUnlockPasswordPassword)
+}
+
+func TestLoginFlow_KeyringFailureDoesNotBlockLogin(t *testing.T) {
+	keyringFake := &fakeKeyringService{unlockPasswordErr: errBoom}
+	h, _ := newTestHandlerWithKeyring(t, keyringFake)
+
+	form := url.Values{"username": {"alex"}, "password": {"555"}}
+	req := httptest.NewRequest(http.MethodPost, "/login", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusSeeOther, rec.Code)
+	require.Equal(t, "/", rec.Header().Get("Location"), "a keyring error must never turn into a login failure")
+}
+
+func TestLogout_LocksKeyring(t *testing.T) {
+	keyringFake := &fakeKeyringService{}
+	h, sessions := newTestHandlerWithKeyring(t, keyringFake)
+
+	token, err := sessions.Create("alex")
+	require.NoError(t, err)
+
+	req := httptest.NewRequest(http.MethodPost, "/logout", nil)
+	req.AddCookie(&http.Cookie{Name: session.CookieName, Value: token})
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusSeeOther, rec.Code)
+	require.Equal(t, "alex", keyringFake.gotLockUsername)
+}
+
 func TestHandleStatic_ServesCompiledStylesheetWithoutAuth(t *testing.T) {
 	h, _ := newTestHandler(t, &fakeHistory{})
 
@@ -247,7 +307,7 @@ func TestServesLocalAvatarFiles(t *testing.T) {
 	registry, err := users.NewRegistry([]config.UserConfig{{Username: "alex", PasswordHash: mustHash(t, "555")}})
 	require.NoError(t, err)
 	sessions := session.NewStore(time.Hour)
-	h, err := New(&fakeHistory{}, newFakeMemory(), nil, registry, sessions, "ru", dir, testLogger())
+	h, err := New(&fakeHistory{}, newFakeMemory(), nil, nil, registry, sessions, "ru", dir, testLogger())
 	require.NoError(t, err)
 
 	req := httptest.NewRequest(http.MethodGet, "/static/avatars/alex.png", nil)

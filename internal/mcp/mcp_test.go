@@ -166,3 +166,14 @@ func TestManager_KeepConnectedRetriesUntilSuccess(t *testing.T) {
 	cancel()
 	<-done
 }
+
+func TestManager_ServerForTool(t *testing.T) {
+	m := NewManager(nil, mcptest.New("ha", llm.ToolDef{Name: "get_state"}), mcptest.New("diary", llm.ToolDef{Name: "add_entry"}))
+
+	name, ok := m.ServerForTool("diary_add_entry")
+	require.True(t, ok)
+	require.Equal(t, "diary", name)
+
+	_, ok = m.ServerForTool("unknown_tool")
+	require.False(t, ok)
+}

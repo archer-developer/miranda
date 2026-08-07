@@ -28,6 +28,12 @@ storage:
   # Separate SQLite file for scheduled tasks (see schedule: below) — same
   # reasoning as webauthn_sqlite_path. Only used if schedule.enabled.
   schedule_sqlite_path: "./data/schedule.db"
+  # Separate SQLite file holding every user's wrapped master-key slots (see
+  # keyring: below, docs/encryption.md). Unlike the other optional SQLite
+  # files above, losing this one is data-loss-equivalent to losing every
+  # piece of data encrypted under it — back it up at least as carefully as
+  # sqlite_path, not as an afterthought. Only used if keyring.enabled.
+  keyring_sqlite_path: "./data/keyring.db"
 
 logging:
   # Mirrors everything on stdout into logging.dir/miranda.log, plus a
@@ -151,6 +157,20 @@ mcp:
       url: "http://127.0.0.1:8788/mcp"
       token_env: "SANDBOX_MCP_TOKEN"
       enabled: true
+    # Example: a diary MCP server (github.com/archer-developer/miranda-diary)
+    # that supports per-user encryption — encryption_key_allowed lets
+    # executeTool inject the calling user's unwrapped master key (see
+    # keyring: above) as a tool-call argument on every call to *this*
+    # server specifically, and only this server; it's rejected at startup
+    # (config.validateEncryptionKeyServers) unless url is "https://", since
+    # sending real key material over plaintext HTTP would defeat the whole
+    # point. Uncomment and point at a real, TLS-terminated diary instance
+    # to use it.
+    # - name: diary
+    #   url: "https://diary.example.com/mcp"
+    #   token_env: "DIARY_MCP_TOKEN"
+    #   enabled: true
+    #   encryption_key_allowed: true
 
 # Optional file upload support for the web UI — lets users attach files before
 # sending a message. Off by default because it requires the sandbox MCP server
@@ -239,6 +259,19 @@ webauthn:
   rp_id: "" # bare hostname, no scheme/port, e.g. "miranda.example.com" — changing this later orphans every registered passkey
   rp_display_name: "Miranda"
   rp_origins: [] # full origins the browser may reach Miranda through, e.g. ["https://miranda.example.com"]
+
+keyring:
+  # Optional per-user data encryption (see internal/keyring, docs/encryption.md)
+  # — off by default, same "deliberate opt-in" posture as webauthn above. A
+  # random master key is generated once per user and wrapped independently
+  # under every registered passkey's WebAuthn PRF output (see webauthn:
+  # above — the two features compose but are independent toggles) and/or a
+  # password-derived key as a fallback, so it can be unlocked in memory at
+  # login without ever persisting the plaintext key material to disk. Only
+  # takes effect for MCP servers explicitly marked
+  # mcp.servers[].encryption_key_allowed: true AND reachable over
+  # https:// — see the mcp: section below.
+  enabled: false
 
 telegram:
   # Optional Telegram bot channel — off by default, same reasoning as

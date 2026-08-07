@@ -9,6 +9,7 @@ import (
 	"github.com/archer-developer/miranda/internal/config"
 	"github.com/archer-developer/miranda/internal/history"
 	"github.com/archer-developer/miranda/internal/hub"
+	"github.com/archer-developer/miranda/internal/keyring"
 	"github.com/archer-developer/miranda/internal/llm"
 	"github.com/archer-developer/miranda/internal/llm/router"
 	"github.com/archer-developer/miranda/internal/llmtrace"
@@ -199,6 +200,20 @@ type Orchestrator struct {
 	// speakerHA is set via SetSpeakerHA; nil means pre-alice-tool speaker
 	// coordination (WaitIdle + alice_state polling) is skipped entirely.
 	speakerHA speakerHA
+	// keyring is set via SetKeyring; nil means executeTool never injects an
+	// encryption_key argument into any MCP tool call, regardless of
+	// encryptionKeyAllowed below — see docs/encryption.md.
+	keyring *keyring.Service
+	// encryptionKeyAllowed is set via SetEncryptionKeyAllowedServers: which
+	// MCP server names (by their unprefixed config.MCPServer.Name) may
+	// receive a user's unwrapped master key as a tool-call argument. Static
+	// config data (config.MCPServer.EncryptionKeyPermitted, computed once at
+	// startup), deliberately kept here rather than on mcp.Manager — Manager's
+	// job is connection lifecycle over live/reconnecting clients, and this
+	// permission bit is neither, so executeTool reads it directly from the
+	// Orchestrator instead of asking the connection manager to remember a
+	// static config fact.
+	encryptionKeyAllowed map[string]bool
 }
 
 // SetTelegram wires the optional send_telegram tool in, mirroring
@@ -262,6 +277,28 @@ func (o *Orchestrator) SetAttachmentStore(s *attachments.Store) {
 func (o *Orchestrator) SetSandboxDownload(toolName string, recordTTL time.Duration) {
 	o.sandboxDownloadToolName = toolName
 	o.downloadRecordTTL = recordTTL
+}
+
+// SetKeyring wires the optional per-user data-encryption keyring in,
+// mirroring SetTelegram/SetSchedule's post-construction style — call it
+// once from cmd/miranda after constructing a keyring.Service, only when
+// config.KeyringConfig.Enabled. Leaving it uncalled (the default) means
+// executeTool never injects an encryption_key argument into any MCP tool
+// call, even for a whitelisted, https-only server — see docs/encryption.md.
+func (o *Orchestrator) SetKeyring(k *keyring.Service) {
+	o.keyring = k
+}
+
+// SetEncryptionKeyAllowedServers wires in the static, config-derived set of
+// MCP server names permitted to receive a user's unwrapped master key — call
+// it once from cmd/miranda with a map built from every config.MCPServer's
+// EncryptionKeyPermitted(), independent of config.KeyringConfig.Enabled (it's
+// harmless to compute even when the keyring feature itself is off, since
+// executeTool only ever consults this when o.keyring is also non-nil).
+// Leaving it uncalled (the default, a nil map) means every server reads as
+// not-allowed.
+func (o *Orchestrator) SetEncryptionKeyAllowedServers(allowed map[string]bool) {
+	o.encryptionKeyAllowed = allowed
 }
 
 // NewOrchestrator wires the agent loop's dependencies together.

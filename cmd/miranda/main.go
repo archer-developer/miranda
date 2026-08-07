@@ -26,6 +26,7 @@ import (
 	"github.com/archer-developer/miranda/internal/history"
 	"github.com/archer-developer/miranda/internal/httpapi"
 	"github.com/archer-developer/miranda/internal/hub"
+	"github.com/archer-developer/miranda/internal/keyring"
 	"github.com/archer-developer/miranda/internal/llm"
 	"github.com/archer-developer/miranda/internal/llm/anthropic"
 	"github.com/archer-developer/miranda/internal/llm/gemini"
@@ -266,6 +267,23 @@ func run(cfg config.Config, logger *slog.Logger, eventHub *hub.Hub) error {
 		webauthnSvc = svc
 	}
 
+	// keyringService stays nil (config.Keyring.Enabled false, the default).
+	// Kept as a concrete *keyring.Service (not an interface) here, unlike
+	// webauthnSvc above, because Orchestrator.SetKeyring takes the concrete
+	// type directly (matching SetSchedule/SetAttachmentStore's convention)
+	// and a plain nil *keyring.Service is safe to store/check there; only
+	// the webui.New call below needs the typed-nil-interface trick, for the
+	// same reason webauthnSvc does.
+	var keyringService *keyring.Service
+	if cfg.Keyring.Enabled {
+		keyringStore, err := keyring.Open(cfg.Storage.KeyringSQLitePath)
+		if err != nil {
+			return fmt.Errorf("main: configure keyring: %w", err)
+		}
+		defer func() { _ = keyringStore.Close() }()
+		keyringService = keyring.NewService(keyringStore, keyring.NewCache())
+	}
+
 	tgClient, tgChats, tgSecret, err := setupTelegram(cfg.Telegram, cfg.Storage, logger)
 	if err != nil {
 		return err
@@ -288,6 +306,10 @@ func run(cfg config.Config, logger *slog.Logger, eventHub *hub.Hub) error {
 	if ttsHAClient != nil {
 		orchestrator.SetSpeakerHA(ttsHAClient)
 	}
+	if cfg.Keyring.Enabled {
+		orchestrator.SetKeyring(keyringService)
+	}
+	orchestrator.SetEncryptionKeyAllowedServers(encryptionKeyAllowedServers(cfg.MCP.Servers, logger))
 
 	// File upload is opt-in (Enabled defaults false). Resolve config early
 	// so a misconfigured sandbox URL fails fast before the HTTP server starts.
@@ -316,9 +338,17 @@ func run(cfg config.Config, logger *slog.Logger, eventHub *hub.Hub) error {
 		orchestrator.SetSandboxDownload(mcp.PrefixedToolName(cfg.FileUpload.SandboxMCPServerName, "download_file"), downloadRecordTTL)
 	}
 
+	// Same typed-nil-interface shape as webauthnSvc above, and for the same
+	// reason: webui.New's "keyringSvc != nil" check needs a true nil
+	// interface, not a non-nil interface wrapping a nil *keyring.Service.
+	var keyringForWebUI webui.KeyringService
+	if keyringService != nil {
+		keyringForWebUI = keyringService
+	}
+
 	var webHandler http.Handler
 	if cfg.WebUI.Enabled {
-		wh, err := webui.New(historyStore, memoryStore, webauthnSvc, usersRegistry, sessions, cfg.WebUI.DefaultLanguage, cfg.Storage.AvatarsDir, logger)
+		wh, err := webui.New(historyStore, memoryStore, webauthnSvc, keyringForWebUI, usersRegistry, sessions, cfg.WebUI.DefaultLanguage, cfg.Storage.AvatarsDir, logger)
 		if err != nil {
 			return err
 		}
@@ -527,6 +557,29 @@ func connectMCP(ctx context.Context, servers []config.MCPServer, logger *slog.Lo
 		go manager.KeepConnected(ctx, s.Name, mcpReconnectInterval, mcpMaxReconnectInterval, mcpConnectTimeout, connect)
 	}
 	return manager
+}
+
+// encryptionKeyAllowedServers computes which configured MCP servers are
+// permitted to receive a user's unwrapped master key (see
+// config.MCPServer.EncryptionKeyPermitted) — static config data, entirely
+// independent of connection lifecycle, so this is deliberately its own
+// function rather than folded into connectMCP: Manager's job is connection
+// bookkeeping over live/reconnecting clients, not a static permission
+// store, and the result here goes straight to
+// httpapi.Orchestrator.SetEncryptionKeyAllowedServers instead. Logs loudly
+// on a mismatch even though config.validateEncryptionKeyServers should
+// already have rejected EncryptionKeyAllowed=true on a non-https URL at
+// load time — defense in depth, not a substitute for that validation.
+func encryptionKeyAllowedServers(servers []config.MCPServer, logger *slog.Logger) map[string]bool {
+	allowed := make(map[string]bool, len(servers))
+	for _, s := range servers {
+		permitted := s.EncryptionKeyPermitted()
+		if s.EncryptionKeyAllowed && !permitted {
+			logger.Warn("mcp: encryption_key_allowed set but server url is not https, refusing to grant", "server", s.Name, "url", s.URL)
+		}
+		allowed[s.Name] = permitted
+	}
+	return allowed
 }
 
 // buildWebTools constructs Miranda's own web_search/web_fetch tools (see

@@ -28,6 +28,7 @@ type Config struct {
 	WebAuthn   WebAuthnConfig   `yaml:"webauthn"`
 	Telegram   TelegramConfig   `yaml:"telegram"`
 	Schedule   ScheduleConfig   `yaml:"schedule"`
+	Keyring    KeyringConfig    `yaml:"keyring"`
 	FileUpload FileUploadConfig `yaml:"file_upload"`
 	Users      []UserConfig     `yaml:"users"`
 }
@@ -94,6 +95,14 @@ type StorageConfig struct {
 	// a household's pending reminders (and vice versa). Only used when
 	// ScheduleConfig.Enabled is true.
 	ScheduleSQLitePath string `yaml:"schedule_sqlite_path"`
+	// KeyringSQLitePath is a separate SQLite file holding every user's
+	// wrapped master-key slots (see internal/keyring). Unlike the other
+	// optional SQLite files above, losing this one is data-loss-equivalent
+	// to losing every piece of data encrypted under it — back it up at
+	// least as carefully as SQLitePath, not as an afterthought like
+	// ScheduleSQLitePath/WebAuthnSQLitePath. Only used when
+	// KeyringConfig.Enabled is true.
+	KeyringSQLitePath string `yaml:"keyring_sqlite_path"`
 	// TTSCacheDir is where the gemini_tts provider's content-addressed,
 	// permanent (no TTL/expiry — see internal/tts/cache.go) rendered-audio
 	// cache lives; it's also the directory tts.HTTPHandler serves
@@ -189,6 +198,18 @@ type TelegramConfig struct {
 // Telegram/WebAuthn, this needs no deployment-specific secret or URL to
 // turn on, so Enabled defaults to true (opt-out, not opt-in).
 type ScheduleConfig struct {
+	Enabled bool `yaml:"enabled"`
+}
+
+// KeyringConfig controls optional per-user data encryption (see
+// internal/keyring, and docs/encryption.md for the full design): a random
+// master key per user, wrapped independently under every WebAuthn
+// passkey's PRF output and/or a password-derived KDF fallback, and made
+// available (only in memory, never persisted) to whitelisted, HTTPS-only
+// MCP servers via MCPServer.EncryptionKeyAllowed. Opt-in (Enabled defaults
+// false) — independent of WebAuthnConfig, since a deployment may want
+// passkey login without also turning on data encryption.
+type KeyringConfig struct {
 	Enabled bool `yaml:"enabled"`
 }
 
@@ -422,6 +443,30 @@ type MCPServer struct {
 	URL      string `yaml:"url"`
 	TokenEnv string `yaml:"token_env,omitempty"`
 	Enabled  bool   `yaml:"enabled"`
+	// EncryptionKeyAllowed opts this server into receiving the calling
+	// user's unwrapped master key (see KeyringConfig, internal/keyring) as
+	// a tool-call argument — e.g. a diary MCP server that encrypts entries
+	// at rest. Only takes effect when URL is "https://" (see
+	// EncryptionKeyPermitted) — validated at config-load time
+	// (validateEncryptionKeyServers) and re-checked at startup when
+	// cmd/miranda builds the runtime whitelist it hands to
+	// httpapi.Orchestrator, since sending a real key over plaintext HTTP
+	// would defeat the whole point. Defaults false: an MCP server must opt
+	// in explicitly, so a newly-added or untrusted server never silently
+	// receives key material.
+	EncryptionKeyAllowed bool `yaml:"encryption_key_allowed,omitempty"`
+}
+
+// EncryptionKeyPermitted reports whether this server may actually receive
+// the caller's unwrapped master key: EncryptionKeyAllowed must be true AND
+// the URL must be "https://" — sending real key material over plaintext
+// HTTP would defeat the whole point of gating it. The single source of
+// truth for that combined check, shared by validateEncryptionKeyServers
+// (config-load time) and cmd/miranda's runtime whitelist computation
+// (startup time), so the two can never drift apart on what "permitted"
+// means.
+func (s MCPServer) EncryptionKeyPermitted() bool {
+	return s.EncryptionKeyAllowed && strings.HasPrefix(s.URL, "https://")
 }
 
 // MCPConfig lists the MCP servers (HA + others) available as tool sources.
@@ -606,6 +651,7 @@ func Default() Config {
 			WebAuthnSQLitePath: "./data/webauthn.db",
 			TelegramChatsPath:  "./data/telegram_chats.json",
 			ScheduleSQLitePath: "./data/schedule.db",
+			KeyringSQLitePath:  "./data/keyring.db",
 			TTSCacheDir:        "./data/storage",
 		},
 		Logging: LoggingConfig{
@@ -741,6 +787,12 @@ func Default() Config {
 		Schedule: ScheduleConfig{
 			Enabled: true,
 		},
+		// Disabled by default, same posture as WebAuthnConfig — this is a
+		// security-sensitive feature a deployment should turn on
+		// deliberately, not something safe to default on.
+		Keyring: KeyringConfig{
+			Enabled: false,
+		},
 		FileUpload: FileUploadConfig{
 			// Opt-in, same posture as Telegram/WebAuthn — requires a
 			// configured sandbox MCP server URL to proxy uploads to, so
@@ -821,6 +873,9 @@ func Load(paths ...string) (Config, error) {
 	if err := validateFileUploadConfig(cfg.FileUpload, cfg.MCP.Servers); err != nil {
 		return cfg, err
 	}
+	if err := validateEncryptionKeyServers(cfg.MCP.Servers); err != nil {
+		return cfg, err
+	}
 	return cfg, nil
 }
 
@@ -858,4 +913,21 @@ func validateFileUploadConfig(cfg FileUploadConfig, servers []MCPServer) error {
 		}
 	}
 	return fmt.Errorf("config: file_upload.sandbox_mcp_server_name %q does not match any entry in mcp.servers", cfg.SandboxMCPServerName)
+}
+
+// validateEncryptionKeyServers rejects an MCP server marked
+// EncryptionKeyAllowed whose URL isn't "https://" (see
+// MCPServer.EncryptionKeyPermitted) — sending a user's real master key over
+// plaintext HTTP would defeat the point of gating it at all. Failing fast
+// here at config-load time is a first line of defense; cmd/miranda
+// re-checks the same condition (via the same EncryptionKeyPermitted method)
+// when it builds the runtime whitelist at startup, so this stays true even
+// if this validation is ever bypassed or the check drifts.
+func validateEncryptionKeyServers(servers []MCPServer) error {
+	for _, s := range servers {
+		if s.EncryptionKeyAllowed && !s.EncryptionKeyPermitted() {
+			return fmt.Errorf("config: mcp.servers %q has encryption_key_allowed=true but url %q is not https://", s.Name, s.URL)
+		}
+	}
+	return nil
 }

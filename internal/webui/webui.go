@@ -63,9 +63,30 @@ type WebAuthnService interface {
 	BeginRegistration(ctx context.Context, username, ceremonyKey string) (*protocol.CredentialCreation, error)
 	FinishRegistration(ctx context.Context, username, ceremonyKey, nickname string, body []byte) (webauthn.CredentialInfo, error)
 	BeginDiscoverableLogin(ctx context.Context) (*protocol.CredentialAssertion, string, error)
-	FinishDiscoverableLogin(ctx context.Context, ceremonyID string, body []byte) (string, error)
+	FinishDiscoverableLogin(ctx context.Context, ceremonyID string, body []byte) (username string, credentialID, prfOutput []byte, err error)
 	ListCredentials(ctx context.Context, username string) ([]webauthn.CredentialInfo, error)
 	DeleteCredential(ctx context.Context, username string, credentialID []byte) error
+	// BeginKeyProbe/FinishKeyProbe run a follow-up assertion ceremony scoped
+	// to one just-registered credential, so a KeyringService (below) can
+	// capture its PRF output right after registration — see
+	// internal/webauthn.Service.BeginKeyProbe's doc comment.
+	BeginKeyProbe(ctx context.Context, username, ceremonyKey string, credentialID []byte) (*protocol.CredentialAssertion, error)
+	FinishKeyProbe(ctx context.Context, username, ceremonyKey string, body []byte) (credentialID, prfOutput []byte, err error)
+}
+
+// KeyringService is the subset of *keyring.Service the dashboard needs to
+// unlock/lock a user's master key around login/logout, and to add a newly
+// registered passkey's wrapped-key slot — see internal/keyring and
+// docs/encryption.md for the full design. A nil KeyringService passed to
+// New disables the feature entirely (config.KeyringConfig.Enabled false,
+// the default): login/logout simply skip these calls, and the passkey
+// registration flow skips its PRF probe follow-up too.
+type KeyringService interface {
+	UnlockWithPassword(ctx context.Context, username, password string) error
+	UnlockWithPRF(ctx context.Context, username string, credentialID, prfOutput []byte) error
+	AddPasskeySlot(ctx context.Context, username string, credentialID, prfOutput []byte) error
+	Lock(username string)
+	RemoveSlotForCredential(ctx context.Context, username string, credentialID []byte) error
 }
 
 // Handler serves the dashboard page, its static assets, the auth flow, the
@@ -79,6 +100,7 @@ type Handler struct {
 	history         History
 	memory          Memory
 	webauthn        WebAuthnService // nil disables passkey login/registration entirely
+	keyring         KeyringService  // nil disables per-user data encryption entirely
 	users           *users.Registry
 	sessions        *session.Store
 	defaultLanguage string
@@ -128,7 +150,9 @@ func staticAssetVersion(fsys fs.FS) (string, error) {
 // never registered at all, and the frontend's own capability check
 // (window.PublicKeyCredential) keeps the passkey UI hidden; nothing in this
 // package needs a separate "is it enabled" branch beyond this one nil check.
-func New(h History, mem Memory, webauthnSvc WebAuthnService, usersRegistry *users.Registry, sessions *session.Store, defaultLanguage, avatarsDir string, logger *slog.Logger) (*Handler, error) {
+// keyringSvc may independently be nil (config.KeyringConfig.Enabled false,
+// the default) — see KeyringService's doc comment.
+func New(h History, mem Memory, webauthnSvc WebAuthnService, keyringSvc KeyringService, usersRegistry *users.Registry, sessions *session.Store, defaultLanguage, avatarsDir string, logger *slog.Logger) (*Handler, error) {
 	indexTmpl, err := template.ParseFS(templatesFS, "templates/index.html")
 	if err != nil {
 		return nil, fmt.Errorf("webui: parse index template: %w", err)
@@ -153,6 +177,7 @@ func New(h History, mem Memory, webauthnSvc WebAuthnService, usersRegistry *user
 		history:         h,
 		memory:          mem,
 		webauthn:        webauthnSvc,
+		keyring:         keyringSvc,
 		users:           usersRegistry,
 		sessions:        sessions,
 		defaultLanguage: defaultLanguage,
@@ -206,6 +231,17 @@ func New(h History, mem Memory, webauthnSvc WebAuthnService, usersRegistry *user
 		mux.HandleFunc("POST /api/webauthn/login/finish", handler.handleWebAuthnLoginFinish)
 		mux.Handle("GET /api/webauthn/credentials", handler.requireAuthAPI(http.HandlerFunc(handler.handleWebAuthnListCredentials)))
 		mux.Handle("DELETE /api/webauthn/credentials/{id}", handler.requireAuthAPI(http.HandlerFunc(handler.handleWebAuthnDeleteCredential)))
+		if keyringSvc != nil {
+			// The PRF-capture follow-up ceremony (see
+			// internal/webauthn.Service.BeginKeyProbe) only makes sense when
+			// there's a KeyringService to hand its output to — with
+			// webauthnSvc set but keyringSvc nil (passkeys enabled, data
+			// encryption not), registration completes without ever running
+			// this pair, same as if the credential's authenticator simply
+			// didn't support PRF.
+			mux.Handle("POST /api/webauthn/register/probe-begin", handler.requireAuthAPI(http.HandlerFunc(handler.handleWebAuthnRegisterProbeBegin)))
+			mux.Handle("POST /api/webauthn/register/probe-finish", handler.requireAuthAPI(http.HandlerFunc(handler.handleWebAuthnRegisterProbeFinish)))
+		}
 	}
 	handler.mux = mux
 

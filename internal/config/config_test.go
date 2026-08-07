@@ -158,3 +158,42 @@ tavily:
 	_, err := Load(path)
 	require.NoError(t, err)
 }
+
+func TestLoad_EncryptionKeyAllowedOnNonHTTPSServerReturnsError(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	yamlContent := `
+mcp:
+  servers:
+    - name: diary
+      url: "http://127.0.0.1:8789/mcp"
+      enabled: true
+      encryption_key_allowed: true
+`
+	require.NoError(t, os.WriteFile(path, []byte(yamlContent), 0o644))
+
+	_, err := Load(path)
+	require.Error(t, err)
+}
+
+func TestLoad_EncryptionKeyAllowedOnHTTPSServerIsFine(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	yamlContent := `
+mcp:
+  servers:
+    - name: diary
+      url: "https://diary.example.com/mcp"
+      enabled: true
+      encryption_key_allowed: true
+`
+	require.NoError(t, os.WriteFile(path, []byte(yamlContent), 0o644))
+
+	cfg, err := Load(path)
+	require.NoError(t, err)
+	require.True(t, cfg.MCP.Servers[0].EncryptionKeyAllowed)
+}
+
+func TestMCPServer_EncryptionKeyPermitted(t *testing.T) {
+	require.True(t, MCPServer{EncryptionKeyAllowed: true, URL: "https://diary.example.com/mcp"}.EncryptionKeyPermitted())
+	require.False(t, MCPServer{EncryptionKeyAllowed: true, URL: "http://diary.example.com/mcp"}.EncryptionKeyPermitted(), "not https")
+	require.False(t, MCPServer{EncryptionKeyAllowed: false, URL: "https://diary.example.com/mcp"}.EncryptionKeyPermitted(), "not opted in")
+}

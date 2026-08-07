@@ -37,11 +37,28 @@ function prepareCreationOptions(publicKey) {
   return publicKey;
 }
 
+// PRF_SALT_B64URL is a fixed, non-secret, application-specific salt for the
+// WebAuthn PRF extension's eval.first input — SHA-256("miranda:master-key:v1"),
+// base64url-encoded (matches internal/keyring's docs/encryption.md). It
+// doesn't need to be secret or per-user: PRF's security comes from the
+// authenticator's own private key material, not this salt, which only
+// domain-separates this specific derivation (like HKDF's "info" parameter).
+// Requested client-side rather than round-tripped from the server to avoid
+// a real encoding footgun — protocol.AuthenticationExtensions is untyped
+// JSON, and a raw []byte value there would marshal as *standard* base64,
+// not the base64url every other byte field in this protocol uses.
+const PRF_SALT_B64URL = "1KUP_WqBdJvtc05WhVLE6ehg5_f950wDU5j-mzlvEnk";
+
 function prepareRequestOptions(publicKey) {
   publicKey.challenge = base64urlToBuffer(publicKey.challenge);
   if (publicKey.allowCredentials) {
     publicKey.allowCredentials = publicKey.allowCredentials.map((c) => ({ ...c, id: base64urlToBuffer(c.id) }));
   }
+  // Requested on every assertion (login and the post-registration PRF
+  // probe below) — harmless no-op when the authenticator/browser doesn't
+  // support PRF, or when internal/keyring isn't enabled server-side (the
+  // output just goes unused in that case).
+  publicKey.extensions = { ...(publicKey.extensions || {}), prf: { eval: { first: base64urlToBuffer(PRF_SALT_B64URL) } } };
   return publicKey;
 }
 
@@ -50,11 +67,24 @@ function prepareRequestOptions(publicKey) {
 // defines, whether this came from create() (registration) or get() (login).
 function credentialToJSON(credential) {
   const response = credential.response;
+  const extensionResults = credential.getClientExtensionResults ? credential.getClientExtensionResults() : {};
+  // The PRF extension's eval results arrive as raw ArrayBuffers, which
+  // JSON.stringify silently serializes as "{}" (no enumerable own
+  // properties) — encode them to base64url first, the same convention
+  // every other binary field in this file already follows, or the server
+  // never sees any bytes at all.
+  if (extensionResults.prf && extensionResults.prf.results) {
+    const results = extensionResults.prf.results;
+    extensionResults.prf.results = {
+      first: bufferToBase64url(results.first),
+      ...(results.second ? { second: bufferToBase64url(results.second) } : {}),
+    };
+  }
   const out = {
     id: credential.id,
     rawId: bufferToBase64url(credential.rawId),
     type: credential.type,
-    clientExtensionResults: credential.getClientExtensionResults ? credential.getClientExtensionResults() : {},
+    clientExtensionResults: extensionResults,
   };
 
   if (response.attestationObject) {
@@ -141,7 +171,47 @@ export function forgetPasskeyLogin() {
   }
 }
 
-/** Registers a new passkey for the logged-in user (profile screen). */
+/** Runs the follow-up assertion ceremony that captures a just-registered
+ * credential's PRF output for internal/keyring (see
+ * internal/webauthn.Service.BeginKeyProbe's doc comment for why
+ * registration alone can't reliably return it) — called by registerPasskey
+ * immediately after registration succeeds. Deliberately fails soft: any
+ * error here (no keyring configured server-side, the authenticator doesn't
+ * support PRF, the ceremony itself fails) must never be treated as the
+ * passkey registration having failed, since that already succeeded. Callers
+ * that want to tell the user the outcome can inspect the resolved boolean.
+ */
+async function probeForEncryptionKey(credentialId) {
+  try {
+    const beginRes = await fetch("/api/webauthn/register/probe-begin", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ credentialId }),
+    });
+    if (!beginRes.ok) return false; // route not registered (keyring disabled) or begin failed
+    const options = await beginRes.json();
+    prepareRequestOptions(options.publicKey);
+
+    const credential = await navigator.credentials.get({ publicKey: options.publicKey });
+    const body = credentialToJSON(credential);
+    body.credentialId = credentialId;
+
+    const finishRes = await fetch("/api/webauthn/register/probe-finish", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    return finishRes.ok;
+  } catch {
+    return false;
+  }
+}
+
+/** Registers a new passkey for the logged-in user (profile screen).
+ * Resolves to {id, nickname, ...} plus one extra field this function adds,
+ * encryptionKeyEnabled, telling the caller whether probeForEncryptionKey
+ * successfully added a wrapped-key slot for this passkey — purely
+ * informational, never affects whether registration itself succeeded. */
 export async function registerPasskey(nickname) {
   const beginRes = await fetch("/api/webauthn/register/begin", { method: "POST" });
   if (!beginRes.ok) throw new Error(`begin failed: ${beginRes.status}`);
@@ -159,7 +229,10 @@ export async function registerPasskey(nickname) {
   });
   if (!finishRes.ok) throw new Error(`registration failed: ${finishRes.status} ${await finishRes.text()}`);
   rememberPasskeyLogin();
-  return finishRes.json();
+  const info = await finishRes.json();
+
+  info.encryptionKeyEnabled = info.id ? await probeForEncryptionKey(info.id) : false;
+  return info;
 }
 
 /** Drives a passwordless, usernameless login from the login page's

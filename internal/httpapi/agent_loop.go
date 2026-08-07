@@ -2,6 +2,7 @@ package httpapi
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"regexp"
@@ -852,7 +853,36 @@ func (o *Orchestrator) executeTool(ctx context.Context, userID string, tc llm.To
 		}
 	}
 
-	result, err := o.tools.Call(ctx, tc.Name, tc.Arguments)
+	// Build the wire payload as a local variable, never overwriting
+	// tc.Arguments itself — runAgentLoop already called
+	// recordAssistantToolCallMessage with the model's original, unmutated
+	// toolCalls before this iteration's executeTool call, and calls
+	// recordToolCall with that same outer, unmutated tc right after this
+	// call returns (Go passes tc into executeTool by value, so a local
+	// mutation here is invisible to the caller's copy either way). Keeping
+	// the mutation local-only is what keeps a real key from ever reaching
+	// history's SQLite tables or internal/llmtrace's llm.log. See
+	// docs/encryption.md.
+	callArgs := tc.Arguments
+	if o.keyring != nil {
+		// key stays nil unless tc.Name targets a whitelisted server AND
+		// userID's key is currently unlocked — setEncryptionKeyArg treats a
+		// nil key as "strip", which also covers the not-whitelisted case:
+		// a compromised/malicious MCP tool description must never be able
+		// to trick the model into forwarding a previously-seen key value to
+		// a different, non-whitelisted server.
+		var key []byte
+		if server, ok := o.tools.ServerForTool(tc.Name); ok && o.encryptionKeyAllowed[server] {
+			key, _ = o.keyring.Get(userID)
+		}
+		var decodeOK bool
+		callArgs, decodeOK = setEncryptionKeyArg(tc.Arguments, key)
+		if !decodeOK && len(key) > 0 {
+			o.hub.Publish(hub.Event{Source: "error", Message: "keyring: tool call arguments were not valid JSON, encryption key not attached to " + tc.Name})
+		}
+	}
+
+	result, err := o.tools.Call(ctx, tc.Name, callArgs)
 	if err != nil {
 		return fmt.Sprintf("error: %v", err)
 	}
@@ -893,6 +923,72 @@ func aliceToolDevice(args string) string {
 		return ""
 	}
 	return m.Device
+}
+
+// encryptionKeyArgName is the tool-call argument name a whitelisted MCP
+// server's schema is expected to accept the caller's unwrapped master key
+// under (base64-encoded) — matches the external miranda-diary repo's tool
+// schema; confirm against that repo's actual field name/encoding if this
+// project ever adds a second encryption-aware MCP server whose schema
+// differs.
+const encryptionKeyArgName = "encryption_key"
+
+// setEncryptionKeyArg sets or strips encryptionKeyArgName in args' JSON. A
+// non-empty key sets it (base64-encoded), overwriting any value the model
+// may have set itself. A nil/empty key strips it instead — defense against
+// a compromised/malicious MCP tool description tricking the model into
+// forwarding a previously-seen key value somewhere it shouldn't go.
+//
+// Always decodes args (no substring pre-check): JSON allows any character,
+// including every letter of encryptionKeyArgName, to be written as a \uXXXX
+// escape, so a literal-substring fast path can be silently dodged by a tool
+// call whose "encryption_key" field is spelled with an escape — exactly the
+// prompt-injection scenario this function exists to defend against. The
+// post-decode "field not present" check below is what actually avoids a
+// wasted re-encode for the overwhelmingly common case (any non-whitelisted
+// or locked-key call), safely, since it runs after the field has genuinely
+// been looked for in the parsed object rather than guessed at from raw text.
+//
+// ok is false only when args itself isn't valid JSON — the caller should
+// treat that as "the key was not attached" and log it when key was
+// non-empty, since it means an intended injection silently didn't happen
+// (a fully malformed tool call is rare and will fail against the MCP server
+// on its own terms regardless, but a merely-unparseable-here edge case
+// deserves a trace, not silence).
+func setEncryptionKeyArg(args string, key []byte) (result string, ok bool) {
+	m, decodeOK := decodeToolArgs(args)
+	if !decodeOK {
+		return args, false
+	}
+	if len(key) == 0 {
+		if _, present := m[encryptionKeyArgName]; !present {
+			return args, true
+		}
+		delete(m, encryptionKeyArgName)
+	} else {
+		m[encryptionKeyArgName] = base64.StdEncoding.EncodeToString(key)
+	}
+	return encodeToolArgs(m, args), true
+}
+
+func decodeToolArgs(args string) (map[string]any, bool) {
+	var m map[string]any
+	if err := json.Unmarshal([]byte(args), &m); err != nil {
+		return nil, false
+	}
+	return m, true
+}
+
+// encodeToolArgs marshals m back to JSON, falling back to the original
+// (pre-decode) args string on a marshal error — this should be unreachable
+// since m was itself produced by unmarshaling valid JSON, but never worth
+// silently losing a tool call's arguments over.
+func encodeToolArgs(m map[string]any, original string) string {
+	b, err := json.Marshal(m)
+	if err != nil {
+		return original
+	}
+	return string(b)
 }
 
 // recordAssistantToolCallMessage persists the assistant's turn that

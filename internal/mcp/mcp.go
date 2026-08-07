@@ -192,22 +192,50 @@ func (m *Manager) Tools(ctx context.Context) []llm.ToolDef {
 func (m *Manager) Call(ctx context.Context, prefixedName, argumentsJSON string) (string, error) {
 	order, clients := m.snapshot()
 
+	name, ok := serverForTool(order, prefixedName)
+	if !ok {
+		return "", fmt.Errorf("mcp: no configured server matches tool %q", prefixedName)
+	}
+	c, ok := clients[name]
+	if !ok {
+		return "", fmt.Errorf("mcp: server %q for tool %q is currently disconnected", name, prefixedName)
+	}
+	result, err := c.CallTool(ctx, strings.TrimPrefix(prefixedName, PrefixedToolName(name, "")), argumentsJSON)
+	if err != nil && errors.Is(err, ErrDisconnected) {
+		m.logger.Warn("mcp: server disconnected, dropping it until it reconnects", "server", name, "error", err)
+		m.removeClient(name)
+	}
+	return result, err
+}
+
+// ServerForTool returns which server owns prefixedName (as produced by
+// Tools), without invoking anything — used by callers (e.g.
+// internal/httpapi.executeTool's encryption-key injection) that need to
+// know a tool call's owning server before deciding what to do, separately
+// from Call actually dispatching to it. Only reads order (under the read
+// lock, not the full client-set copy snapshot() also builds — this is
+// called on every tool call once a keyring is configured, so it's worth
+// not paying for a map copy it doesn't need).
+func (m *Manager) ServerForTool(prefixedName string) (string, bool) {
+	return serverForTool(m.orderSnapshot(), prefixedName)
+}
+
+// orderSnapshot copies just the current iteration order under a read lock —
+// the lighter-weight half of snapshot(), for callers that only need to
+// resolve a tool name to its owning server without a client to call.
+func (m *Manager) orderSnapshot() []string {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return append([]string(nil), m.order...)
+}
+
+func serverForTool(order []string, prefixedName string) (string, bool) {
 	for _, name := range order {
-		prefix := PrefixedToolName(name, "")
-		if strings.HasPrefix(prefixedName, prefix) {
-			c, ok := clients[name]
-			if !ok {
-				return "", fmt.Errorf("mcp: server %q for tool %q is currently disconnected", name, prefixedName)
-			}
-			result, err := c.CallTool(ctx, strings.TrimPrefix(prefixedName, prefix), argumentsJSON)
-			if err != nil && errors.Is(err, ErrDisconnected) {
-				m.logger.Warn("mcp: server disconnected, dropping it until it reconnects", "server", name, "error", err)
-				m.removeClient(name)
-			}
-			return result, err
+		if strings.HasPrefix(prefixedName, PrefixedToolName(name, "")) {
+			return name, true
 		}
 	}
-	return "", fmt.Errorf("mcp: no configured server matches tool %q", prefixedName)
+	return "", false
 }
 
 // KeepConnected keeps a client named name attached to m for as long as ctx is

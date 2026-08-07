@@ -108,10 +108,22 @@ func (h *Handler) handleLoginSubmit(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	user, ok := h.users.Authenticate(r.FormValue("username"), r.FormValue("password"))
+	password := r.FormValue("password")
+	user, ok := h.users.Authenticate(r.FormValue("username"), password)
 	if !ok {
 		http.Redirect(w, r, "/login?error=1", http.StatusSeeOther)
 		return
+	}
+
+	// Best-effort: derive/unwrap this user's master key from the plaintext
+	// password while it's still in scope (never persisted — see
+	// internal/keyring). A keyring failure must never turn into a login
+	// failure; it just means encrypted-data tools stay unavailable this
+	// session, same as if the feature were disabled.
+	if h.keyring != nil {
+		if err := h.keyring.UnlockWithPassword(r.Context(), user.Username, password); err != nil {
+			h.logger.Warn("keyring: unlock with password failed", "username", user.Username, "error", err)
+		}
 	}
 
 	if err := h.issueSessionCookie(w, r, user); err != nil {
@@ -158,6 +170,15 @@ func (h *Handler) issueSessionCookie(w http.ResponseWriter, r *http.Request, use
 
 func (h *Handler) handleLogout(w http.ResponseWriter, r *http.Request) {
 	if cookie, err := r.Cookie(session.CookieName); err == nil {
+		// Resolve the username before destroying the session token, so the
+		// user's unlocked master key can be dropped from memory on explicit
+		// logout — the one thing (besides process restart) that ever locks
+		// it, since internal/keyring.Cache has no auto-lock timer.
+		if h.keyring != nil {
+			if username, ok := h.sessions.Validate(cookie.Value); ok {
+				h.keyring.Lock(username)
+			}
+		}
 		h.sessions.Destroy(cookie.Value)
 	}
 	http.SetCookie(w, &http.Cookie{
