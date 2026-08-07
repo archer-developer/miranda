@@ -265,6 +265,7 @@ mcp:
     - name: diary
       url: "https://diary.example.com/mcp"
       encryption_key_allowed: true
+      encryption_key_arg: record_encryption_key
 ```
 
 Checked twice, deliberately redundant, both driven by the single shared
@@ -277,8 +278,10 @@ apart on what "permitted" means:
    rejects `encryption_key_allowed: true` combined with a non-`https://`
    URL outright — fails startup rather than silently degrading.
 2. **Startup, before serving traffic** (`cmd/miranda`'s
-   `encryptionKeyAllowedServers`): builds a `map[string]bool` from every
-   configured server's `EncryptionKeyPermitted()` and hands it to
+   `encryptionKeyAllowedServers`): builds a `map[string]string` (server name
+   → the tool-call argument name that server's own config entry expects the
+   key under, from `EncryptionKeyArg()`) from every configured server whose
+   `EncryptionKeyPermitted()` is true, and hands it to
    `Orchestrator.SetEncryptionKeyAllowedServers` — independent of whether a
    server is actually reachable yet, since this is static, config-derived
    data, not anything learned from a live session. This is deliberately
@@ -300,7 +303,7 @@ dispatch time.
 ## Injection at dispatch time (`internal/httpapi/agent_loop.go`)
 
 `Orchestrator.SetKeyring(*keyring.Service)` and
-`Orchestrator.SetEncryptionKeyAllowedServers(map[string]bool)` wire the
+`Orchestrator.SetEncryptionKeyAllowedServers(map[string]string)` wire the
 feature in, mirroring `SetTelegram`/`SetSchedule`'s post-construction,
 config-gated style. Inside `executeTool`, immediately before the MCP call:
 
@@ -308,10 +311,14 @@ config-gated style. Inside `executeTool`, immediately before the MCP call:
 callArgs := tc.Arguments
 if o.keyring != nil {
     var key []byte
-    if server, ok := o.tools.ServerForTool(tc.Name); ok && o.encryptionKeyAllowed[server] {
-        key, _ = o.keyring.Get(userID) // nil if not currently unlocked
+    argName := defaultEncryptionKeyArgName
+    if server, ok := o.tools.ServerForTool(tc.Name); ok {
+        if a, permitted := o.encryptionKeyAllowed[server]; permitted {
+            argName = a
+            key, _ = o.keyring.Get(userID) // nil if not currently unlocked
+        }
     }
-    callArgs = setEncryptionKeyArg(tc.Arguments, key) // nil key strips instead of sets
+    callArgs, _ = setEncryptionKeyArg(tc.Arguments, argName, key) // nil key strips instead of sets
 }
 result, err := o.tools.Call(ctx, tc.Name, callArgs)
 ```
@@ -324,13 +331,14 @@ Two behaviors worth calling out explicitly:
   proceeds *without* the key argument rather than blocking the turn; the
   external tool decides what that means (e.g. reject, or store
   unencrypted if it supports that).
-- **`setEncryptionKeyArg` always removes any `encryption_key` field the
+- **`setEncryptionKeyArg` always removes the resolved `argName` field the
   model may have set itself when passed a nil key**, which covers every
-  non-whitelisted server too — defense against a compromised or malicious
-  MCP tool description tricking the model into forwarding a
-  previously-observed key value to a different, non-whitelisted server.
-  The real key is only ever set by this server-side injection, never
-  trusted from the model's own generated arguments.
+  non-whitelisted server too (there `argName` falls back to
+  `defaultEncryptionKeyArgName`, since no per-server override applies) —
+  defense against a compromised or malicious MCP tool description tricking
+  the model into forwarding a previously-observed key value to a different,
+  non-whitelisted server. The real key is only ever set by this server-side
+  injection, never trusted from the model's own generated arguments.
 
 **Why the key can never leak into persisted history or `llm.log`**: `callArgs`
 is a fresh local variable — `tc.Arguments` itself is never mutated.
@@ -345,10 +353,30 @@ tables nor `internal/llmtrace`'s `llm.log` — nor the model's own context —
 ever see the real key value; only the literal bytes sent over the wire to
 `o.tools.Call` do.
 
-The injected field name (`encryptionKeyArgName = "encryption_key"`,
-`internal/httpapi/agent_loop.go`) matches the external `miranda-diary`
-repo's tool schema — confirm against that repo directly before wiring in a
-second encryption-aware MCP server whose schema might differ.
+The injected field name is per-server, not a single global constant: it
+comes from `config.MCPServer.EncryptionKeyArg()` (the server's
+`encryption_key_arg` override, or `defaultEncryptionKeyArgName =
+"encryption_key"` if unset). The external `miranda-diary` repo's tools
+actually name this field `record_encryption_key`, so a `diary` server entry
+must set `encryption_key_arg: record_encryption_key` explicitly — leaving
+it unset silently sends the key under the wrong field name, which that
+server's `additionalProperties: false` schema rejects outright on every
+call (see the incident this was fixed from: every `diary_add_record` call
+failed with `unexpected additional properties ["encryption_key"]` until
+this was set). Confirm against that repo directly (or whichever
+encryption-aware server you're wiring in) before assuming the default is
+correct.
+
+The wire encoding itself (`setEncryptionKeyArg`, `internal/httpapi/agent_loop.go`)
+is lowercase hex, 64 characters for a 32-byte key — not configurable per
+server, since it's the encoding the one real consumer's
+`parseEncryptionKey` requires and there's no evidence yet any future
+consumer would want something else. This too was found the hard way: an
+earlier version base64-encoded instead, which went unnoticed because
+`miranda-diary` ignores `record_encryption_key` entirely (no format check)
+for any user whose `encryption` setting is off server-side — the moment a
+user's encryption gets turned on there, every call starts failing "must be
+64 lowercase hex characters" until the sender switches to hex.
 
 ## Config reference
 
@@ -356,6 +384,7 @@ second encryption-aware MCP server whose schema might differ.
 |---|---|---|
 | `storage.keyring_sqlite_path` | `./data/keyring.db` | Back up at least as carefully as `storage.sqlite_path`. |
 | `mcp.servers[].encryption_key_allowed` | `false` | Requires the same server's `url` to start with `https://`, checked at both config-load and connection time. Still independent of `webauthn.enabled` — a deployment can run passkeys without any server marked `encryption_key_allowed`, or vice versa (though PRF-based unlock obviously needs a registered passkey too). |
+| `mcp.servers[].encryption_key_arg` | `"encryption_key"` | The tool-call argument name that server's schema actually expects the key under (always sent lowercase hex-encoded, 64 chars for a 32-byte key). Only meaningful alongside `encryption_key_allowed: true`. The `miranda-diary` repo's tools expect `record_encryption_key`, not the default. |
 
 ## Known limitations / open risks
 

@@ -197,3 +197,8 @@ func TestMCPServer_EncryptionKeyPermitted(t *testing.T) {
 	require.False(t, MCPServer{EncryptionKeyAllowed: true, URL: "http://diary.example.com/mcp"}.EncryptionKeyPermitted(), "not https")
 	require.False(t, MCPServer{EncryptionKeyAllowed: false, URL: "https://diary.example.com/mcp"}.EncryptionKeyPermitted(), "not opted in")
 }
+
+func TestMCPServer_EncryptionKeyArg(t *testing.T) {
+	require.Equal(t, "encryption_key", MCPServer{}.EncryptionKeyArg(), "defaults when unset")
+	require.Equal(t, "record_encryption_key", MCPServer{EncryptionKeyArgName: "record_encryption_key"}.EncryptionKeyArg(), "override wins")
+}

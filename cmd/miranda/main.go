@@ -544,24 +544,29 @@ func connectMCP(ctx context.Context, servers []config.MCPServer, logger *slog.Lo
 }
 
 // encryptionKeyAllowedServers computes which configured MCP servers are
-// permitted to receive a user's unwrapped master key (see
-// config.MCPServer.EncryptionKeyPermitted) — static config data, entirely
-// independent of connection lifecycle, so this is deliberately its own
-// function rather than folded into connectMCP: Manager's job is connection
-// bookkeeping over live/reconnecting clients, not a static permission
-// store, and the result here goes straight to
-// httpapi.Orchestrator.SetEncryptionKeyAllowedServers instead. Logs loudly
-// on a mismatch even though config.validateEncryptionKeyServers should
-// already have rejected EncryptionKeyAllowed=true on a non-https URL at
-// load time — defense in depth, not a substitute for that validation.
-func encryptionKeyAllowedServers(servers []config.MCPServer, logger *slog.Logger) map[string]bool {
-	allowed := make(map[string]bool, len(servers))
+// permitted to receive a user's unwrapped master key, and under which
+// argument name each one expects it (see config.MCPServer.EncryptionKeyPermitted
+// / EncryptionKeyArg) — static config data, entirely independent of
+// connection lifecycle, so this is deliberately its own function rather
+// than folded into connectMCP: Manager's job is connection bookkeeping over
+// live/reconnecting clients, not a static permission store, and the result
+// here goes straight to httpapi.Orchestrator.SetEncryptionKeyAllowedServers
+// instead. Logs loudly on a mismatch even though
+// config.validateEncryptionKeyServers should already have rejected
+// EncryptionKeyAllowed=true on a non-https URL at load time — defense in
+// depth, not a substitute for that validation. A server absent from the
+// returned map is simply not permitted; only permitted servers get an
+// entry, keyed to their own configured argument name.
+func encryptionKeyAllowedServers(servers []config.MCPServer, logger *slog.Logger) map[string]string {
+	allowed := make(map[string]string, len(servers))
 	for _, s := range servers {
 		permitted := s.EncryptionKeyPermitted()
 		if s.EncryptionKeyAllowed && !permitted {
 			logger.Warn("mcp: encryption_key_allowed set but server url is not https, refusing to grant", "server", s.Name, "url", s.URL)
 		}
-		allowed[s.Name] = permitted
+		if permitted {
+			allowed[s.Name] = s.EncryptionKeyArg()
+		}
 	}
 	return allowed
 }

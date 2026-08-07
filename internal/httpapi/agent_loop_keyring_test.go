@@ -37,7 +37,7 @@ func TestExecuteTool_InjectsEncryptionKeyForWhitelistedUnlockedServer(t *testing
 	)
 	o, _, _ := newTestOrchestrator(t, provider, diary)
 	o.SetKeyring(newTestKeyringService(t, "alex", []byte("01234567890123456789012345678901")[:32]))
-	o.SetEncryptionKeyAllowedServers(map[string]bool{"diary": true})
+	o.SetEncryptionKeyAllowedServers(map[string]string{"diary": "encryption_key"})
 
 	resp, err := o.Handle(context.Background(), InputRequest{Source: "cli", UserID: "alex", Text: "add a diary entry"})
 	require.NoError(t, err)
@@ -48,6 +48,42 @@ func TestExecuteTool_InjectsEncryptionKeyForWhitelistedUnlockedServer(t *testing
 	require.NoError(t, json.Unmarshal([]byte(diary.Calls[0].ArgumentsJSON), &wireArgs))
 	require.Contains(t, wireArgs, "encryption_key", "the wire call to a whitelisted, unlocked server must carry the key")
 	require.Equal(t, "hello", wireArgs["text"])
+	// Must be lowercase hex, 64 chars for a 32-byte key — what
+	// miranda-diary's parseEncryptionKey actually requires (see
+	// docs/encryption.md); a previous version sent base64 instead, which
+	// that server silently ignored until encryption was turned on for the
+	// account, then rejected outright.
+	require.Regexp(t, `^[0-9a-f]{64}$`, wireArgs["encryption_key"])
+}
+
+// TestExecuteTool_InjectsUnderServerConfiguredArgName guards the actual bug
+// this test file's map[string]string plumbing was added to fix: a
+// whitelisted server whose real tool schema names the key field something
+// other than the "encryption_key" default (e.g. the external miranda-diary
+// repo's tools use "record_encryption_key") must receive it under that
+// server's own configured name, not the default — the whitelisted server
+// previously always got the hardcoded default regardless of its actual
+// schema, so this call would have been silently rejected by that server's
+// additionalProperties:false validation.
+func TestExecuteTool_InjectsUnderServerConfiguredArgName(t *testing.T) {
+	diary := mcptest.New("diary", llm.ToolDef{Name: "add_entry"}).WithResult("add_entry", "ok")
+	provider := llmtest.New("local",
+		llmtest.Response{ToolCall: &llm.ToolCall{ID: "call-1", Name: "diary_add_entry", Arguments: `{"text":"hello"}`}},
+		llmtest.Response{Text: "Done."},
+	)
+	o, _, _ := newTestOrchestrator(t, provider, diary)
+	o.SetKeyring(newTestKeyringService(t, "alex", []byte("01234567890123456789012345678901")[:32]))
+	o.SetEncryptionKeyAllowedServers(map[string]string{"diary": "record_encryption_key"})
+
+	resp, err := o.Handle(context.Background(), InputRequest{Source: "cli", UserID: "alex", Text: "add a diary entry"})
+	require.NoError(t, err)
+	require.Equal(t, "Done.", resp.Reply)
+
+	require.Len(t, diary.Calls, 1)
+	var wireArgs map[string]any
+	require.NoError(t, json.Unmarshal([]byte(diary.Calls[0].ArgumentsJSON), &wireArgs))
+	require.Contains(t, wireArgs, "record_encryption_key", "must use this server's configured arg name")
+	require.NotContains(t, wireArgs, "encryption_key", "must not also inject under the default name")
 }
 
 func TestExecuteTool_NeverSendsKeyToNonWhitelistedServer(t *testing.T) {
@@ -62,7 +98,7 @@ func TestExecuteTool_NeverSendsKeyToNonWhitelistedServer(t *testing.T) {
 	)
 	o, _, _ := newTestOrchestrator(t, provider, ha)
 	o.SetKeyring(newTestKeyringService(t, "alex", []byte("01234567890123456789012345678901")[:32]))
-	o.SetEncryptionKeyAllowedServers(map[string]bool{"diary": true}) // "ha" is not in this set
+	o.SetEncryptionKeyAllowedServers(map[string]string{"diary": "encryption_key"}) // "ha" is not in this set
 
 	resp, err := o.Handle(context.Background(), InputRequest{Source: "cli", UserID: "alex", Text: "is the light on?"})
 	require.NoError(t, err)
@@ -83,7 +119,7 @@ func TestExecuteTool_ProceedsWithoutKeyWhenLocked(t *testing.T) {
 	o, _, _ := newTestOrchestrator(t, provider, diary)
 	// Keyring configured, server whitelisted, but nobody has unlocked "alex"'s key.
 	o.SetKeyring(newTestKeyringService(t, "someone-else", []byte("01234567890123456789012345678901")[:32]))
-	o.SetEncryptionKeyAllowedServers(map[string]bool{"diary": true})
+	o.SetEncryptionKeyAllowedServers(map[string]string{"diary": "encryption_key"})
 
 	resp, err := o.Handle(context.Background(), InputRequest{Source: "cli", UserID: "alex", Text: "add a diary entry"})
 	require.NoError(t, err, "a locked key must never block the turn")
@@ -104,7 +140,7 @@ func TestExecuteTool_NeverMutatesRecordedToolCallArguments(t *testing.T) {
 	)
 	o, h, _ := newTestOrchestrator(t, provider, diary)
 	o.SetKeyring(newTestKeyringService(t, "alex", []byte("01234567890123456789012345678901")[:32]))
-	o.SetEncryptionKeyAllowedServers(map[string]bool{"diary": true})
+	o.SetEncryptionKeyAllowedServers(map[string]string{"diary": "encryption_key"})
 
 	resp, err := o.Handle(context.Background(), InputRequest{Source: "cli", UserID: "alex", Text: "add a diary entry"})
 	require.NoError(t, err)
@@ -130,7 +166,7 @@ func TestExecuteTool_NeverMutatesRecordedToolCallArguments(t *testing.T) {
 }
 
 func TestSetEncryptionKeyArg_InjectsForNonEmptyKey(t *testing.T) {
-	result, ok := setEncryptionKeyArg(`{"text":"hi"}`, []byte{1, 2, 3})
+	result, ok := setEncryptionKeyArg(`{"text":"hi"}`, "encryption_key", []byte{1, 2, 3})
 	require.True(t, ok)
 	var m map[string]any
 	require.NoError(t, json.Unmarshal([]byte(result), &m))
@@ -139,7 +175,7 @@ func TestSetEncryptionKeyArg_InjectsForNonEmptyKey(t *testing.T) {
 }
 
 func TestSetEncryptionKeyArg_StripsModelSuppliedFieldForNilKey(t *testing.T) {
-	result, ok := setEncryptionKeyArg(`{"text":"hi","encryption_key":"attacker"}`, nil)
+	result, ok := setEncryptionKeyArg(`{"text":"hi","encryption_key":"attacker"}`, "encryption_key", nil)
 	require.True(t, ok)
 	var m map[string]any
 	require.NoError(t, json.Unmarshal([]byte(result), &m))
@@ -149,7 +185,7 @@ func TestSetEncryptionKeyArg_StripsModelSuppliedFieldForNilKey(t *testing.T) {
 
 func TestSetEncryptionKeyArg_NoopWhenFieldAlreadyAbsentAndKeyNil(t *testing.T) {
 	const args = `{"text":"hi"}`
-	result, ok := setEncryptionKeyArg(args, nil)
+	result, ok := setEncryptionKeyArg(args, "encryption_key", nil)
 	require.True(t, ok)
 	require.Equal(t, args, result, "must return the original string unmodified, not a re-marshaled equivalent")
 }
@@ -166,7 +202,7 @@ func TestSetEncryptionKeyArg_NoopWhenFieldAlreadyAbsentAndKeyNil(t *testing.T) {
 func TestSetEncryptionKeyArg_StripsUnicodeEscapedFieldName(t *testing.T) {
 	// "encryption_key" with the underscore written as _.
 	args := "{\"note\":\"hi\",\"encryption\\u005fkey\":\"leaked-base64-key-material\"}"
-	result, ok := setEncryptionKeyArg(args, nil)
+	result, ok := setEncryptionKeyArg(args, "encryption_key", nil)
 	require.True(t, ok)
 
 	var m map[string]any
@@ -175,7 +211,7 @@ func TestSetEncryptionKeyArg_StripsUnicodeEscapedFieldName(t *testing.T) {
 }
 
 func TestSetEncryptionKeyArg_ReturnsNotOKOnInvalidJSON(t *testing.T) {
-	result, ok := setEncryptionKeyArg("not json", []byte{1, 2, 3})
+	result, ok := setEncryptionKeyArg("not json", "encryption_key", []byte{1, 2, 3})
 	require.False(t, ok)
 	require.Equal(t, "not json", result)
 }

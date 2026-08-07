@@ -63,9 +63,19 @@ func TestEncryptionKeyAllowedServers_GrantsOnlyPermittedServers(t *testing.T) {
 
 	allowed := encryptionKeyAllowedServers(servers, discardLogger())
 
-	require.True(t, allowed["diary"])
-	require.False(t, allowed["ha"])
-	require.False(t, allowed["sandbox"])
+	require.Equal(t, "encryption_key", allowed["diary"])
+	require.NotContains(t, allowed, "ha")
+	require.NotContains(t, allowed, "sandbox")
+}
+
+func TestEncryptionKeyAllowedServers_UsesConfiguredArgName(t *testing.T) {
+	servers := []config.MCPServer{
+		{Name: "diary", URL: "https://diary.example.com/mcp", EncryptionKeyAllowed: true, EncryptionKeyArgName: "record_encryption_key"},
+	}
+
+	allowed := encryptionKeyAllowedServers(servers, discardLogger())
+
+	require.Equal(t, "record_encryption_key", allowed["diary"])
 }
 
 // TestEncryptionKeyAllowedServers_NonHTTPSNeverGranted is defense-in-depth
@@ -79,5 +89,5 @@ func TestEncryptionKeyAllowedServers_NonHTTPSNeverGranted(t *testing.T) {
 
 	allowed := encryptionKeyAllowedServers(servers, discardLogger())
 
-	require.False(t, allowed["diary"])
+	require.NotContains(t, allowed, "diary")
 }

@@ -443,6 +443,32 @@ type MCPServer struct {
 	// in explicitly, so a newly-added or untrusted server never silently
 	// receives key material.
 	EncryptionKeyAllowed bool `yaml:"encryption_key_allowed,omitempty"`
+	// EncryptionKeyArgName overrides the tool-call argument name this
+	// server's schema expects the unwrapped master key under (see
+	// EncryptionKeyArg). Only meaningful when EncryptionKeyAllowed is true.
+	// Left unset, defaultEncryptionKeyArgName ("encryption_key") is used —
+	// set this explicitly whenever a server's actual schema names the field
+	// differently (e.g. the external miranda-diary repo's tools use
+	// "record_encryption_key"; a mismatch here isn't caught at config-load
+	// time, it surfaces as the MCP server rejecting every call from that
+	// tool with a schema-validation error at call time, since the injected
+	// field shows up as an unrecognized additional property).
+	EncryptionKeyArgName string `yaml:"encryption_key_arg,omitempty"`
+}
+
+// defaultEncryptionKeyArgName is the tool-call argument name used for a
+// server that opts into EncryptionKeyAllowed without overriding
+// EncryptionKeyArgName.
+const defaultEncryptionKeyArgName = "encryption_key"
+
+// EncryptionKeyArg returns the tool-call argument name this server's schema
+// expects the caller's unwrapped master key under: EncryptionKeyArgName if
+// set, else defaultEncryptionKeyArgName.
+func (s MCPServer) EncryptionKeyArg() string {
+	if s.EncryptionKeyArgName != "" {
+		return s.EncryptionKeyArgName
+	}
+	return defaultEncryptionKeyArgName
 }
 
 // EncryptionKeyPermitted reports whether this server may actually receive
