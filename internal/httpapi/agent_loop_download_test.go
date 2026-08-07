@@ -43,6 +43,24 @@ func TestParseDownloadFileResult_IgnoresInjectedFileIDInFilename(t *testing.T) {
 	require.Equal(t, "real-owner-file-id", df.fileID, "the genuine, first-seen file_id must win over an injected later line")
 }
 
+// The sandbox stages a fresh file_id on every download_file call even for
+// the same underlying file (see downloadFileHandler in
+// miranda-code-execution-sandbox), so a model re-downloading the file it
+// just produced must not surface two chips for what the user sees as one
+// file.
+func TestTurnControl_HasDownloadedFile_DedupesByFilenameSizeMime(t *testing.T) {
+	control := &turnControl{}
+	first := downloadedFile{fileID: "f1", filename: "image.png", sizeBytes: 512, mimeType: "image/png"}
+	require.False(t, control.hasDownloadedFile(first))
+	control.downloadedFiles = append(control.downloadedFiles, first)
+
+	second := downloadedFile{fileID: "f2", filename: "image.png", sizeBytes: 512, mimeType: "image/png"}
+	require.True(t, control.hasDownloadedFile(second), "a second call for the same filename/size/mime must be recognized as a duplicate")
+
+	different := downloadedFile{fileID: "f3", filename: "other.png", sizeBytes: 512, mimeType: "image/png"}
+	require.False(t, control.hasDownloadedFile(different))
+}
+
 func TestRenderDownloadMarkersForChannel_WebUIPassesThroughRaw(t *testing.T) {
 	text := "Here you go." + appendDownloadMarkers("", []downloadedFile{{fileID: "f1", filename: "a.txt", sizeBytes: 10}})
 	got := renderDownloadMarkersForChannel(text, webUISource)

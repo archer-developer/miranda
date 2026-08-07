@@ -43,6 +43,17 @@ type turnControl struct {
 	downloadedFiles []downloadedFile
 }
 
+// hasDownloadedFile reports whether df matches a file already recorded this
+// turn by filename/size/mime — see executeTool's dedup comment.
+func (c *turnControl) hasDownloadedFile(df downloadedFile) bool {
+	for _, existing := range c.downloadedFiles {
+		if existing.filename == df.filename && existing.sizeBytes == df.sizeBytes && existing.mimeType == df.mimeType {
+			return true
+		}
+	}
+	return false
+}
+
 // downloadedFile captures the metadata the sandbox's download_file MCP tool
 // reports in its result text (see downloadFileHandler in
 // ../../miranda-code-execution-sandbox/internal/mcpserver/sessions.go).
@@ -902,7 +913,20 @@ func (o *Orchestrator) executeTool(ctx context.Context, userID string, tc llm.To
 	// appendDownloadMarkers to inject into the final reply.
 	if o.sandboxDownloadToolName != "" && tc.Name == o.sandboxDownloadToolName {
 		if df, ok := parseDownloadFileResult(result); ok {
-			control.downloadedFiles = append(control.downloadedFiles, df)
+			// The sandbox stages a brand-new file_id on every download_file
+			// call, even for the identical session_id/path (see
+			// downloadFileHandler in miranda-code-execution-sandbox) — so a
+			// model that calls it twice for what is, to the user, obviously
+			// the same file (e.g. re-downloading the image it just
+			// generated) would otherwise get two separate chips for one
+			// result. filename+size+mime is the only signal available here
+			// (session_id/path aren't part of the tool's result text), but
+			// two genuinely different files sharing all three is not a real
+			// case worth worrying about. The second file_id is still staged
+			// and valid, just not surfaced as its own marker.
+			if !control.hasDownloadedFile(df) {
+				control.downloadedFiles = append(control.downloadedFiles, df)
+			}
 			if o.attachStore != nil {
 				o.attachStore.Put(attachments.Record{
 					UserID:   userID,
