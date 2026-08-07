@@ -77,10 +77,11 @@ type WebAuthnService interface {
 // KeyringService is the subset of *keyring.Service the dashboard needs to
 // unlock/lock a user's master key around login/logout, and to add a newly
 // registered passkey's wrapped-key slot — see internal/keyring and
-// docs/encryption.md for the full design. A nil KeyringService passed to
-// New disables the feature entirely (config.KeyringConfig.Enabled false,
-// the default): login/logout simply skip these calls, and the passkey
-// registration flow skips its PRF probe follow-up too.
+// docs/encryption.md for the full design. The keyring has no config
+// toggle — cmd/miranda always passes a real one — so a nil KeyringService
+// here only ever happens in tests that don't exercise it: login/logout
+// simply skip these calls, and the passkey registration flow skips its
+// PRF probe follow-up too.
 type KeyringService interface {
 	UnlockWithPassword(ctx context.Context, username, password string) error
 	UnlockWithPRF(ctx context.Context, username string, credentialID, prfOutput []byte) error
@@ -100,7 +101,7 @@ type Handler struct {
 	history         History
 	memory          Memory
 	webauthn        WebAuthnService // nil disables passkey login/registration entirely
-	keyring         KeyringService  // nil disables per-user data encryption entirely
+	keyring         KeyringService  // nil only in tests — cmd/miranda always passes a real one
 	users           *users.Registry
 	sessions        *session.Store
 	defaultLanguage string
@@ -150,8 +151,8 @@ func staticAssetVersion(fsys fs.FS) (string, error) {
 // never registered at all, and the frontend's own capability check
 // (window.PublicKeyCredential) keeps the passkey UI hidden; nothing in this
 // package needs a separate "is it enabled" branch beyond this one nil check.
-// keyringSvc may independently be nil (config.KeyringConfig.Enabled false,
-// the default) — see KeyringService's doc comment.
+// keyringSvc may independently be nil in tests that don't exercise it — see
+// KeyringService's doc comment.
 func New(h History, mem Memory, webauthnSvc WebAuthnService, keyringSvc KeyringService, usersRegistry *users.Registry, sessions *session.Store, defaultLanguage, avatarsDir string, logger *slog.Logger) (*Handler, error) {
 	indexTmpl, err := template.ParseFS(templatesFS, "templates/index.html")
 	if err != nil {

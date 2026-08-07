@@ -312,17 +312,16 @@ tucking the other one behind a single click.
 
 ### Data encryption
 
-Optional per-user encryption for data handed to external MCP tools — today
-the [miranda-diary](https://github.com/archer-developer/miranda-diary)
+Always-on per-user encryption for data handed to external MCP tools —
+today the [miranda-diary](https://github.com/archer-developer/miranda-diary)
 tool, but not tied to it specifically. Builds on passkey login above: a
 random master key is generated once per user and unlocked in memory at
 login, via a registered passkey's WebAuthn PRF output and/or your password
 as a fallback — never via the same hash your password is checked against.
+There's nothing to turn on for the keyring itself; what you do configure is
+which MCP servers are allowed to receive the key:
 
 ```yaml
-keyring:
-  enabled: true
-
 mcp:
   servers:
     - name: diary

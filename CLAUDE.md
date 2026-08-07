@@ -232,8 +232,11 @@ unrelated to each other — see git history for the incident.
 
 ### Data encryption (keyring)
 
-Optional (`config.KeyringConfig.Enabled`, default false — same posture as
-`webauthn`, independent toggle) per-user encryption for data handed to
+Always on — no config toggle, unlike `webauthn`/`telegram` (an earlier
+version gated this behind `keyring.enabled`, off by default; that let a
+user's first-ever login predate the feature and left them stuck with no
+master key until a later password login happened to bootstrap one — see
+git history) — per-user encryption for data handed to
 external MCP tools, starting with the diary MCP tool
 (`github.com/archer-developer/miranda-diary`) but designed to generalize.
 `internal/keyring` implements the key-wrapping model 1Password/FileVault/

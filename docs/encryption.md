@@ -8,8 +8,17 @@ deep-dive; see `CLAUDE.md`'s "Data encryption (keyring)" section for a short
 pointer back here, and `README.md`'s "Data encryption" subsection for the
 user-facing config walkthrough.
 
-Off by default (`keyring.enabled: false`) — same "no safe auto-default,
-deliberate opt-in" posture as `webauthn.enabled`/`telegram.enabled`.
+Always on — no config toggle. Unlike `webauthn.enabled`/`telegram.enabled`
+(deliberate opt-in, since those need a deployment-specific secret/URL to be
+safe to turn on), the keyring itself needs nothing deployment-specific to
+default on safely; what stays opt-in is which MCP servers are trusted to
+receive the unwrapped key (`mcp.servers[].encryption_key_allowed`, below).
+An earlier version gated the whole feature behind `keyring.enabled` — off
+by default — which meant a user's very first login could predate the
+feature being turned on, leaving them with no master key until a later
+password login happened to bootstrap one. Making it unconditional removes
+that edge case entirely: every user gets a key from their first login,
+always.
 
 ## Threat model
 
@@ -83,7 +92,7 @@ sequenceDiagram
     participant Cache as keyring.Cache (in-memory)
     participant Store as keyring.Store (SQLite)
 
-    Note over U,Store: Bootstrap — first-ever login after the feature is enabled
+    Note over U,Store: Bootstrap — this user's first-ever login
     U->>WebUI: log in (password or PRF-capable passkey)
     WebUI->>KR: UnlockWithPassword / UnlockWithPRF
     KR->>Store: CountSlots == 0?
@@ -109,7 +118,7 @@ sequenceDiagram
 ```
 
 If K isn't unlocked at the moment a user tries to add a new passkey (e.g.
-the feature was just turned on and this is the very first thing they do,
+registering a passkey is the very first thing a brand-new user does,
 before any password/PRF login has bootstrapped K yet), `AddPasskeySlot`
 refuses with `ErrNotUnlocked` rather than minting its own K — this
 preserves the single-mint invariant above. The web UI should tell the user
@@ -233,14 +242,15 @@ ceremony scoped to just the new credential:
   fix to `FinishRegistration`'s return value; the credential ID was already
   in scope, just never surfaced before this feature needed it).
 
-This is designed to **fail soft**: a probe failure (no PRF support, the
-ceremony errors, `keyring.enabled` is false so the routes aren't even
-registered) must never be treated as the passkey registration itself
+This is designed to **fail soft**: a probe failure (no PRF support, or the
+ceremony errors) must never be treated as the passkey registration itself
 having failed — that already succeeded before the probe ever runs. The
-routes themselves are only registered when *both* `webauthn.enabled` and
-`keyring.enabled` are true (`internal/webui/webui.go`'s `New`); with
-`keyring.enabled` false, `registerPasskey()`'s probe call just gets a 404
-and returns `false`, same as any other soft failure.
+routes themselves are only registered when `webauthn.enabled` is true
+(`internal/webui/webui.go`'s `New` — the keyring service it's handed is
+never nil outside of tests, so in practice this is the only gate that
+matters); if a caller ever does pass a nil `KeyringService`,
+`registerPasskey()`'s probe call just gets a 404 and returns `false`, same
+as any other soft failure.
 
 ## MCP whitelist + HTTPS gating (`internal/mcp`, `internal/config`)
 
@@ -344,17 +354,16 @@ second encryption-aware MCP server whose schema might differ.
 
 | Field | Default | Notes |
 |---|---|---|
-| `keyring.enabled` | `false` | Opt-in; independent of `webauthn.enabled` — a deployment can run passkeys without data encryption, or vice versa (though PRF-based unlock obviously needs a registered passkey too). |
 | `storage.keyring_sqlite_path` | `./data/keyring.db` | Back up at least as carefully as `storage.sqlite_path`. |
-| `mcp.servers[].encryption_key_allowed` | `false` | Requires the same server's `url` to start with `https://`, checked at both config-load and connection time. |
+| `mcp.servers[].encryption_key_allowed` | `false` | Requires the same server's `url` to start with `https://`, checked at both config-load and connection time. Still independent of `webauthn.enabled` — a deployment can run passkeys without any server marked `encryption_key_allowed`, or vice versa (though PRF-based unlock obviously needs a registered passkey too). |
 
 ## Known limitations / open risks
 
-- **A user whose very first authenticated action after enabling this
-  feature is a passkey login without PRF support** (an older authenticator,
-  or a browser lacking the extension) has no way to get a master key until
-  their next *password* login — worth a UI hint on the profile/security
-  screen ("log in with your password once to enable encryption").
+- **A user whose very first authenticated action is a passkey login
+  without PRF support** (an older authenticator, or a browser lacking the
+  extension) has no way to get a master key until their next *password*
+  login — worth a UI hint on the profile/security screen ("log in with
+  your password once to enable encryption").
 - **No "change password" flow exists anywhere in this codebase today**
   (passwords are set via `config.yaml`'s `password_hash`/`go run
   ./cmd/hashpw`, not a web UI flow). Whoever adds one later must hook it to

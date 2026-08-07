@@ -279,12 +279,13 @@ func (o *Orchestrator) SetSandboxDownload(toolName string, recordTTL time.Durati
 	o.downloadRecordTTL = recordTTL
 }
 
-// SetKeyring wires the optional per-user data-encryption keyring in,
-// mirroring SetTelegram/SetSchedule's post-construction style — call it
-// once from cmd/miranda after constructing a keyring.Service, only when
-// config.KeyringConfig.Enabled. Leaving it uncalled (the default) means
-// executeTool never injects an encryption_key argument into any MCP tool
-// call, even for a whitelisted, https-only server — see docs/encryption.md.
+// SetKeyring wires the per-user data-encryption keyring in, mirroring
+// SetTelegram/SetSchedule's post-construction style — cmd/miranda always
+// calls this once at startup, since the keyring has no config toggle (see
+// internal/keyring). Leaving it uncalled — only ever true in tests that
+// don't need it — means executeTool never injects an encryption_key
+// argument into any MCP tool call, even for a whitelisted, https-only
+// server — see docs/encryption.md.
 func (o *Orchestrator) SetKeyring(k *keyring.Service) {
 	o.keyring = k
 }
@@ -292,11 +293,8 @@ func (o *Orchestrator) SetKeyring(k *keyring.Service) {
 // SetEncryptionKeyAllowedServers wires in the static, config-derived set of
 // MCP server names permitted to receive a user's unwrapped master key — call
 // it once from cmd/miranda with a map built from every config.MCPServer's
-// EncryptionKeyPermitted(), independent of config.KeyringConfig.Enabled (it's
-// harmless to compute even when the keyring feature itself is off, since
-// executeTool only ever consults this when o.keyring is also non-nil).
-// Leaving it uncalled (the default, a nil map) means every server reads as
-// not-allowed.
+// EncryptionKeyPermitted(). Leaving it uncalled (the default, a nil map)
+// means every server reads as not-allowed.
 func (o *Orchestrator) SetEncryptionKeyAllowedServers(allowed map[string]bool) {
 	o.encryptionKeyAllowed = allowed
 }

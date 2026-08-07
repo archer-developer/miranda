@@ -267,22 +267,16 @@ func run(cfg config.Config, logger *slog.Logger, eventHub *hub.Hub) error {
 		webauthnSvc = svc
 	}
 
-	// keyringService stays nil (config.Keyring.Enabled false, the default).
-	// Kept as a concrete *keyring.Service (not an interface) here, unlike
-	// webauthnSvc above, because Orchestrator.SetKeyring takes the concrete
-	// type directly (matching SetSchedule/SetAttachmentStore's convention)
-	// and a plain nil *keyring.Service is safe to store/check there; only
-	// the webui.New call below needs the typed-nil-interface trick, for the
-	// same reason webauthnSvc does.
-	var keyringService *keyring.Service
-	if cfg.Keyring.Enabled {
-		keyringStore, err := keyring.Open(cfg.Storage.KeyringSQLitePath)
-		if err != nil {
-			return fmt.Errorf("main: configure keyring: %w", err)
-		}
-		defer func() { _ = keyringStore.Close() }()
-		keyringService = keyring.NewService(keyringStore, keyring.NewCache())
+	// The keyring is always on (no config toggle — see internal/keyring) so
+	// that a user's data-encryption key is available from their very first
+	// login, regardless of when this feature shipped relative to their
+	// account's creation.
+	keyringStore, err := keyring.Open(cfg.Storage.KeyringSQLitePath)
+	if err != nil {
+		return fmt.Errorf("main: configure keyring: %w", err)
 	}
+	defer func() { _ = keyringStore.Close() }()
+	keyringService := keyring.NewService(keyringStore, keyring.NewCache())
 
 	tgClient, tgChats, tgSecret, err := setupTelegram(cfg.Telegram, cfg.Storage, logger)
 	if err != nil {
@@ -306,9 +300,7 @@ func run(cfg config.Config, logger *slog.Logger, eventHub *hub.Hub) error {
 	if ttsHAClient != nil {
 		orchestrator.SetSpeakerHA(ttsHAClient)
 	}
-	if cfg.Keyring.Enabled {
-		orchestrator.SetKeyring(keyringService)
-	}
+	orchestrator.SetKeyring(keyringService)
 	orchestrator.SetEncryptionKeyAllowedServers(encryptionKeyAllowedServers(cfg.MCP.Servers, logger))
 
 	// File upload is opt-in (Enabled defaults false). Resolve config early
@@ -338,17 +330,9 @@ func run(cfg config.Config, logger *slog.Logger, eventHub *hub.Hub) error {
 		orchestrator.SetSandboxDownload(mcp.PrefixedToolName(cfg.FileUpload.SandboxMCPServerName, "download_file"), downloadRecordTTL)
 	}
 
-	// Same typed-nil-interface shape as webauthnSvc above, and for the same
-	// reason: webui.New's "keyringSvc != nil" check needs a true nil
-	// interface, not a non-nil interface wrapping a nil *keyring.Service.
-	var keyringForWebUI webui.KeyringService
-	if keyringService != nil {
-		keyringForWebUI = keyringService
-	}
-
 	var webHandler http.Handler
 	if cfg.WebUI.Enabled {
-		wh, err := webui.New(historyStore, memoryStore, webauthnSvc, keyringForWebUI, usersRegistry, sessions, cfg.WebUI.DefaultLanguage, cfg.Storage.AvatarsDir, logger)
+		wh, err := webui.New(historyStore, memoryStore, webauthnSvc, keyringService, usersRegistry, sessions, cfg.WebUI.DefaultLanguage, cfg.Storage.AvatarsDir, logger)
 		if err != nil {
 			return err
 		}

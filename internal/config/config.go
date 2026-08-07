@@ -28,7 +28,6 @@ type Config struct {
 	WebAuthn   WebAuthnConfig   `yaml:"webauthn"`
 	Telegram   TelegramConfig   `yaml:"telegram"`
 	Schedule   ScheduleConfig   `yaml:"schedule"`
-	Keyring    KeyringConfig    `yaml:"keyring"`
 	FileUpload FileUploadConfig `yaml:"file_upload"`
 	Users      []UserConfig     `yaml:"users"`
 }
@@ -100,8 +99,9 @@ type StorageConfig struct {
 	// optional SQLite files above, losing this one is data-loss-equivalent
 	// to losing every piece of data encrypted under it — back it up at
 	// least as carefully as SQLitePath, not as an afterthought like
-	// ScheduleSQLitePath/WebAuthnSQLitePath. Only used when
-	// KeyringConfig.Enabled is true.
+	// ScheduleSQLitePath/WebAuthnSQLitePath. The keyring itself is always
+	// on (no config toggle — see internal/keyring), so this path is always
+	// in use.
 	KeyringSQLitePath string `yaml:"keyring_sqlite_path"`
 	// TTSCacheDir is where the gemini_tts provider's content-addressed,
 	// permanent (no TTL/expiry — see internal/tts/cache.go) rendered-audio
@@ -198,18 +198,6 @@ type TelegramConfig struct {
 // Telegram/WebAuthn, this needs no deployment-specific secret or URL to
 // turn on, so Enabled defaults to true (opt-out, not opt-in).
 type ScheduleConfig struct {
-	Enabled bool `yaml:"enabled"`
-}
-
-// KeyringConfig controls optional per-user data encryption (see
-// internal/keyring, and docs/encryption.md for the full design): a random
-// master key per user, wrapped independently under every WebAuthn
-// passkey's PRF output and/or a password-derived KDF fallback, and made
-// available (only in memory, never persisted) to whitelisted, HTTPS-only
-// MCP servers via MCPServer.EncryptionKeyAllowed. Opt-in (Enabled defaults
-// false) — independent of WebAuthnConfig, since a deployment may want
-// passkey login without also turning on data encryption.
-type KeyringConfig struct {
 	Enabled bool `yaml:"enabled"`
 }
 
@@ -444,7 +432,7 @@ type MCPServer struct {
 	TokenEnv string `yaml:"token_env,omitempty"`
 	Enabled  bool   `yaml:"enabled"`
 	// EncryptionKeyAllowed opts this server into receiving the calling
-	// user's unwrapped master key (see KeyringConfig, internal/keyring) as
+	// user's unwrapped master key (see internal/keyring) as
 	// a tool-call argument — e.g. a diary MCP server that encrypts entries
 	// at rest. Only takes effect when URL is "https://" (see
 	// EncryptionKeyPermitted) — validated at config-load time
@@ -786,12 +774,6 @@ func Default() Config {
 		},
 		Schedule: ScheduleConfig{
 			Enabled: true,
-		},
-		// Disabled by default, same posture as WebAuthnConfig — this is a
-		// security-sensitive feature a deployment should turn on
-		// deliberately, not something safe to default on.
-		Keyring: KeyringConfig{
-			Enabled: false,
 		},
 		FileUpload: FileUploadConfig{
 			// Opt-in, same posture as Telegram/WebAuthn — requires a
