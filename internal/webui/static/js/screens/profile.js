@@ -207,17 +207,19 @@ export function mount(container) {
                that also collapses its space to zero when closed. -->
           <div id="add-passkey-form" class="grid grid-rows-[0fr] transition-[grid-template-rows] duration-200 ease-out">
             <div class="overflow-hidden">
-              <div class="mb-4 flex flex-wrap gap-2 pt-1">
+              <div class="mb-4 flex flex-col gap-2 pt-1">
                 <input id="passkey-nickname" type="text" placeholder="${t("profile_passkey_nickname_placeholder", "e.g. iPhone")}"
-                  class="min-w-0 flex-1 rounded-lg border border-(--color-border-strong) bg-(--color-bg) px-3 py-2 text-sm placeholder:text-(--color-text-faint) focus:border-(--color-accent-emphasis) focus:outline-none focus-visible:outline-none" />
-                <button id="passkey-confirm" type="button"
-                  class="shrink-0 rounded-lg bg-(--color-accent) px-3.5 py-2 text-sm font-medium text-white transition-colors hover:bg-(--color-accent-hover) focus-visible:outline-none disabled:cursor-not-allowed disabled:opacity-60">
-                  ${t("profile_add_passkey_button", "Add passkey on this device")}
-                </button>
-                <button id="passkey-cancel" type="button"
-                  class="shrink-0 rounded-lg px-3 py-2 text-sm font-medium text-(--color-text-faint) transition-colors hover:bg-(--color-surface-2) focus-visible:outline-none">
-                  ${t("profile_add_passkey_cancel", "Cancel")}
-                </button>
+                  class="w-full min-w-0 rounded-lg border border-(--color-border-strong) bg-(--color-bg) px-3 py-2 text-sm placeholder:text-(--color-text-faint) focus:border-(--color-accent-emphasis) focus:outline-none focus-visible:outline-none" />
+                <div class="flex flex-wrap gap-2">
+                  <button id="passkey-confirm" type="button"
+                    class="shrink-0 rounded-lg bg-(--color-accent) px-3.5 py-2 text-sm font-medium text-white transition-colors hover:bg-(--color-accent-hover) focus-visible:outline-none disabled:cursor-not-allowed disabled:opacity-60">
+                    ${t("profile_add_passkey_button", "Add passkey on this device")}
+                  </button>
+                  <button id="passkey-cancel" type="button"
+                    class="shrink-0 rounded-lg px-3 py-2 text-sm font-medium text-(--color-text-faint) transition-colors hover:bg-(--color-surface-2) focus-visible:outline-none">
+                    ${t("profile_add_passkey_cancel", "Cancel")}
+                  </button>
+                </div>
               </div>
             </div>
           </div>
