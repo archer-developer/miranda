@@ -6,6 +6,7 @@ import { t } from "../i18n.js";
 import { icon } from "../icons.js";
 import * as chatWs from "../chat-ws.js";
 import { formatFileSize, extractDownloadBlocks, downloadChip } from "../downloads.js";
+import { renderInlineText } from "../inline-text.js";
 
 let messagesEl, scrollEl, formEl, textEl, sendBtn, fileInput, attachBtn, attachChip, unsubscribeWs, unsubscribeReconnect;
 // Non-null while a file upload XHR is in flight — aborted by clearAttachment().
@@ -220,7 +221,7 @@ function bubble(role, text, timeIso) {
       role === "user"
         ? "max-w-[85%] whitespace-pre-wrap rounded-2xl rounded-br-md bg-(--color-accent) px-4 py-2.5 text-sm leading-relaxed text-white sm:max-w-[75%]"
         : "max-w-[85%] whitespace-pre-wrap rounded-2xl rounded-bl-md border border-(--color-border) bg-(--color-surface)/70 px-4 py-2.5 text-sm leading-relaxed text-(--color-text) sm:max-w-[75%]";
-    b.textContent = displayText;
+    renderInlineText(b, displayText);
     wrap.appendChild(b);
   }
 

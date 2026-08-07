@@ -4,6 +4,7 @@
 import { t } from "../i18n.js";
 import { icon } from "../icons.js";
 import { extractDownloadBlocks, downloadChip } from "../downloads.js";
+import { renderInlineText } from "../inline-text.js";
 
 let listEl;
 
@@ -55,11 +56,13 @@ function renderMessages(container, messages) {
       downloads = extracted.downloads;
     }
 
-    // Content is untrusted user/assistant text — set via textContent, never
-    // interpolated into innerHTML, so it can never be interpreted as markup.
+    // Content is untrusted user/assistant text — rendered via renderInlineText
+    // (textContent/createTextNode only, never interpolated into innerHTML), so
+    // it can never be interpreted as markup beyond the one backtick-code-span
+    // construct that function explicitly handles.
     const contentSpan = document.createElement("span");
     contentSpan.className = "min-w-0 flex-1 whitespace-pre-wrap text-(--color-text-muted)";
-    contentSpan.textContent = content;
+    renderInlineText(contentSpan, content);
 
     row.append(roleSpan, contentSpan);
     line.appendChild(row);
