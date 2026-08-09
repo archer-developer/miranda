@@ -194,10 +194,6 @@ file_upload:
   sandbox_mcp_server_name: code_exec_sandbox # must match a name in mcp.servers above; download direction only
   public_base_url: "http://192.168.1.50:8787"
   max_file_size_bytes: 52428800 # 50 MB — same as the sandbox's staged_files default
-  # How long internal/filestage.Cache remembers a file already re-staged to
-  # a given file_staging_allowed server for a given conversation, before a
-  # later reference re-uploads it. Defaults to 24 hours.
-  # restage_cache_ttl_hours: 24
 
 tts:
   # yandex_station_text (Yandex Station's own built-in voice — the default,

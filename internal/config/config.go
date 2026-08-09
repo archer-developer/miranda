@@ -214,8 +214,11 @@ type ScheduleConfig struct {
 type FileUploadConfig struct {
 	// Enabled activates POST /api/upload, GET /files/{id}, GET
 	// /api/files/{file_id}, and attachment processing in the agent loop.
-	// Requires PublicBaseURL to be set (checked at startup); SandboxMCPServerName
-	// is only required if downloads are to work.
+	// Requires both PublicBaseURL and SandboxMCPServerName to be set
+	// (checked at startup, cmd/miranda) — even though SandboxMCPServerName
+	// is only actually used for the download direction, main.go resolves
+	// it unconditionally whenever Enabled is true, so an upload-only setup
+	// still needs a valid entry there.
 	Enabled bool `yaml:"enabled"`
 	// SandboxMCPServerName is the name of an MCP server entry in
 	// MCPConfig.Servers whose URL hosts the sandbox's file transfer API —

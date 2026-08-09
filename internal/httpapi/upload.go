@@ -188,9 +188,12 @@ func (s *Server) handleFilesServe(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if rec.Data == nil {
-		// Shouldn't happen for an upload-staged record (handleUpload always
-		// buffers Data) — only a download_file ownership record omits it,
-		// and those aren't reachable through this id space by construction.
+		// A download_file ownership record (see executeTool) lives in this
+		// same attachStore map, just under a different id — its FileID is
+		// never nil, so a lookup here can genuinely find one. It never has
+		// Data, so this guard is what turns that into a 404 rather than
+		// serving an empty body or leaking that a metadata-only record
+		// exists under that id.
 		http.Error(w, "not found", http.StatusNotFound)
 		return
 	}
@@ -223,10 +226,10 @@ func (s *Server) handleFilesServe(w http.ResponseWriter, r *http.Request) {
 // record (rec.UserID == ""), the same fail-closed default processAttachments
 // applies for an anonymous bearer-token upload.
 //
-// Unlike handleUpload, the staged file on the sandbox side is NOT deleted by
-// this GET (mirroring the sandbox's own GET /files/{id} semantics — see that
-// repo's CLAUDE.md), so a dropped connection or retry can re-fetch the same
-// file_id until the sandbox's own TTL sweeper removes it.
+// The staged file on the sandbox side is NOT deleted by this GET (mirroring
+// the sandbox's own GET /files/{id} semantics — see that repo's CLAUDE.md),
+// so a dropped connection or retry can re-fetch the same file_id until the
+// sandbox's own TTL sweeper removes it.
 func (s *Server) handleDownload(w http.ResponseWriter, r *http.Request) {
 	sessionUser, ok := s.authorize(r)
 	if !ok {
