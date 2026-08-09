@@ -259,7 +259,7 @@ function clearMessages() {
 function buildAttachChip(filename) {
   const chip = document.createElement("div");
   chip.className =
-    "flex w-fit flex-col gap-1.5 rounded-lg border border-(--color-border) bg-(--color-surface)/80 px-3 py-2 text-xs text-(--color-text-muted)";
+    "flex w-fit flex-col gap-1.5 rounded-lg border border-(--color-border) bg-(--color-surface)/80 px-3 py-2 mt-2 text-xs text-(--color-text-muted)";
 
   // Top row: invisible spacer | filename (centred) | × button.
   // The spacer mirrors the button's width so the name is truly centred.
