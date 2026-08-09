@@ -202,3 +202,13 @@ func TestMCPServer_EncryptionKeyArg(t *testing.T) {
 	require.Equal(t, "encryption_key", MCPServer{}.EncryptionKeyArg(), "defaults when unset")
 	require.Equal(t, "record_encryption_key", MCPServer{EncryptionKeyArgName: "record_encryption_key"}.EncryptionKeyArg(), "override wins")
 }
+
+func TestMCPServer_FilesEndpoint(t *testing.T) {
+	url, token, err := MCPServer{Name: "medical_card", URL: "https://127.0.0.1:8791/mcp", TokenEnv: "NONEXISTENT_TEST_TOKEN_ENV"}.FilesEndpoint()
+	require.NoError(t, err)
+	require.Equal(t, "https://127.0.0.1:8791/files", url)
+	require.Equal(t, "", token)
+
+	_, _, err = MCPServer{Name: "bad", URL: "https://127.0.0.1:8791/not-mcp"}.FilesEndpoint()
+	require.Error(t, err)
+}

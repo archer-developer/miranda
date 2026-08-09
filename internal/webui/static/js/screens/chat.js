@@ -5,7 +5,7 @@
 import { t } from "../i18n.js";
 import { icon } from "../icons.js";
 import * as chatWs from "../chat-ws.js";
-import { formatFileSize, extractDownloadBlocks, downloadChip } from "../downloads.js";
+import { extractDownloadBlocks, downloadChip, extractAttachmentBlocks, attachmentChip } from "../downloads.js";
 import { renderInlineText } from "../inline-text.js";
 
 let messagesEl, scrollEl, formEl, textEl, sendBtn, fileInput, attachBtn, attachChip, unsubscribeWs, unsubscribeReconnect;
@@ -124,79 +124,6 @@ function uploadWithProgress(file, onProgress) {
   });
 }
 
-/**
- * Strip file-content blocks that processAttachments (internal/httpapi/attachments.go)
- * injects into the stored user message text, and return a list of attachment
- * descriptors to render as compact chips instead of raw content.
- *
- * Three patterns are produced server-side:
- *   text files  →  \n\n<file:NAME>\nCONTENT\n</file>
- *   images      →  \n\n[Изображение: "NAME" (MIME)]
- *   binary blobs→  \n\nФайл "NAME" (MIME, SIZE байт) загружен в sandbox … программно.
- * A fourth pattern appears when the file_id has expired or is invalid:
- *   missing     →  \n\n[Файл "NAME" не найден — …]
- */
-function extractFileAttachments(text) {
-  const chips = [];
-  let clean = text;
-
-  clean = clean.replace(/\n\n<file:([^>]+)>[\s\S]*?<\/file>/g, (_, filename) => {
-    chips.push({ filename });
-    return "";
-  });
-
-  clean = clean.replace(/\n\n\[Изображение: "([^"]+)" \([^)]+\)\]/g, (_, filename) => {
-    chips.push({ filename });
-    return "";
-  });
-
-  clean = clean.replace(
-    /\n\nФайл "([^"]+)" \([^)]*,\s*(\d+) байт\) загружен в sandbox[\s\S]*?программно\./g,
-    (_, filename, size) => {
-      chips.push({ filename, size: parseInt(size, 10) });
-      return "";
-    },
-  );
-
-  clean = clean.replace(/\n\n\[Файл "[^"]+" не найден[^\]]*\]/g, "");
-
-  return { displayText: clean.trim(), chips };
-}
-
-/** A file attachment shown inside a user bubble in place of the raw content.
- * Images render as a 100×100 thumbnail; other files render as a compact chip. */
-function attachmentChip(filename, size, previewDataURL) {
-  const el = document.createElement("div");
-  if (previewDataURL) {
-    el.className = "mb-1 flex flex-col gap-0.5";
-    const img = document.createElement("img");
-    img.src = previewDataURL;
-    img.alt = filename;
-    img.className = "h-[120px] w-[120px] rounded-xl object-cover";
-    el.appendChild(img);
-    const caption = document.createElement("span");
-    caption.className = "max-w-[200px] truncate text-xs text-white/60";
-    caption.textContent = filename;
-    el.appendChild(caption);
-  } else {
-    el.className =
-      "mb-1 flex items-center gap-1.5 rounded-lg border border-white/20 bg-white/10 px-2.5 py-1 text-xs text-white/75";
-    // icon() returns our own trusted SVG — safe to set via innerHTML.
-    el.innerHTML = icon("paperclip", "h-3 w-3 shrink-0 opacity-60");
-    const nameSpan = document.createElement("span");
-    nameSpan.className = "max-w-[200px] truncate";
-    nameSpan.textContent = filename;
-    el.appendChild(nameSpan);
-    if (size != null) {
-      const sizeSpan = document.createElement("span");
-      sizeSpan.className = "shrink-0 opacity-60";
-      sizeSpan.textContent = `· ${formatFileSize(size)}`;
-      el.appendChild(sizeSpan);
-    }
-  }
-  return el;
-}
-
 function bubble(role, text, timeIso) {
   const wrap = document.createElement("div");
   wrap.className = `flex flex-col ${role === "user" ? "items-end" : "items-start"}`;
@@ -204,10 +131,10 @@ function bubble(role, text, timeIso) {
   let displayText = text;
   let downloads = [];
   if (role === "user") {
-    const { displayText: dt, chips } = extractFileAttachments(text);
+    const { displayText: dt, attachments } = extractAttachmentBlocks(text);
     displayText = dt;
-    for (const { filename, size } of chips) {
-      wrap.appendChild(attachmentChip(filename, size));
+    for (const { filename, sizeBytes } of attachments) {
+      wrap.appendChild(attachmentChip(filename, sizeBytes ?? null));
     }
   } else if (role === "assistant") {
     const { displayText: dt, downloads: dl } = extractDownloadBlocks(text);

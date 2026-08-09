@@ -3,16 +3,38 @@
 // hour) so the owning turn can retrieve the bytes when building the LLM
 // prompt, then evicted automatically by a background sweeper.
 //
-// Only files that can be inlined into the prompt (images for vision, text for
-// context) have their Data bytes stored; binary blobs and PDFs are processed
-// entirely inside the sandbox and are represented here only by metadata
-// (Data == nil).
+// Every upload-staged record keeps its raw Data bytes, regardless of MIME
+// type: images/text are inlined into the prompt from it, and binary blobs
+// (PDFs, archives, ...) are served back out of it on demand by
+// internal/httpapi's GET /files/{id} route — Miranda is the canonical host
+// for an uploaded file's bytes, and hands the model a URI under that route
+// rather than pushing the bytes anywhere itself (see
+// docs/file-staging-refactor.md). The one exception is a download_file
+// *ownership* record (set by executeTool, not by an upload) — that only
+// ever needs UserID for an access check, so it never populates Data.
 package attachments
 
 import (
+	"crypto/rand"
+	"encoding/hex"
+	"fmt"
 	"sync"
 	"time"
 )
+
+// NewFileID generates a fresh, unguessable id for a newly-staged attachment
+// — the id space GET /files/{id} (internal/httpapi's handleFilesServe)
+// serves from, and by extension the only "credential" that route checks
+// (see its own doc comment). Mirrors internal/telegram.RandomSecret's exact
+// pattern: 24 random bytes, hex-encoded, well beyond brute-force range for
+// the record's TTL-bounded lifetime.
+func NewFileID() (string, error) {
+	b := make([]byte, 24)
+	if _, err := rand.Read(b); err != nil {
+		return "", fmt.Errorf("attachments: generate file id: %w", err)
+	}
+	return hex.EncodeToString(b), nil
+}
 
 // defaultTTL is how long a record lives in the store before the sweeper
 // removes it. One hour is generous enough to cover a slow typist who
@@ -27,20 +49,24 @@ type Record struct {
 	// user so one household member cannot reference another member's
 	// file_id in their own InputRequest.Attachments.
 	UserID string
-	// FileID is the opaque ID the sandbox assigned to the uploaded file,
-	// used to reference it in subsequent upload_file MCP tool calls.
+	// FileID is Miranda's own opaque id for the uploaded file (see
+	// NewFileID), served back out at GET /files/{id} and used to build the
+	// fileURI the model sees for it.
 	FileID string
 	// Filename is the original client-provided filename, shown to the
-	// model in the context annotation (e.g. "<file:readme.txt>").
+	// model in the context annotation (e.g. "<file:readme.txt>") and set as
+	// GET /files/{id}'s Content-Disposition.
 	Filename string
 	// MIMEType is the file's detected MIME type.
 	MIMEType string
-	// Size is the file's byte length as reported by the sandbox.
+	// Size is the file's byte length.
 	Size int64
-	// Data holds the buffered file bytes for providers that inline content
-	// (images for vision, text for context injection). Nil for binary
-	// blobs and PDFs that the sandbox processes, which are accessed via
-	// FileID rather than inlined into the prompt.
+	// Data holds the buffered file bytes: inlined directly into the prompt
+	// for providers that support it (images for vision, text for context
+	// injection), and/or served back out on demand at GET /files/{id} to
+	// whichever external tool the model handed the resulting fileURI to
+	// (see package doc comment). Nil only for a download_file
+	// ownership record, which never had bytes of its own to buffer.
 	Data []byte
 	// TTL overrides the store's default TTL for this one record when
 	// non-zero. Upload-staging records rely on the store default (built for

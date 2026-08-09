@@ -201,32 +201,38 @@ type ScheduleConfig struct {
 	Enabled bool `yaml:"enabled"`
 }
 
-// FileUploadConfig controls the optional POST /api/upload and
-// GET /api/files/{file_id} endpoints and client-side file attachment/download
-// support in the web UI — both directions of file transfer with the sandbox's
-// "/files" HTTP namespace share this one config block. Opt-in (Enabled
-// defaults false) because it requires a configured sandbox MCP server to
-// proxy uploads/downloads to.
+// FileUploadConfig controls the optional POST /api/upload, GET /files/{id},
+// and GET /api/files/{file_id} endpoints and client-side file
+// attachment/download support in the web UI. Upload and download are two
+// independent paths sharing this one config block for historical reasons,
+// not because they still share a mechanism: an upload is staged locally
+// (internal/attachments.Store) and served back out over GET /files/{id}
+// under PublicBaseURL (see docs/file-staging-refactor.md); a download still
+// proxies to the sandbox's own GET /files/{id} via SandboxMCPServerName,
+// unchanged. Opt-in (Enabled defaults false) since there's no safe
+// auto-detected default for either.
 type FileUploadConfig struct {
-	// Enabled activates POST /api/upload, GET /api/files/{file_id}, and
-	// attachment processing in the agent loop. Requires SandboxMCPServerName
-	// to be set.
+	// Enabled activates POST /api/upload, GET /files/{id}, GET
+	// /api/files/{file_id}, and attachment processing in the agent loop.
+	// Requires PublicBaseURL to be set (checked at startup); SandboxMCPServerName
+	// is only required if downloads are to work.
 	Enabled bool `yaml:"enabled"`
 	// SandboxMCPServerName is the name of an MCP server entry in
-	// MCPConfig.Servers whose URL hosts the sandbox's file transfer API.
-	// The files endpoint URL is derived by replacing the "/mcp" suffix of
-	// that server's URL with "/files" — e.g.
-	// "http://192.168.1.50:8788/mcp" → "http://192.168.1.50:8788/files".
-	// The same server's TokenEnv is used to authenticate both upload and
-	// download requests, and this same name is what SetSandboxDownload
-	// namespaces the download_file MCP tool name against.
+	// MCPConfig.Servers whose URL hosts the sandbox's file transfer API —
+	// used only for the download direction (GET /api/files/{file_id}
+	// proxying a download_file result back to the browser). The files
+	// endpoint URL is derived by replacing the "/mcp" suffix of that
+	// server's URL with "/files" — e.g. "http://192.168.1.50:8788/mcp" →
+	// "http://192.168.1.50:8788/files". The same server's TokenEnv
+	// authenticates the download request, and this same name is what
+	// SetSandboxDownload namespaces the download_file MCP tool name
+	// against.
 	SandboxMCPServerName string `yaml:"sandbox_mcp_server_name"`
 	// MaxFileSizeBytes is the maximum size of a single uploaded file.
-	// Defaults to 50 MB. Applies both to the /api/upload read limit and
-	// to what Miranda proxies to the sandbox. Downloads are bounded
-	// separately, by the sandbox's own max_download_size_bytes — a
-	// download_file call already rejects an oversized file before Miranda
-	// ever proxies a GET /api/files/{file_id} for it.
+	// Defaults to 50 MB. Applies to the /api/upload read limit. Downloads
+	// are bounded separately, by the sandbox's own max_download_size_bytes
+	// — a download_file call already rejects an oversized file before
+	// Miranda ever proxies a GET /api/files/{file_id} for it.
 	MaxFileSizeBytes int64 `yaml:"max_file_size_bytes"`
 	// DownloadRecordTTLHours is how long a download_file ownership record
 	// (internal/attachments.Store, Record.TTL) stays valid before
@@ -238,6 +244,19 @@ type FileUploadConfig struct {
 	// window than the store's own short upload-oriented default TTL.
 	// Defaults to 720 hours (30 days).
 	DownloadRecordTTLHours int `yaml:"download_record_ttl_hours"`
+	// PublicBaseURL is the base URL other backend services (the sandbox,
+	// miranda-medical-card, ...) can reach Miranda's own GET /files/{id}
+	// route through — e.g. "http://192.168.1.50:8787". This is what a
+	// tool's own fileUri argument (see docs/file-staging-refactor.md) is
+	// built from: Miranda stages an uploaded attachment's bytes locally
+	// (internal/attachments.Store) and hands the model a URI under this
+	// base, rather than pushing bytes anywhere itself — whichever tool the
+	// model calls with that URI is responsible for fetching it. Mirrors
+	// TTSConfig's gemini_tts.PublicBaseURL, which solves the identical
+	// problem (a LAN device fetching a Miranda-hosted resource by URL) for
+	// synthesized audio — required (checked at startup) whenever Enabled is
+	// true, the same way gemini_tts checks it at the point of use.
+	PublicBaseURL string `yaml:"public_base_url"`
 }
 
 // LoggingConfig controls file logging: the general application log (a
@@ -481,6 +500,24 @@ func (s MCPServer) EncryptionKeyArg() string {
 // means.
 func (s MCPServer) EncryptionKeyPermitted() bool {
 	return s.EncryptionKeyAllowed && strings.HasPrefix(s.URL, "https://")
+}
+
+// FilesEndpoint returns the HTTP endpoint URL and bearer token for this
+// server's file-transfer API: the server's own URL with its "/mcp" suffix
+// replaced by "/files", authenticated with the same TokenEnv-resolved token
+// as its MCP connection. Used by Config.SandboxFilesURL to build the
+// sandbox's own download proxy URL (see internal/httpapi's handleDownload)
+// — the sandbox protects its GET /files/{id} with the same bearer token as
+// /mcp, not a separate one.
+func (s MCPServer) FilesEndpoint() (filesURL, token string, err error) {
+	if !strings.HasSuffix(s.URL, "/mcp") {
+		return "", "", fmt.Errorf("config: mcp server %q url %q does not end with /mcp — cannot derive files endpoint", s.Name, s.URL)
+	}
+	filesURL = strings.TrimSuffix(s.URL, "/mcp") + "/files"
+	if s.TokenEnv != "" {
+		token = os.Getenv(s.TokenEnv)
+	}
+	return filesURL, token, nil
 }
 
 // MCPConfig lists the MCP servers (HA + others) available as tool sources.
@@ -831,14 +868,7 @@ func (c *Config) SandboxFilesURL() (filesURL, token string, err error) {
 	}
 	for _, s := range c.MCP.Servers {
 		if s.Name == c.FileUpload.SandboxMCPServerName {
-			if !strings.HasSuffix(s.URL, "/mcp") {
-				return "", "", fmt.Errorf("config: sandbox MCP server %q URL %q does not end with /mcp — cannot derive files endpoint", s.Name, s.URL)
-			}
-			filesURL = strings.TrimSuffix(s.URL, "/mcp") + "/files"
-			if s.TokenEnv != "" {
-				token = os.Getenv(s.TokenEnv)
-			}
-			return filesURL, token, nil
+			return s.FilesEndpoint()
 		}
 	}
 	return "", "", fmt.Errorf("config: no MCP server named %q found in mcp.servers", c.FileUpload.SandboxMCPServerName)

@@ -1,12 +1,20 @@
-// Shared helpers for rendering <download>{json}</download> markers that
-// appendDownloadMarkers (internal/httpapi/agent_loop.go) deterministically
-// appends to an assistant reply whenever the model retrieved a file from a
-// sandbox session via download_file — injected server-side regardless of
-// what the model's own text says, so any screen displaying message content
-// always shows a working link. Used by both screens/chat.js (the live
-// conversation) and screens/history.js (the read-only dialog browser) so a
-// past conversation containing a download renders a chip there too, instead
-// of the raw marker text.
+// Shared helpers for rendering server-injected file markers — both
+// <download>{json}</download> (appendDownloadMarkers,
+// internal/httpapi/agent_loop.go, appended to an assistant reply whenever
+// the model retrieved a file from a sandbox session via download_file) and
+// <attachment>{json}</attachment> (appendAttachmentMarker,
+// internal/httpapi/attachments.go, appended to a user message for every
+// uploaded attachment). Both are injected server-side regardless of what
+// the message's own text says, so any screen displaying message content
+// always shows a working chip instead of raw marker text — deliberately a
+// structured, boundary-delimited tag rather than something derived from
+// matching specific prose: an earlier version of the attachment side tried
+// to regex-match an exact Russian sentence describing the file, which
+// silently broke (chip disappeared, raw instructional text leaked into the
+// bubble instead) the moment that sentence's wording changed elsewhere.
+// Used by both screens/chat.js (the live conversation) and
+// screens/history.js (the read-only dialog browser) so a past conversation
+// renders chips there too, instead of raw marker text.
 import { icon } from "./icons.js";
 
 /** Format a byte count as a short human-readable string ("1.2 MB", "340 KB", "12 B"). */
@@ -62,6 +70,82 @@ export function downloadChip(fileId, filename, size) {
     sizeSpan.className = "shrink-0 opacity-60";
     sizeSpan.textContent = `· ${formatFileSize(size)}`;
     el.appendChild(sizeSpan);
+  }
+  return el;
+}
+
+/**
+ * Strip everything processAttachments (internal/httpapi/attachments.go)
+ * appends for an uploaded attachment — the <attachment>{json}</attachment>
+ * marker itself (one line of JSON: {filename, mime_type, size_bytes, uri,
+ * note}), plus the LLM-facing content blocks that accompany it
+ * (<file:name>...</file> for inlined text, "[Изображение: ...]" for
+ * images, or the "[Файл ... не найден ...]" notice when the referenced
+ * file_id was invalid/expired) — none of these are meant for a human to
+ * read verbatim in the chat UI. Returns the cleaned text plus one
+ * descriptor per <attachment> marker to render as a chip instead.
+ */
+export function extractAttachmentBlocks(text) {
+  const attachments = [];
+  let clean = text;
+
+  clean = clean.replace(/\n\n<attachment>([\s\S]*?)<\/attachment>/g, (_, json) => {
+    try {
+      const data = JSON.parse(json);
+      attachments.push({
+        filename: data.filename,
+        mimeType: data.mime_type,
+        sizeBytes: data.size_bytes,
+        uri: data.uri,
+      });
+    } catch {
+      // Malformed marker (shouldn't happen — server-generated): drop it
+      // rather than showing raw JSON in the bubble.
+    }
+    return "";
+  });
+
+  clean = clean.replace(/\n\n<file:[^>]+>[\s\S]*?<\/file>/g, "");
+  clean = clean.replace(/\n\n\[Изображение: "[^"]+" \([^)]+\)\]/g, "");
+  clean = clean.replace(/\n\n\[Файл "[^"]+" не найден[^\]]*\]/g, "");
+
+  return { displayText: clean.trim(), attachments };
+}
+
+/** A file attachment shown inside a user bubble in place of the raw
+ * content it was uploaded from — see extractAttachmentBlocks. Images
+ * render as a thumbnail when previewDataURL is available (only ever true
+ * for the client's own just-sent attachment, from its local blob — a
+ * reloaded/historical message has no local pixels to show and always
+ * renders the compact chip instead), other files as a compact chip. */
+export function attachmentChip(filename, size, previewDataURL) {
+  const el = document.createElement("div");
+  if (previewDataURL) {
+    el.className = "mb-1 flex flex-col gap-0.5";
+    const img = document.createElement("img");
+    img.src = previewDataURL;
+    img.alt = filename;
+    img.className = "h-[120px] w-[120px] rounded-xl object-cover";
+    el.appendChild(img);
+    const caption = document.createElement("span");
+    caption.className = "max-w-[200px] truncate text-xs text-white/60";
+    caption.textContent = filename;
+    el.appendChild(caption);
+  } else {
+    el.className =
+      "mb-1 flex items-center gap-1.5 rounded-lg border border-white/20 bg-white/10 px-2.5 py-1 text-xs text-white/75";
+    // icon() returns our own trusted SVG — safe to set via innerHTML.
+    el.innerHTML = icon("paperclip", "h-3 w-3 shrink-0 opacity-60");
+    const nameSpan = document.createElement("span");
+    nameSpan.className = "max-w-[200px] truncate";
+    nameSpan.textContent = filename;
+    el.appendChild(nameSpan);
+    if (size != null) {
+      const sizeSpan = document.createElement("span");
+      sizeSpan.className = "shrink-0 opacity-60";
+      sizeSpan.textContent = `· ${formatFileSize(size)}`;
+      el.appendChild(sizeSpan);
+    }
   }
   return el;
 }

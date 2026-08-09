@@ -1,7 +1,6 @@
 package httpapi
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -9,18 +8,12 @@ import (
 	"mime"
 	"mime/multipart"
 	"net/http"
-	"net/textproto"
 	"net/url"
 	"strings"
 	"time"
 
 	"github.com/archer-developer/miranda/internal/attachments"
 )
-
-// sandboxUploadTimeout caps how long handleUpload will wait for the sandbox
-// to accept and stage the file. The sandbox may be under CPU/IO pressure from
-// concurrent container execs; 60 seconds is generous but still bounded.
-const sandboxUploadTimeout = 60 * time.Second
 
 // sandboxDownloadTimeout caps how long handleDownload will wait on the
 // sandbox, including the time spent streaming the body back to the caller —
@@ -34,8 +27,8 @@ const sandboxUploadTimeout = 60 * time.Second
 const sandboxDownloadTimeout = 30 * time.Minute
 
 // UploadResponse is the JSON body POST /api/upload returns to the web UI on
-// a successful upload. It mirrors the sandbox's POST /files response shape so
-// the client can store the file_id for inclusion in a subsequent
+// a successful upload: Miranda's own attachStore-assigned file_id (see
+// attachments.NewFileID), for the client to include in a subsequent
 // InputRequest.Attachments list.
 type UploadResponse struct {
 	FileID    string `json:"file_id"`
@@ -44,9 +37,13 @@ type UploadResponse struct {
 	MIMEType  string `json:"mime_type"`
 }
 
-// handleUpload proxies a multipart file upload to the sandbox, caches the
-// result in the orchestrator's attachment store, and returns the sandbox-
-// assigned file_id to the caller.
+// handleUpload reads a multipart file upload straight into the
+// orchestrator's attachment store — Miranda is the file's canonical host
+// now, it never forwards the bytes anywhere at upload time (see
+// docs/file-staging-refactor.md). processAttachments later turns the
+// returned file_id into a fileURI under
+// config.FileUploadConfig.PublicBaseURL that any tool needing the bytes
+// fetches for itself via a plain HTTP GET.
 //
 // Auth: same dual bearer-token / session-cookie check as /api/v1/input.
 // Content-Type: multipart/form-data; the file must be in a field named "file".
@@ -138,105 +135,68 @@ func (s *Server) handleUpload(w http.ResponseWriter, r *http.Request) {
 		partMIME = mt
 	}
 
-	// Forward to the sandbox with a bounded timeout so a stalled sandbox
-	// doesn't hold this goroutine indefinitely.
-	uploadCtx, cancel := context.WithTimeout(r.Context(), sandboxUploadTimeout)
-	defer cancel()
-
-	sandboxResp, err := s.forwardToSandbox(uploadCtx, filename, partMIME, fileBytes)
+	fileID, err := attachments.NewFileID()
 	if err != nil {
-		s.logger.Error("upload: sandbox forward failed", "error", err, "filename", filename)
-		http.Error(w, "failed to upload file to sandbox: "+err.Error(), http.StatusBadGateway)
+		s.logger.Error("upload: generate file id failed", "error", err)
+		http.Error(w, "failed to generate file id", http.StatusInternalServerError)
 		return
 	}
 
-	// Cache the file data for the upcoming turn. Images and text files have
-	// their bytes stored for inlining into the prompt; binary blobs (including
-	// PDFs) are referenced only by file_id — the sandbox handles them.
-	// UserID is bound to the record so processAttachments can reject a
-	// different user's attempt to reference this file_id.
+	// Bytes are buffered for as long as the record's TTL allows — not just
+	// for inlining into the prompt (images for vision, text for context),
+	// but so GET /files/{id} (handleFilesServe) can serve them to whichever
+	// external tool the model hands the resulting fileURI to (see
+	// docs/file-staging-refactor.md). UserID is bound to the record so
+	// processAttachments rejects a different user's attempt to reference
+	// this file_id.
 	rec := attachments.Record{
 		UserID:   sessionUser,
-		FileID:   sandboxResp.FileID,
-		Filename: sandboxResp.Filename,
-		MIMEType: sandboxResp.MIMEType,
-		Size:     sandboxResp.SizeBytes,
-	}
-	if shouldBufferData(sandboxResp.MIMEType) {
-		rec.Data = fileBytes
+		FileID:   fileID,
+		Filename: filename,
+		MIMEType: partMIME,
+		Size:     int64(len(fileBytes)),
+		Data:     fileBytes,
 	}
 	s.orchestrator.attachStore.Put(rec)
 
+	resp := UploadResponse{FileID: fileID, Filename: filename, SizeBytes: rec.Size, MIMEType: partMIME}
 	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(*sandboxResp)
+	_ = json.NewEncoder(w).Encode(resp)
 }
 
-// forwardToSandbox sends the file bytes to the sandbox's POST /files endpoint
-// and returns the parsed response on success. ctx is used as the request
-// context so the caller's sandboxUploadTimeout deadline is enforced.
-//
-// mimeType is forwarded as the file part's Content-Type rather than letting
-// multipart.Writer default to application/octet-stream — the sandbox prefers
-// the browser-detected type over content-sniffing for its MIME response field,
-// which processAttachments later uses to decide whether to inline or sandbox-route.
-func (s *Server) forwardToSandbox(ctx context.Context, filename, mimeType string, data []byte) (*UploadResponse, error) {
-	var reqBody bytes.Buffer
-	mw := multipart.NewWriter(&reqBody)
-
-	// Use CreatePart (not CreateFormFile) so we can set a custom Content-Type.
-	// CreateFormFile hardcodes application/octet-stream for every part,
-	// discarding the browser-detected mimeType entirely.
-	h := make(textproto.MIMEHeader)
-	h.Set("Content-Disposition", fmt.Sprintf(`form-data; name="file"; filename=%q`, filename))
-	h.Set("Content-Type", mimeType)
-	fw, err := mw.CreatePart(h)
-	if err != nil {
-		return nil, fmt.Errorf("create form part: %w", err)
+// handleFilesServe serves a locally-staged attachment's raw bytes at
+// GET /files/{id} — the endpoint any external MCP server's tool fetches a
+// fileURI from (see docs/file-staging-refactor.md and
+// config.FileUploadConfig.PublicBaseURL). Deliberately unauthenticated,
+// mirroring internal/tts.HTTPHandler's GET /tts-audio/{filename} (the same
+// "a LAN service needs to fetch a Miranda-hosted resource by URL" problem,
+// already solved there the same way): the id's own randomness
+// (attachments.NewFileID, crypto/rand-backed) plus the store's TTL is the
+// security boundary, not a session or bearer token — this route serves
+// backend services pulling a file they were handed a capability URL for,
+// not a user's browser (that's the separate, authenticated
+// GET /api/files/{file_id} — see handleDownload).
+func (s *Server) handleFilesServe(w http.ResponseWriter, r *http.Request) {
+	if s.orchestrator.attachStore == nil {
+		http.Error(w, "file staging is not configured", http.StatusNotImplemented)
+		return
 	}
-	if _, err := fw.Write(data); err != nil {
-		return nil, fmt.Errorf("write form part: %w", err)
+	id := r.PathValue("id")
+	rec, found := s.orchestrator.attachStore.Get(id)
+	if !found {
+		http.Error(w, "not found", http.StatusNotFound)
+		return
 	}
-	if err := mw.Close(); err != nil {
-		return nil, fmt.Errorf("close multipart writer: %w", err)
+	if rec.Data == nil {
+		// Shouldn't happen for an upload-staged record (handleUpload always
+		// buffers Data) — only a download_file ownership record omits it,
+		// and those aren't reachable through this id space by construction.
+		http.Error(w, "not found", http.StatusNotFound)
+		return
 	}
-
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, s.upload.sandboxURL, &reqBody)
-	if err != nil {
-		return nil, fmt.Errorf("build request: %w", err)
-	}
-	req.Header.Set("Content-Type", mw.FormDataContentType())
-	if s.upload.sandboxToken != "" {
-		req.Header.Set("Authorization", "Bearer "+s.upload.sandboxToken)
-	}
-
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("send request: %w", err)
-	}
-	defer func() { _ = resp.Body.Close() }()
-
-	// Sandbox returns 201 Created on success (per NewFileUploadHandler).
-	if resp.StatusCode != http.StatusCreated {
-		errBody, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
-		return nil, fmt.Errorf("sandbox returned HTTP %d: %s", resp.StatusCode, strings.TrimSpace(string(errBody)))
-	}
-
-	var result UploadResponse
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return nil, fmt.Errorf("decode sandbox response: %w", err)
-	}
-	return &result, nil
-}
-
-// shouldBufferData reports whether the file's raw bytes should be kept in the
-// in-memory attachments.Store for inline prompt injection (images for vision,
-// text for context) or discarded after forwarding to the sandbox.
-//
-// Delegates to isTextMIME and mimeTypePrefix (defined in attachments.go, same
-// package) so a new text-like MIME type added to isTextMIME is automatically
-// buffered here without a separate edit — the two functions stay in sync.
-func shouldBufferData(mimeType string) bool {
-	return isTextMIME(mimeType) || mimeTypePrefix(mimeType) == "image"
+	w.Header().Set("Content-Type", rec.MIMEType)
+	w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=%q", rec.Filename))
+	_, _ = w.Write(rec.Data)
 }
 
 // handleDownload proxies a GET request for a file the model retrieved from a

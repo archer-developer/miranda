@@ -262,6 +262,77 @@ both config-load and startup, held on `Orchestrator` rather than
 `mcp.Manager` since it's static config data, not connection state), and
 known limitations (no recovery-key mechanism, no change-password hook yet).
 
+### File staging (attachments → external MCP services)
+
+The backend, not the model, moves file bytes it must never ask the model to
+relay through its own text context — but unlike the encryption-key
+injection above, this is a **pull** model, not a push: Miranda hosts the
+file itself and hands the model a URI; whichever tool needs the bytes
+fetches them itself over a plain HTTP GET. Optional
+(`config.FileUploadConfig.Enabled`, default false).
+
+An earlier version of this pushed bytes to whichever server the model
+referenced (backend-side `POST /files`, mirroring the encryption-key
+argument-injection pattern). It failed at the first real-world retry: the
+model called a *different* tool on the same target server that accepted
+raw bytes directly (`miranda-medical-card`'s `medical.upload_file`, `data`
+argument) instead of the one the push mechanism intercepted, reproducing
+the exact hallucination bug this exists to prevent — nothing short of
+removing every raw-bytes-accepting tool closes that gap for good, which is
+what the current design does. See **`docs/file-staging-refactor.md`** for
+the full incident writeup (both the original bug and this one) and why the
+push design was abandoned rather than patched further.
+
+How it actually works: `POST /api/upload` (`internal/httpapi/upload.go`)
+stages a file straight into `internal/attachments.Store` — Miranda never
+forwards it anywhere — generating its own id via `attachments.NewFileID()`
+(mirrors `internal/telegram.RandomSecret`'s pattern: 24 random bytes, hex).
+`processAttachments` builds a `fileURI` from it
+(`PublicBaseURL + "/files/" + fileID`) and includes it in the prompt for
+every attachment, not just binary/PDF ones — an inlined image or text file
+still gets a URI too, in case a tool needs the file itself rather than just
+what got inlined. The one explicit instruction to the model: never try to
+construct or embed a file's bytes in a tool call, always pass this address
+instead.
+
+`GET /files/{id}` (`handleFilesServe`) is what any external tool fetches
+that address from — deliberately **unauthenticated**, the same design
+already used by `internal/tts/httpserve.go`'s `GET /tts-audio/{filename}`
+for the identical problem (a LAN device needs to fetch a Miranda-hosted
+resource by URL): the id's own randomness plus the store's TTL is the
+security boundary, not a token. `config.FileUploadConfig.PublicBaseURL`
+mirrors `TTSConfig`'s `gemini_tts.PublicBaseURL` for the same reason —
+`cmd/miranda` refuses to start with file upload enabled and no
+`public_base_url` set. This route is distinct from the pre-existing,
+*authenticated* `GET /api/files/{file_id}` (`handleDownload`), which is
+unrelated and untouched: that one proxies a file the sandbox's
+`download_file` tool produced back out to the user's own browser, the
+opposite direction from what this section covers.
+
+The upshot for any external MCP server that wants to receive a
+Miranda-hosted file: its own upload-shaped tool must take a `fileUri`
+argument and fetch it itself, not accept raw bytes as an argument at all —
+there is deliberately no tool left for the model to hallucinate content
+into. See `docs/file-staging-refactor.md`'s contract section for exactly
+what that means for the sandbox's and miranda-medical-card's own tool
+schemas (implemented in their own repos, not here).
+
+The web UI's chat/history screens must never show this LLM-facing text
+verbatim to a human. `processAttachments` appends one
+`<attachment>{json}</attachment>` marker per attachment (fields: filename,
+mime_type, size_bytes, uri, note) — `internal/webui/static/js/downloads.js`'s
+`extractAttachmentBlocks` (shared by `screens/chat.js` and
+`screens/history.js`, mirroring how `extractDownloadBlocks` already shares
+`<download>` marker parsing between the same two screens) strips it and
+renders a chip instead. Deliberately a structured, boundary-delimited tag
+rather than something the client regex-matches out of specific prose: an
+earlier version tried exactly that (matching an exact Russian sentence),
+and it silently broke — chip disappeared, raw instructional text leaked
+into the bubble — the moment that sentence's wording changed elsewhere in
+the same diff. The marker's `note` field is still human/model-readable
+prose (with the real URI substituted in), but the client never parses it —
+only the JSON shape is load-bearing for rendering.
+
 ### Scheduled tasks
 
 Optional (`config.ScheduleConfig.Enabled`, default **true** — unlike
@@ -504,6 +575,11 @@ whitelisted server's calls (`MCPServer.EncryptionKeyAllowed`, see "Data
 encryption (keyring)" above) get a real `encryption_key` argument injected
 server-side, invisibly to the model — it never appears in what the model
 itself generated for that tool call, only on the wire to that one server.
+File staging (see "File staging" above) is a different shape of the same
+underlying goal — keeping real bytes out of the model's own output — but
+not an invisible backend substitution: the model itself passes the
+`fileURI` it was given verbatim, and the *target server* fetches the bytes,
+not Miranda.
 
 ### Web UI surface
 

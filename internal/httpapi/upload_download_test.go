@@ -1,7 +1,10 @@
 package httpapi
 
 import (
+	"bytes"
+	"encoding/json"
 	"io"
+	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -166,4 +169,97 @@ func TestHandleDownload_NilAttachStoreFailsClosed(t *testing.T) {
 	require.NoError(t, err)
 	defer resp.Body.Close()
 	require.Equal(t, http.StatusInternalServerError, resp.StatusCode, "must fail closed, not silently skip the ownership check, when attachStore is nil")
+}
+
+// GET /files/{id} (handleFilesServe) is the new, deliberately unauthenticated
+// route external MCP servers pull an uploaded attachment's bytes from — see
+// docs/file-staging-refactor.md. Distinct from GET /api/files/{file_id}
+// (handleDownload) tested above.
+
+func TestHandleFilesServe_ServesKnownFile(t *testing.T) {
+	provider := llmtest.New("local")
+	o, _, _ := newTestOrchestrator(t, provider)
+	store := attachments.NewStore(time.Hour)
+	t.Cleanup(store.Close)
+	o.SetAttachmentStore(store)
+	store.Put(attachments.Record{FileID: "abc123", Filename: "scan.pdf", MIMEType: "application/pdf", Data: []byte("%PDF-bytes")})
+
+	server := NewServer(o, o.hub, "", nil, nil, nil, nil)
+	server.SetUploadHandler("http://unused.invalid", "", 0)
+	ts := httptest.NewServer(server)
+	defer ts.Close()
+
+	resp, err := http.Get(ts.URL + "/files/abc123")
+	require.NoError(t, err)
+	defer resp.Body.Close()
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+	require.Equal(t, "application/pdf", resp.Header.Get("Content-Type"))
+	body, _ := io.ReadAll(resp.Body)
+	require.Equal(t, "%PDF-bytes", string(body))
+}
+
+func TestHandleFilesServe_UnknownIDReturns404(t *testing.T) {
+	provider := llmtest.New("local")
+	o, _, _ := newTestOrchestrator(t, provider)
+	store := attachments.NewStore(time.Hour)
+	t.Cleanup(store.Close)
+	o.SetAttachmentStore(store)
+
+	server := NewServer(o, o.hub, "", nil, nil, nil, nil)
+	server.SetUploadHandler("http://unused.invalid", "", 0)
+	ts := httptest.NewServer(server)
+	defer ts.Close()
+
+	resp, err := http.Get(ts.URL + "/files/does-not-exist")
+	require.NoError(t, err)
+	defer resp.Body.Close()
+	require.Equal(t, http.StatusNotFound, resp.StatusCode)
+}
+
+// TestHandleUpload_StagesLocallyWithoutForwardingAnywhere guards the actual
+// point of this refactor: POST /api/upload must never make an outbound
+// request (the sandboxURL passed to SetUploadHandler here is deliberately
+// unreachable — if handleUpload tried to forward to it, this test would
+// fail on a connection error, not silently pass), and the returned file_id
+// must be immediately fetchable back from GET /files/{id}.
+func TestHandleUpload_StagesLocallyWithoutForwardingAnywhere(t *testing.T) {
+	provider := llmtest.New("local")
+	o, _, _ := newTestOrchestrator(t, provider)
+	store := attachments.NewStore(time.Hour)
+	t.Cleanup(store.Close)
+	o.SetAttachmentStore(store)
+
+	server := NewServer(o, o.hub, "", nil, nil, nil, nil)
+	server.SetUploadHandler("http://127.0.0.1:1/unreachable", "", 10<<20)
+	ts := httptest.NewServer(server)
+	defer ts.Close()
+
+	var body bytes.Buffer
+	mw := multipart.NewWriter(&body)
+	fw, err := mw.CreateFormFile("file", "scan.pdf")
+	require.NoError(t, err)
+	_, err = fw.Write([]byte("%PDF-bytes"))
+	require.NoError(t, err)
+	require.NoError(t, mw.Close())
+
+	req, err := http.NewRequest(http.MethodPost, ts.URL+"/api/upload", &body)
+	require.NoError(t, err)
+	req.Header.Set("Content-Type", mw.FormDataContentType())
+
+	resp, err := http.DefaultClient.Do(req)
+	require.NoError(t, err)
+	defer resp.Body.Close()
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+
+	var uploadResp UploadResponse
+	require.NoError(t, json.NewDecoder(resp.Body).Decode(&uploadResp))
+	require.NotEmpty(t, uploadResp.FileID)
+	require.Equal(t, "scan.pdf", uploadResp.Filename)
+
+	filesResp, err := http.Get(ts.URL + "/files/" + uploadResp.FileID)
+	require.NoError(t, err)
+	defer filesResp.Body.Close()
+	require.Equal(t, http.StatusOK, filesResp.StatusCode)
+	got, _ := io.ReadAll(filesResp.Body)
+	require.Equal(t, "%PDF-bytes", string(got))
 }

@@ -175,16 +175,29 @@ mcp:
     #   encryption_key_allowed: true
 
 # Optional file upload support for the web UI — lets users attach files before
-# sending a message. Off by default because it requires the sandbox MCP server
-# (mcp.servers above) to be running with sessions enabled; that's what provides
-# the POST /files HTTP endpoint Miranda proxies uploads through.
-# Miranda derives the sandbox's upload URL from the named server's URL by
-# replacing the /mcp suffix with /files (e.g. "http://127.0.0.1:8788/mcp"
-# → "http://127.0.0.1:8788/files"), so the server's URL must end with /mcp.
+# sending a message. Miranda stages an uploaded file's bytes locally
+# (internal/attachments.Store) and hands the model a fileURI under
+# public_base_url (e.g. "http://192.168.1.50:8787/files/<id>") rather than
+# pushing the bytes anywhere itself — whichever tool the model calls with
+# that URI is responsible for fetching it over a plain HTTP GET (see
+# docs/file-staging-refactor.md). public_base_url must be reachable by every
+# service whose tools might need to fetch an uploaded file this way (the
+# sandbox, miranda-medical-card, ...), not just by the browser.
+#
+# sandbox_mcp_server_name is unrelated to uploads — it's still used for the
+# other direction, GET /api/files/{file_id} proxying a file the sandbox's
+# download_file tool produced back out to the browser (Miranda derives that
+# proxy URL from the named server's URL by replacing the /mcp suffix with
+# /files, so that server's URL must end with /mcp).
 file_upload:
   enabled: true
-  sandbox_mcp_server_name: code_exec_sandbox # must match a name in mcp.servers above
+  sandbox_mcp_server_name: code_exec_sandbox # must match a name in mcp.servers above; download direction only
+  public_base_url: "http://192.168.1.50:8787"
   max_file_size_bytes: 52428800 # 50 MB — same as the sandbox's staged_files default
+  # How long internal/filestage.Cache remembers a file already re-staged to
+  # a given file_staging_allowed server for a given conversation, before a
+  # later reference re-uploads it. Defaults to 24 hours.
+  # restage_cache_ttl_hours: 24
 
 tts:
   # yandex_station_text (Yandex Station's own built-in voice — the default,

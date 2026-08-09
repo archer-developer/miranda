@@ -216,6 +216,17 @@ type Orchestrator struct {
 	// Orchestrator instead of asking the connection manager to remember a
 	// static config fact. A server absent from the map is not permitted.
 	encryptionKeyAllowed map[string]string
+	// filesPublicBaseURL is set via SetFilesPublicBaseURL: the base URL
+	// other backend services (sandbox, medical-card, ...) can reach
+	// Miranda's own GET /files/{id} route through, e.g.
+	// "http://192.168.1.50:8787" — mirrors config.TTSConfig's
+	// gemini_tts.PublicBaseURL, which solves the identical problem (a LAN
+	// device needs to fetch a Miranda-hosted resource by URL) for
+	// synthesized audio. processAttachments uses this to build the fileURI
+	// handed to the model for each attachment — see
+	// docs/file-staging-refactor.md. Empty means no URI is ever included
+	// (file_upload.enabled is false, or public_base_url isn't configured).
+	filesPublicBaseURL string
 }
 
 // SetTelegram wires the optional send_telegram tool in, mirroring
@@ -301,6 +312,16 @@ func (o *Orchestrator) SetKeyring(k *keyring.Service) {
 // not-allowed.
 func (o *Orchestrator) SetEncryptionKeyAllowedServers(allowed map[string]string) {
 	o.encryptionKeyAllowed = allowed
+}
+
+// SetFilesPublicBaseURL wires in the base URL other backend services can
+// reach Miranda's own GET /files/{id} route through (see
+// config.FileUploadConfig.PublicBaseURL), mirroring SetAttachmentStore's
+// post-construction style — call once from cmd/miranda, only when
+// config.FileUploadConfig.Enabled. Leaving it uncalled (the default, "")
+// means processAttachments never includes a fileURI for any attachment.
+func (o *Orchestrator) SetFilesPublicBaseURL(url string) {
+	o.filesPublicBaseURL = url
 }
 
 // NewOrchestrator wires the agent loop's dependencies together.

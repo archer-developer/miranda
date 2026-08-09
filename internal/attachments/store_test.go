@@ -1,11 +1,24 @@
 package attachments
 
 import (
+	"regexp"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/require"
 )
+
+var hexFileIDPattern = regexp.MustCompile(`^[0-9a-f]{48}$`)
+
+func TestNewFileID_FormatAndUniqueness(t *testing.T) {
+	id1, err := NewFileID()
+	require.NoError(t, err)
+	require.Regexp(t, hexFileIDPattern, id1, "48 lowercase hex chars — 24 random bytes")
+
+	id2, err := NewFileID()
+	require.NoError(t, err)
+	require.NotEqual(t, id1, id2)
+}
 
 func TestStore_DefaultTTLEviction(t *testing.T) {
 	s := &Store{records: make(map[string]Record), ttl: time.Hour}

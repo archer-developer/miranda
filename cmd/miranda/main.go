@@ -328,6 +328,17 @@ func run(cfg config.Config, logger *slog.Logger, eventHub *hub.Hub) error {
 		// entry the sandbox is configured under.
 		downloadRecordTTL := time.Duration(cfg.FileUpload.DownloadRecordTTLHours) * time.Hour
 		orchestrator.SetSandboxDownload(mcp.PrefixedToolName(cfg.FileUpload.SandboxMCPServerName, "download_file"), downloadRecordTTL)
+
+		// Required for processAttachments to build a fileURI any tool can
+		// pull an upload's bytes from (see docs/file-staging-refactor.md) —
+		// same "fail fast at startup rather than silently serve broken
+		// URIs" reasoning as SandboxFilesURL's own error above, mirroring
+		// gemini_tts's identical PublicBaseURL requirement
+		// (internal/tts/gemini.go).
+		if cfg.FileUpload.PublicBaseURL == "" {
+			return fmt.Errorf("main: file_upload.public_base_url is not configured — other services have no way to fetch an uploaded file's bytes")
+		}
+		orchestrator.SetFilesPublicBaseURL(cfg.FileUpload.PublicBaseURL)
 	}
 
 	var webHandler http.Handler

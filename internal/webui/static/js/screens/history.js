@@ -3,7 +3,7 @@
 // them — see internal/webui.handleDialogs), click to expand messages.
 import { t } from "../i18n.js";
 import { icon } from "../icons.js";
-import { extractDownloadBlocks, downloadChip } from "../downloads.js";
+import { extractDownloadBlocks, downloadChip, extractAttachmentBlocks, attachmentChip } from "../downloads.js";
 import { renderInlineText } from "../inline-text.js";
 
 let listEl;
@@ -44,16 +44,24 @@ function renderMessages(container, messages) {
     roleSpan.className = `mt-0.5 shrink-0 text-xs font-medium ${m.role === "user" ? "text-(--color-text-muted)" : "text-(--color-accent-emphasis)"}`;
     roleSpan.textContent = m.role === "user" ? t("history_role_user", "You") : "Miranda";
 
-    // extractDownloadBlocks strips any <download>{json}</download> marker
-    // (internal/httpapi/agent_loop.go's appendDownloadMarkers) before display
-    // — otherwise a past conversation containing a download would show the
-    // raw JSON marker verbatim instead of a chip (see downloads.js).
+    // extractDownloadBlocks/extractAttachmentBlocks strip the server's
+    // <download>{json}</download> / <attachment>{json}</attachment>
+    // markers (internal/httpapi/agent_loop.go's appendDownloadMarkers,
+    // internal/httpapi/attachments.go's appendAttachmentMarker) before
+    // display — otherwise a past conversation containing a download or
+    // upload would show the raw marker/content-block text verbatim instead
+    // of a chip (see downloads.js).
     let content = m.content;
     let downloads = [];
+    let attachments = [];
     if (m.role === "assistant") {
       const extracted = extractDownloadBlocks(content);
       content = extracted.displayText;
       downloads = extracted.downloads;
+    } else if (m.role === "user") {
+      const extracted = extractAttachmentBlocks(content);
+      content = extracted.displayText;
+      attachments = extracted.attachments;
     }
 
     // Content is untrusted user/assistant text — rendered via renderInlineText
@@ -68,6 +76,9 @@ function renderMessages(container, messages) {
     line.appendChild(row);
     for (const { fileId, filename, sizeBytes } of downloads) {
       line.appendChild(downloadChip(fileId, filename, sizeBytes));
+    }
+    for (const { filename, sizeBytes } of attachments) {
+      line.appendChild(attachmentChip(filename, sizeBytes ?? null));
     }
     container.appendChild(line);
   }
