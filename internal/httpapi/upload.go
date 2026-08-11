@@ -210,11 +210,10 @@ func (s *Server) handleFilesServe(w http.ResponseWriter, r *http.Request) {
 // attachments.Record carrying the file's real address (RemoteURL) and the
 // bearer token to fetch it with (RemoteToken) under a Miranda-minted
 // file_id — this handler is what actually proxies the bytes through using
-// that record. The file_id path value is what appendDownloadMarkers
-// (internal/httpapi/agent_loop.go) embeds in a <download>...</download>
-// marker in the assistant's reply — the web UI chat screen (chat.js's
-// extractDownloadBlocks) turns that marker into a chip linking straight to
-// this route.
+// that record. The file_id is what executeTool (internal/httpapi/agent_loop.go)
+// puts in the assistant turn's structured Downloads list (see
+// history.Message.Downloads) — the web UI chat screen renders a chip from
+// that field pointing straight at this route.
 //
 // Auth: same dual bearer-token / session-cookie check as /api/v1/input and
 // POST /api/upload. The file's recorded owner (o.attachStore, populated by

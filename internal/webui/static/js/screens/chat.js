@@ -5,7 +5,7 @@
 import { t } from "../i18n.js";
 import { icon } from "../icons.js";
 import * as chatWs from "../chat-ws.js";
-import { extractDownloadBlocks, downloadChip, extractAttachmentBlocks, attachmentChip } from "../downloads.js";
+import { downloadChip, extractAttachmentBlocks, attachmentChip } from "../downloads.js";
 import { renderInlineText } from "../inline-text.js";
 
 let messagesEl, scrollEl, formEl, textEl, sendBtn, fileInput, attachBtn, attachChip, unsubscribeWs, unsubscribeReconnect;
@@ -56,9 +56,14 @@ let renderGeneration = 0;
  * always applied to GET /api/dialogs/{id} rows — tool-call/tool-result
  * turns (see internal/httpapi's recordAssistantToolCallMessage/
  * recordToolCall) are recorded and streamed over chat-ws.js too (for a
- * future debug view), but never rendered as chat bubbles. */
+ * future debug view), but never rendered as chat bubbles. A message with
+ * no text but a non-empty downloads list still counts — the
+ * turn-errored-after-a-successful-download recovery path in
+ * orchestrator.Handle records exactly that (empty content, downloads set),
+ * and it still needs its chip shown. */
 function isChatBubble(m) {
-  return (m.role === "user" || m.role === "assistant") && Boolean(m.content?.trim());
+  if (m.role !== "user" && m.role !== "assistant") return false;
+  return Boolean(m.content?.trim()) || (m.downloads?.length ?? 0) > 0;
 }
 
 function formatTime(iso) {
@@ -124,22 +129,20 @@ function uploadWithProgress(file, onProgress) {
   });
 }
 
-function bubble(role, text, timeIso) {
+/** downloads is the message's own structured file list (history.Message.Downloads /
+ * InputResponse.Downloads / ChatEvent.Message.Downloads) — an array of
+ * {file_id, filename, size_bytes, mime_type}, never parsed out of text. */
+function bubble(role, text, timeIso, downloads) {
   const wrap = document.createElement("div");
   wrap.className = `flex flex-col ${role === "user" ? "items-end" : "items-start"}`;
 
   let displayText = text;
-  let downloads = [];
   if (role === "user") {
     const { displayText: dt, attachments } = extractAttachmentBlocks(text);
     displayText = dt;
     for (const { filename, sizeBytes } of attachments) {
       wrap.appendChild(attachmentChip(filename, sizeBytes ?? null));
     }
-  } else if (role === "assistant") {
-    const { displayText: dt, downloads: dl } = extractDownloadBlocks(text);
-    displayText = dt;
-    downloads = dl;
   }
 
   if (displayText) {
@@ -152,8 +155,8 @@ function bubble(role, text, timeIso) {
     wrap.appendChild(b);
   }
 
-  for (const { fileId, filename, sizeBytes } of downloads) {
-    wrap.appendChild(downloadChip(fileId, filename, sizeBytes));
+  for (const { file_id, filename, size_bytes } of downloads ?? []) {
+    wrap.appendChild(downloadChip(file_id, filename, size_bytes ?? null));
   }
 
   if (timeIso) {
@@ -410,7 +413,7 @@ function upsertMessage(message) {
   }
 
   messagesEl.querySelector("[data-empty-state]")?.remove();
-  const node = bubble(message.role, message.content, message.created_at);
+  const node = bubble(message.role, message.content, message.created_at, message.downloads);
   messagesEl.appendChild(node);
   rendered.set(message.id, node);
   scrollToBottom();
@@ -454,7 +457,7 @@ async function loadHistory() {
         messagesEl.appendChild(emptyState());
       } else {
         for (const m of chatMessages) {
-          const node = bubble(m.role, m.content, m.created_at);
+          const node = bubble(m.role, m.content, m.created_at, m.downloads);
           messagesEl.appendChild(node);
           rendered.set(m.id, node);
         }
@@ -563,7 +566,7 @@ async function send(text) {
       // HTTP response (e.g. a slow/dropped response body) — if it already
       // rendered the bubble, don't render it a second time.
       if (!rendered.has(data.assistant_message_id)) {
-        const assistantNode = bubble("assistant", data.reply, new Date().toISOString());
+        const assistantNode = bubble("assistant", data.reply, new Date().toISOString(), data.downloads);
         messagesEl.appendChild(assistantNode);
         rendered.set(data.assistant_message_id, assistantNode);
       }

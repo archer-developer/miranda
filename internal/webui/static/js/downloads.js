@@ -1,20 +1,26 @@
-// Shared helpers for rendering server-injected file markers — both
-// <download>{json}</download> (appendDownloadMarkers,
-// internal/httpapi/agent_loop.go, appended to an assistant reply whenever
-// the model retrieved a file from a sandbox session via download_file) and
-// <attachment>{json}</attachment> (appendAttachmentMarker,
-// internal/httpapi/attachments.go, appended to a user message for every
-// uploaded attachment). Both are injected server-side regardless of what
-// the message's own text says, so any screen displaying message content
-// always shows a working chip instead of raw marker text — deliberately a
-// structured, boundary-delimited tag rather than something derived from
-// matching specific prose: an earlier version of the attachment side tried
-// to regex-match an exact Russian sentence describing the file, which
-// silently broke (chip disappeared, raw instructional text leaked into the
-// bubble instead) the moment that sentence's wording changed elsewhere.
-// Used by both screens/chat.js (the live conversation) and
-// screens/history.js (the read-only dialog browser) so a past conversation
-// renders chips there too, instead of raw marker text.
+// Shared helpers for rendering server-provided file chips.
+//
+// A downloaded file (internal/httpapi/agent_loop.go, e.g. the sandbox's
+// download_file) is carried as structured data — history.Message.Downloads /
+// InputResponse.Downloads / ChatEvent.Message.Downloads, an array of
+// {file_id, filename, size_bytes, mime_type} — never as any kind of tag
+// inside the message's own text. An earlier version appended an in-band
+// "<download>{json}</download>" marker to the reply text instead; that
+// meant a stored assistant reply's text, replayed back to the model as
+// conversation history on every later turn, carried that exact tag shape —
+// and a model was observed pattern-matching it back into a *new* reply of
+// its own, with the wrong id, producing a broken chip. Keeping this
+// structurally out of band closes that off entirely: nothing in any
+// message's text ever looks like a file reference for a model to copy.
+// downloadChip below just renders whatever the caller already has.
+//
+// An uploaded attachment (internal/httpapi/attachments.go's
+// appendAttachmentMarker, appended to a *user* message) is a different
+// case, still handled the older, in-text way (extractAttachmentBlocks) —
+// unlike a download, the marker's fileURI is real information the model
+// needs in order to later call a tool against that same file, not a pure
+// UI hint, so folding it into content is what actually gets it into the
+// model's context in the first place.
 import { icon } from "./icons.js";
 
 /** Format a byte count as a short human-readable string ("1.2 MB", "340 KB", "12 B"). */
@@ -22,31 +28,6 @@ export function formatFileSize(bytes) {
   if (bytes < 1024) return `${bytes} B`;
   if (bytes < 1024 * 1024) return `${Math.round(bytes / 1024)} KB`;
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
-}
-
-/**
- * Strip <download>{json}</download> blocks from text and return a list of
- * download descriptors to render as chips instead. Each block's payload is
- * one line of JSON: {file_id, filename, size_bytes, mime_type}.
- */
-export function extractDownloadBlocks(text) {
-  const downloads = [];
-  const clean = text.replace(/\n\n<download>([\s\S]*?)<\/download>/g, (_, json) => {
-    try {
-      const data = JSON.parse(json);
-      downloads.push({
-        fileId: data.file_id,
-        filename: data.filename,
-        sizeBytes: data.size_bytes,
-        mimeType: data.mime_type,
-      });
-    } catch {
-      // Malformed marker (shouldn't happen — server-generated): drop it
-      // rather than showing raw JSON in the bubble.
-    }
-    return "";
-  });
-  return { displayText: clean.trim(), downloads };
 }
 
 /** A clickable chip linking to a file the model retrieved from a sandbox

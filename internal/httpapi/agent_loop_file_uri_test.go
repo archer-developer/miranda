@@ -2,7 +2,6 @@ package httpapi
 
 import (
 	"context"
-	"encoding/json"
 	"testing"
 	"time"
 
@@ -79,8 +78,10 @@ func TestDetectRemoteFileLinks_PlainTextKeyValueFallback(t *testing.T) {
 // dedicated download tool, unlike the sandbox) returns a fileUri pointing at
 // its own MCP server's internal address — executeTool must intercept it,
 // stage a Miranda-hosted download record carrying that server's own bearer
-// token, and append a <download> marker so the web UI renders a working
-// chip instead of the model relaying a dead, unauthenticated internal link.
+// token, and surface it via InputResponse.Downloads (structured, never
+// folded into Reply's text — see history.Message.Downloads) so the web UI
+// renders a working chip instead of the model relaying a dead,
+// unauthenticated internal link.
 func TestExecuteTool_GenericFileURIDetection_ProxiesMedicalCardDocument(t *testing.T) {
 	medical := mcptest.New("medical_card", llm.ToolDef{Name: "get_document"}).
 		WithResult("get_document", `{"documentId":"doc_1","title":"МРТ от 19.03.2025","fileUri":"https://127.0.0.1:8791/files/file_abc123"}`)
@@ -99,21 +100,17 @@ func TestExecuteTool_GenericFileURIDetection_ProxiesMedicalCardDocument(t *testi
 
 	resp, err := o.Handle(context.Background(), InputRequest{Source: webUISource, UserID: "archer", Text: "покажи файл МРТ"})
 	require.NoError(t, err)
-	require.Contains(t, resp.Reply, "<download>", "a working download chip must be appended regardless of what the model's own reply says")
-	require.NotContains(t, resp.Reply, "127.0.0.1:8791", "the internal MCP server address must never reach the reply text via the marker")
+	require.NotContains(t, resp.Reply, "<download>", "downloads are never folded into the reply text — see InputResponse.Downloads")
+	require.NotContains(t, resp.Reply, "127.0.0.1:8791", "the internal MCP server address must never reach the reply text")
 
 	// Exactly one record should have been staged, carrying the medical_card
 	// server's own token — not the raw internal URL exposed to the model,
 	// which never gets to see this token at all.
-	sub := downloadMarkerPattern.FindStringSubmatch(resp.Reply)
-	require.Len(t, sub, 2)
-	var marker struct {
-		FileID string `json:"file_id"`
-	}
-	require.NoError(t, json.Unmarshal([]byte(sub[1]), &marker))
-	require.NotEmpty(t, marker.FileID)
+	require.Len(t, resp.Downloads, 1)
+	fileID := resp.Downloads[0].FileID
+	require.NotEmpty(t, fileID)
 
-	rec, found := store.Get(marker.FileID)
+	rec, found := store.Get(fileID)
 	require.True(t, found)
 	require.Equal(t, "archer", rec.UserID)
 	require.Equal(t, "https://127.0.0.1:8791/files/file_abc123", rec.RemoteURL)
@@ -144,5 +141,5 @@ func TestExecuteTool_GenericFileURIDetection_SkipsNonOptedInServer(t *testing.T)
 
 	resp, err := o.Handle(context.Background(), InputRequest{Source: webUISource, UserID: "archer", Text: "get the document"})
 	require.NoError(t, err)
-	require.NotContains(t, resp.Reply, "<download>", "a non-opted-in server's result must never be scanned for a file URI")
+	require.Empty(t, resp.Downloads, "a non-opted-in server's result must never be scanned for a file URI")
 }

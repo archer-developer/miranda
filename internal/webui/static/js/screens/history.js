@@ -3,7 +3,7 @@
 // them — see internal/webui.handleDialogs), click to expand messages.
 import { t } from "../i18n.js";
 import { icon } from "../icons.js";
-import { extractDownloadBlocks, downloadChip, extractAttachmentBlocks, attachmentChip } from "../downloads.js";
+import { downloadChip, extractAttachmentBlocks, attachmentChip } from "../downloads.js";
 import { renderInlineText } from "../inline-text.js";
 
 let listEl;
@@ -44,21 +44,18 @@ function renderMessages(container, messages) {
     roleSpan.className = `mt-0.5 shrink-0 text-xs font-medium ${m.role === "user" ? "text-(--color-text-muted)" : "text-(--color-accent-emphasis)"}`;
     roleSpan.textContent = m.role === "user" ? t("history_role_user", "You") : "Miranda";
 
-    // extractDownloadBlocks/extractAttachmentBlocks strip the server's
-    // <download>{json}</download> / <attachment>{json}</attachment>
-    // markers (internal/httpapi/agent_loop.go's appendDownloadMarkers,
-    // internal/httpapi/attachments.go's appendAttachmentMarker) before
-    // display — otherwise a past conversation containing a download or
+    // m.downloads is the message's own structured file list (see
+    // downloads.js's top-of-file comment) — rendered directly, nothing to
+    // parse out of content. extractAttachmentBlocks still strips the
+    // server's <attachment>{json}</attachment> marker (internal/httpapi/
+    // attachments.go's appendAttachmentMarker) from a *user* message's
+    // content before display — otherwise a past conversation containing an
     // upload would show the raw marker/content-block text verbatim instead
     // of a chip (see downloads.js).
     let content = m.content;
-    let downloads = [];
+    const downloads = m.downloads ?? [];
     let attachments = [];
-    if (m.role === "assistant") {
-      const extracted = extractDownloadBlocks(content);
-      content = extracted.displayText;
-      downloads = extracted.downloads;
-    } else if (m.role === "user") {
+    if (m.role === "user") {
       const extracted = extractAttachmentBlocks(content);
       content = extracted.displayText;
       attachments = extracted.attachments;
@@ -74,8 +71,8 @@ function renderMessages(container, messages) {
 
     row.append(roleSpan, contentSpan);
     line.appendChild(row);
-    for (const { fileId, filename, sizeBytes } of downloads) {
-      line.appendChild(downloadChip(fileId, filename, sizeBytes));
+    for (const { file_id, filename, size_bytes } of downloads) {
+      line.appendChild(downloadChip(file_id, filename, size_bytes ?? null));
     }
     for (const { filename, sizeBytes } of attachments) {
       line.appendChild(attachmentChip(filename, sizeBytes ?? null));

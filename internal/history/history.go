@@ -37,6 +37,37 @@ type Message struct {
 	// resulting "tool" message) so a resumed conversation can rebuild the
 	// exact assistant/tool message pair the model originally produced.
 	ToolCalls []ToolCallRef `json:"tool_calls,omitempty"`
+	// Downloads is set on a Role == "assistant" message that retrieved one
+	// or more files via a file-exposing MCP tool this turn (see
+	// httpapi.turnControl.downloadedFiles). Deliberately never folded into
+	// Content as inline marker text: Content is exactly what's replayed
+	// back to the model as conversation history on every later turn (see
+	// httpapi.resolveConversation), and a model has been observed
+	// pattern-matching an in-band marker tag it saw in its own prior output
+	// back into a *new* reply — filling it in with the wrong id and
+	// producing a second, broken chip alongside the real one. Keeping
+	// download metadata here, structurally out of band, means the model
+	// never sees anything resembling this shape to begin with; rendering it
+	// as a chip is purely the caller's (the web UI's) concern — see
+	// httpapi.InputResponse.Downloads / ChatEvent.Message.Downloads for the
+	// live-turn path and this same field for history replay. See git
+	// history for the incident this replaced (in-text
+	// <download>...</download> markers, stripped/re-appended on every
+	// read).
+	Downloads []DownloadRef `json:"downloads,omitempty"`
+}
+
+// DownloadRef is the durable record of one file the model retrieved via a
+// file-exposing MCP tool (e.g. a sandbox's download_file) during a turn —
+// enough for a client to render a working download chip, without ever
+// putting this in the message text itself. FileID is Miranda's own
+// attachments-store id (GET /api/files/{id}, internal/httpapi.handleDownload)
+// — never a raw id a remote tool result happened to mention.
+type DownloadRef struct {
+	FileID    string `json:"file_id"`
+	Filename  string `json:"filename"`
+	SizeBytes int64  `json:"size_bytes,omitempty"`
+	MIMEType  string `json:"mime_type,omitempty"`
 }
 
 // ToolCallRef is the durable record of one tool invocation the model
@@ -181,6 +212,11 @@ func (s *Store) migrate(ctx context.Context) error {
 		return err
 	}
 	if err := s.ensureColumn(ctx, "messages", "tool_calls_json", "TEXT"); err != nil {
+		return err
+	}
+	// downloads_json holds Message.Downloads — see its doc comment for why
+	// this is a separate column rather than folded into content.
+	if err := s.ensureColumn(ctx, "messages", "downloads_json", "TEXT"); err != nil {
 		return err
 	}
 	return nil
@@ -409,12 +445,14 @@ func (s *Store) AppendMessage(ctx context.Context, conversationID, role, content
 
 // AppendAssistantMessage records an assistant turn, optionally along with
 // the tool calls it requested (toolCalls may be empty for a plain text
-// reply). Storing the tool calls on the assistant's own message — rather
-// than only on the "tool" result message that follows — is what lets
+// reply) and the files it retrieved this turn (downloads may be empty too —
+// see Message.Downloads for why these are never folded into content).
+// Storing the tool calls on the assistant's own message — rather than only
+// on the "tool" result message that follows — is what lets
 // resolveConversation rebuild the exact assistant/tool message pair on
 // resume, instead of dropping tool-call turns entirely.
-func (s *Store) AppendAssistantMessage(ctx context.Context, conversationID, content string, toolCalls []ToolCallRef) (int64, error) {
-	var toolCallsJSON sql.NullString
+func (s *Store) AppendAssistantMessage(ctx context.Context, conversationID, content string, toolCalls []ToolCallRef, downloads []DownloadRef) (int64, error) {
+	var toolCallsJSON, downloadsJSON sql.NullString
 	if len(toolCalls) > 0 {
 		b, err := json.Marshal(toolCalls)
 		if err != nil {
@@ -422,9 +460,16 @@ func (s *Store) AppendAssistantMessage(ctx context.Context, conversationID, cont
 		}
 		toolCallsJSON = sql.NullString{String: string(b), Valid: true}
 	}
+	if len(downloads) > 0 {
+		b, err := json.Marshal(downloads)
+		if err != nil {
+			return 0, fmt.Errorf("history: encode downloads: %w", err)
+		}
+		downloadsJSON = sql.NullString{String: string(b), Valid: true}
+	}
 	res, err := s.db.ExecContext(ctx,
-		`INSERT INTO messages (conversation_id, role, content, tool_calls_json) VALUES (?, 'assistant', ?, ?)`,
-		conversationID, content, toolCallsJSON)
+		`INSERT INTO messages (conversation_id, role, content, tool_calls_json, downloads_json) VALUES (?, 'assistant', ?, ?, ?)`,
+		conversationID, content, toolCallsJSON, downloadsJSON)
 	if err != nil {
 		return 0, fmt.Errorf("history: append assistant message: %w", err)
 	}
@@ -460,7 +505,7 @@ func (s *Store) AppendToolCall(ctx context.Context, messageID int64, toolName, m
 // so the full turn — not just its text — can be reconstructed.
 func (s *Store) ConversationMessages(ctx context.Context, conversationID string) ([]Message, error) {
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT id, conversation_id, role, content, created_at, COALESCE(tool_call_id, ''), COALESCE(tool_calls_json, '')
+		`SELECT id, conversation_id, role, content, created_at, COALESCE(tool_call_id, ''), COALESCE(tool_calls_json, ''), COALESCE(downloads_json, '')
 		 FROM messages WHERE conversation_id = ? ORDER BY id ASC`,
 		conversationID)
 	if err != nil {
@@ -531,7 +576,7 @@ func scanConversations(rows *sql.Rows) ([]Conversation, error) {
 // misinterpreted as an FTS5 operator and error out the search.
 func (s *Store) SearchMessages(ctx context.Context, userID, query string, limit int) ([]Message, error) {
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT m.id, m.conversation_id, m.role, m.content, m.created_at, COALESCE(m.tool_call_id, ''), COALESCE(m.tool_calls_json, '')
+		SELECT m.id, m.conversation_id, m.role, m.content, m.created_at, COALESCE(m.tool_call_id, ''), COALESCE(m.tool_calls_json, ''), COALESCE(m.downloads_json, '')
 		FROM messages_fts
 		JOIN messages m ON m.id = messages_fts.rowid
 		JOIN conversations c ON c.id = m.conversation_id
@@ -562,13 +607,18 @@ func scanMessages(rows *sql.Rows) ([]Message, error) {
 	var out []Message
 	for rows.Next() {
 		var m Message
-		var toolCallsJSON string
-		if err := rows.Scan(&m.ID, &m.ConversationID, &m.Role, &m.Content, &m.CreatedAt, &m.ToolCallID, &toolCallsJSON); err != nil {
+		var toolCallsJSON, downloadsJSON string
+		if err := rows.Scan(&m.ID, &m.ConversationID, &m.Role, &m.Content, &m.CreatedAt, &m.ToolCallID, &toolCallsJSON, &downloadsJSON); err != nil {
 			return nil, fmt.Errorf("history: scan message: %w", err)
 		}
 		if toolCallsJSON != "" {
 			if err := json.Unmarshal([]byte(toolCallsJSON), &m.ToolCalls); err != nil {
 				return nil, fmt.Errorf("history: decode tool calls for message %d: %w", m.ID, err)
+			}
+		}
+		if downloadsJSON != "" {
+			if err := json.Unmarshal([]byte(downloadsJSON), &m.Downloads); err != nil {
+				return nil, fmt.Errorf("history: decode downloads for message %d: %w", m.ID, err)
 			}
 		}
 		out = append(out, m)

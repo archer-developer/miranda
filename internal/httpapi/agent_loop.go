@@ -38,9 +38,9 @@ type turnControl struct {
 	// downloadedFiles accumulates one entry per distinct remote file URI
 	// executeTool's file-URI detector finds in a file-exposing server's
 	// tool result this turn (see detectRemoteFileLinks) — Handle reads this
-	// after the loop finishes to append a <download>...</download> marker
-	// per file via appendDownloadMarkers, deterministically, regardless of
-	// what the model's own reply text says.
+	// after the loop finishes and records it as the turn's structured
+	// history.Message.Downloads (via toDownloadRefs), deterministically,
+	// regardless of what the model's own reply text says.
 	downloadedFiles []downloadedFile
 	// remoteFileURLs dedups the detector's finds within this turn, keyed by
 	// the exact remote URL — a document fetched twice in one turn (e.g.
@@ -63,9 +63,33 @@ func (c *turnControl) recordRemoteFile(url string) {
 	c.remoteFileURLs[url] = true
 }
 
+// recordDownloadedFile appends df to downloadedFiles, replacing — not
+// skipping — any earlier entry recorded this turn with the same
+// filename/size/mime. A second dedup layer on top of hasRemoteFile, needed
+// because the sandbox mints a fresh file_id (and thus a fresh file_uri) on
+// every download_file call even when the underlying file is unchanged, e.g.
+// the model re-downloading the same generated document after a later tool
+// call in the same turn — URL-only dedup misses that case since the two
+// URLs genuinely differ. Replacing rather than skipping matters: the
+// sandbox does not keep every previously-issued file_id resolvable
+// indefinitely, so of two file_ids for what's nominally the same file, it's
+// consistently the *earlier* one whose /files/<id> proxy request 404s by
+// the time the chip is clicked — keeping the first (as an earlier version
+// of this dedup did) surfaced one permanently broken chip instead of the
+// one that still works. See git history for the incident.
+func (c *turnControl) recordDownloadedFile(df downloadedFile) {
+	for i, existing := range c.downloadedFiles {
+		if existing.filename == df.filename && existing.sizeBytes == df.sizeBytes && existing.mimeType == df.mimeType {
+			c.downloadedFiles[i] = df
+			return
+		}
+	}
+	c.downloadedFiles = append(c.downloadedFiles, df)
+}
+
 // downloadedFile is one file executeTool's detector found and staged this
-// turn — everything appendDownloadMarkers needs to render a
-// <download>...</download> marker for it. filename/sizeBytes/mimeType are
+// turn — everything toDownloadRefs needs to build the turn's structured
+// history.DownloadRef entry for it. filename/sizeBytes/mimeType are
 // best-effort (see detectRemoteFileLinks) and may be zero/empty; the web
 // UI's downloadChip already degrades cleanly when they are.
 type downloadedFile struct {
@@ -257,79 +281,61 @@ func keyValueInt64Field(result string, keys []string) int64 {
 	return 0
 }
 
-// appendDownloadMarkers deterministically appends one <download>...</download>
-// marker per file the model retrieved via download_file this turn, so the web
-// UI chat screen (chat.js's extractDownloadBlocks) can always render a working
-// download chip instead of trusting the model to reproduce a link verbatim —
-// the same "server, not the model, owns the reliable presentation" reasoning
-// processAttachments applies on the inbound side. Each marker's payload is one
-// line of JSON (not pipe-delimited) so a filename containing "|" or ">" can't
-// break the client-side parse.
-func appendDownloadMarkers(text string, files []downloadedFile) string {
+// toDownloadRefs converts the turn's detected files to the form
+// history.AppendAssistantMessage/InputResponse/ChatEvent carry them in —
+// structurally separate from the reply's own text (see
+// history.Message.Downloads for why). Replacing the earlier design (an
+// in-band "\n\n<download>{json}</download>" marker appended to the reply
+// text itself) is what actually closes the failure mode that design had:
+// once such a marker had been written into a conversation's history, it
+// came back as plain assistant text in every later turn's model-facing
+// context, and a model was observed pattern-matching that exact tag shape
+// back into a new reply of its own — filling it in with the wrong id (e.g.
+// the sandbox's raw internal file_id rather than the attachments-store id)
+// and producing a second, broken chip alongside the real one. A model can
+// only mimic a shape it has actually seen; since a downloaded file is never
+// represented as any kind of tag in message content anymore — not in what
+// gets replayed as history, not even in the current turn's own reply before
+// this function's caller attaches it — there is nothing left in text for it
+// to copy. See git history for the incident and the two narrower
+// text-marker-patching attempts (strip-on-append, then keep-latest-wins
+// dedup) this replaced.
+func toDownloadRefs(files []downloadedFile) []history.DownloadRef {
+	if len(files) == 0 {
+		return nil
+	}
+	refs := make([]history.DownloadRef, len(files))
+	for i, f := range files {
+		refs[i] = history.DownloadRef{FileID: f.fileID, Filename: f.filename, SizeBytes: f.sizeBytes, MIMEType: f.mimeType}
+	}
+	return refs
+}
+
+// appendDownloadFootnotes appends one human-readable "📎 filename (size)"
+// line per downloaded file to text, for channels with no client-side chip
+// renderer to hand structured data to instead. Only the web UI's chat
+// screen renders a chip from InputResponse/ChatEvent's own Downloads field
+// (see toDownloadRefs) — every other channel (ha_assist speaks/shows the
+// reply text as-is, Telegram sends it verbatim via the Bot API) needs the
+// file mentioned in the text itself or the user has no way to know it
+// exists.
+func appendDownloadFootnotes(text string, files []downloadedFile, source string) string {
+	if source == webUISource {
+		return text
+	}
 	for _, f := range files {
-		// omitempty on SizeBytes/MIMEType matters now that a generically
-		// detected file (see detectRemoteFileLinks) often has neither —
-		// downloadChip (downloads.js) checks size != null to decide whether
-		// to render a size suffix, which only works if a missing value is
-		// actually absent from the JSON rather than present as a literal 0.
-		payload, err := json.Marshal(struct {
-			FileID    string `json:"file_id"`
-			Filename  string `json:"filename"`
-			SizeBytes int64  `json:"size_bytes,omitempty"`
-			MIMEType  string `json:"mime_type,omitempty"`
-		}{f.fileID, f.filename, f.sizeBytes, f.mimeType})
-		if err != nil {
-			continue
+		if f.sizeBytes > 0 {
+			text += fmt.Sprintf("\n\n📎 %s (%s)", f.filename, formatByteSize(f.sizeBytes))
+		} else {
+			text += fmt.Sprintf("\n\n📎 %s", f.filename)
 		}
-		text += "\n\n<download>" + string(payload) + "</download>"
 	}
 	return text
 }
 
-// downloadMarkerPattern matches one marker appendDownloadMarkers injects.
-var downloadMarkerPattern = regexp.MustCompile(`\n\n<download>([\s\S]*?)</download>`)
-
-// renderDownloadMarkersForChannel converts every <download>{json}</download>
-// marker in text into a form the given source's client can actually render.
-// Only the web UI's chat screen (chat.js's extractDownloadBlocks) knows to
-// parse the raw marker syntax into a clickable chip, so it's passed through
-// unchanged for source == webUISource; every other channel — ha_assist (HA's
-// Assist pipeline speaks/displays the reply text as-is) and Telegram
-// (telegram.go sends resp.Reply verbatim via the Bot API, with no
-// client-side JS to parse anything) — would otherwise show or speak the
-// literal JSON tag. Those channels get a plain-text line instead.
-//
-// text is expected to already carry markers from appendDownloadMarkers.
-// Handle always persists the raw-marker form to history regardless of
-// source, so the web UI's history browser can still render a chip for a
-// conversation that originated on another channel — only the outbound reply
-// for a non-web channel needs converting, not what's stored.
-func renderDownloadMarkersForChannel(text, source string) string {
-	if source == webUISource {
-		return text
-	}
-	return downloadMarkerPattern.ReplaceAllStringFunc(text, func(match string) string {
-		sub := downloadMarkerPattern.FindStringSubmatch(match)
-		if len(sub) < 2 {
-			return ""
-		}
-		var df struct {
-			Filename  string `json:"filename"`
-			SizeBytes int64  `json:"size_bytes"`
-		}
-		if err := json.Unmarshal([]byte(sub[1]), &df); err != nil || df.Filename == "" {
-			return ""
-		}
-		if df.SizeBytes > 0 {
-			return fmt.Sprintf("\n\n📎 %s (%s)", df.Filename, formatByteSize(df.SizeBytes))
-		}
-		return fmt.Sprintf("\n\n📎 %s", df.Filename)
-	})
-}
-
 // formatByteSize renders a byte count as a short human-readable string,
 // mirroring the web UI's formatFileSize (internal/webui/static/js/downloads.js)
-// for the plain-text fallback renderDownloadMarkersForChannel produces.
+// for the plain-text fallback appendDownloadFootnotes produces.
 func formatByteSize(n int64) string {
 	switch {
 	case n < 1024:
@@ -1060,20 +1066,21 @@ func (o *Orchestrator) executeTool(ctx context.Context, userID string, tc llm.To
 	// through this one detector: scan the raw result for a URL rooted at
 	// that server's own FilesEndpoint (e.g. miranda-medical-card's
 	// medical.get_document returning a "fileUri"), regardless of which
-	// tool produced it, stage a download record, and queue it for
-	// appendDownloadMarkers to inject into the final reply.
+	// tool produced it, stage a download record, and queue it to be
+	// attached to the turn's final reply as structured data (see
+	// history.Message.Downloads).
 	if server, ok := o.tools.ServerForTool(tc.Name); ok {
 		if endpoint, exposesFiles := o.fileExposingServers[server]; exposesFiles {
 			for _, link := range detectRemoteFileLinks(result, endpoint) {
 				if control.hasRemoteFile(link.url) {
 					continue
 				}
+				control.recordRemoteFile(link.url)
 				fileID, err := attachments.NewFileID()
 				if err != nil {
 					continue
 				}
-				control.recordRemoteFile(link.url)
-				control.downloadedFiles = append(control.downloadedFiles, downloadedFile{
+				control.recordDownloadedFile(downloadedFile{
 					fileID: fileID, filename: link.filename, sizeBytes: link.sizeBytes, mimeType: link.mimeType,
 				})
 				if o.attachStore != nil {
@@ -1194,7 +1201,10 @@ func (o *Orchestrator) recordAssistantToolCallMessage(ctx context.Context, userI
 	for i, tc := range toolCalls {
 		refs[i] = history.ToolCallRef{ID: tc.ID, Name: tc.Name, Arguments: tc.Arguments, ProviderMetadata: tc.ProviderMetadata}
 	}
-	msgID, err := o.history.AppendAssistantMessage(ctx, conversationID, text, refs)
+	// nil downloads: a mid-loop tool-calling turn never carries a file
+	// reference — those are only ever flushed once, on the turn's final
+	// reply (Handle, after runAgentLoop returns) — see history.Message.Downloads.
+	msgID, err := o.history.AppendAssistantMessage(ctx, conversationID, text, refs, nil)
 	if err != nil {
 		o.hub.Publish(hub.Event{Source: "error", Message: "record assistant tool-call message: " + err.Error()})
 		return

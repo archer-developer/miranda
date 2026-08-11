@@ -123,6 +123,12 @@ type InputResponse struct {
 	// second time when its ChatEvent arrives.
 	UserMessageID      int64 `json:"user_message_id"`
 	AssistantMessageID int64 `json:"assistant_message_id"`
+	// Downloads carries this turn's file references structurally, the same
+	// shape history.Message.Downloads persists — the web UI's chat screen
+	// renders a chip straight from this field rather than parsing anything
+	// out of Reply. See history.Message.Downloads for why files are never
+	// represented in Reply's own text.
+	Downloads []history.DownloadRef `json:"downloads,omitempty"`
 }
 
 // ChatEvent is published on internal/hub (Source: "chat", scoped by UserID)
@@ -425,33 +431,30 @@ func (o *Orchestrator) Handle(ctx context.Context, req InputRequest) (InputRespo
 		// called download_file successfully (attachStore.Put and
 		// control.downloadedFiles both happen synchronously at call time in
 		// executeTool) before a *later* iteration errored out. Without this,
-		// that file would be staged and ownership-recorded with no marker
-		// ever written anywhere the user could discover it through normal
-		// use — see appendDownloadMarkers below for the success path this
-		// mirrors. Best-effort: the turn still reports its original error.
+		// that file would be staged and ownership-recorded with nowhere the
+		// user could discover it through normal use — see the success path
+		// below this mirrors. Best-effort: the turn still reports its
+		// original error.
 		if len(control.downloadedFiles) > 0 {
-			recovered := appendDownloadMarkers("", control.downloadedFiles)
-			if _, recErr := o.history.AppendMessage(ctx, convID, "assistant", recovered); recErr != nil {
-				o.hub.Publish(hub.Event{Source: "error", Message: "record recovered download markers: " + recErr.Error()})
+			if _, recErr := o.history.AppendAssistantMessage(ctx, convID, "", nil, toDownloadRefs(control.downloadedFiles)); recErr != nil {
+				o.hub.Publish(hub.Event{Source: "error", Message: "record recovered downloads: " + recErr.Error()})
 			}
 		}
 		return InputResponse{}, err
 	}
-	// Deterministically append a marker for every file the model retrieved
-	// via download_file this turn, regardless of what the model's own text
-	// says — mirrors processAttachments' deterministic file-block injection
-	// on the inbound side. See appendDownloadMarkers. The raw-marker form is
-	// always what's persisted to history, regardless of req.Source, so the
-	// web UI's history browser can render a chip for a conversation that
-	// originated on any channel; only the outbound reply below is converted
-	// per-channel.
-	finalText = appendDownloadMarkers(finalText, control.downloadedFiles)
+	// downloads is recorded structurally alongside finalText, never folded
+	// into it — see history.Message.Downloads/toDownloadRefs for why. This
+	// is what's always persisted to history regardless of req.Source, so
+	// the web UI's history browser can render a chip for a conversation
+	// that originated on any channel; only the outbound reply below needs
+	// a plain-text fallback for a non-web channel.
+	downloads := toDownloadRefs(control.downloadedFiles)
 
-	assistantMsgID, err := o.history.AppendMessage(ctx, convID, "assistant", finalText)
+	assistantMsgID, err := o.history.AppendAssistantMessage(ctx, convID, finalText, nil, downloads)
 	if err != nil {
 		return InputResponse{}, fmt.Errorf("orchestrator: record assistant message: %w", err)
 	}
-	o.publishChatMessage(userID, convID, history.Message{ID: assistantMsgID, ConversationID: convID, Role: "assistant", Content: finalText})
+	o.publishChatMessage(userID, convID, history.Message{ID: assistantMsgID, ConversationID: convID, Role: "assistant", Content: finalText, Downloads: downloads})
 
 	// Applied after the reply is recorded (and, via TTS, already spoken) so
 	// an end/forget request never costs the user their answer to this turn.
@@ -473,10 +476,11 @@ func (o *Orchestrator) Handle(ctx context.Context, req InputRequest) (InputRespo
 
 	return InputResponse{
 		ConversationID:     convID,
-		Reply:              renderDownloadMarkersForChannel(finalText, req.Source),
+		Reply:              appendDownloadFootnotes(finalText, control.downloadedFiles, req.Source),
 		ProviderUsed:       providerUsed,
 		UserMessageID:      userMsgID,
 		AssistantMessageID: assistantMsgID,
+		Downloads:          downloads,
 	}, nil
 }
 

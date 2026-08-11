@@ -27,15 +27,16 @@ const textAttachmentThreshold = 10_000
 //     <attachment>{json}</attachment> marker appended — see
 //     appendAttachmentMarker — carrying the fileURI any tool can fetch the
 //     real bytes from, plus filename/size/mime for the web UI to render a
-//     chip from, mirroring how appendDownloadMarkers
-//     (internal/httpapi/agent_loop.go) already does this for the outbound
-//     direction. Using a structured, boundary-delimited marker rather than
+//     chip from. Using a structured, boundary-delimited marker rather than
 //     matching specific prose is deliberate: an earlier version relied on
 //     the web UI regex-matching an exact Russian sentence, which silently
 //     broke (attachment chip disappeared, raw instructional text leaked
 //     into the chat bubble instead) the moment that sentence's wording
 //     changed — see docs/file-staging-refactor.md and
 //     internal/webui/static/js/screens/chat.js's extractFileAttachments.
+//     The outbound direction (a file the model retrieved) is carried the
+//     same way conceptually but never as in-text marker text — see
+//     history.Message.Downloads.
 //
 //   - imageParts: base64 image blocks for vision-capable providers. These are
 //     only used in the current turn's LLM message (llm.Message.Parts) and are
@@ -109,9 +110,13 @@ func (o *Orchestrator) processAttachments(userID, userText string, atts []Attach
 
 // attachmentMarker is the JSON payload of an <attachment>...</attachment>
 // marker appendAttachmentMarker writes — deliberately the same field
-// shape/naming as appendDownloadMarkers' <download> marker
-// (internal/httpapi/agent_loop.go), so both ends of the web UI only need
-// one mental model for "a server-emitted file marker".
+// naming as history.DownloadRef (internal/history/history.go), so both
+// ends of the web UI only need one mental model for "a server-provided file
+// reference", even though a download's own equivalent is carried out of
+// band (see history.Message.Downloads) rather than as an in-text marker
+// like this one — an upload's fileURI is real information the model needs
+// for a later tool call, not a pure UI hint, so it has to be in the
+// model-facing content to begin with.
 type attachmentMarker struct {
 	Filename  string `json:"filename"`
 	MIMEType  string `json:"mime_type"`

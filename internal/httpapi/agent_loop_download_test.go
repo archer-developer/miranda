@@ -1,36 +1,68 @@
 package httpapi
 
 import (
+	"encoding/json"
 	"testing"
 
+	"github.com/archer-developer/miranda/internal/history"
 	"github.com/stretchr/testify/require"
 )
 
-func TestRenderDownloadMarkersForChannel_WebUIPassesThroughRaw(t *testing.T) {
-	text := "Here you go." + appendDownloadMarkers("", []downloadedFile{{fileID: "f1", filename: "a.txt", sizeBytes: 10}})
-	got := renderDownloadMarkersForChannel(text, webUISource)
-	require.Equal(t, text, got, "web UI must still receive the raw marker so chat.js can render a chip")
+func TestToDownloadRefs_OmitsZeroSizeAndEmptyMIMEType(t *testing.T) {
+	refs := toDownloadRefs([]downloadedFile{{fileID: "f1", filename: "unknown.bin"}})
+	require.Equal(t, []history.DownloadRef{{FileID: "f1", Filename: "unknown.bin"}}, refs)
+
+	b, err := json.Marshal(refs)
+	require.NoError(t, err)
+	// omitempty on SizeBytes/MIMEType matters now that a generically
+	// detected file (see detectRemoteFileLinks) often has neither —
+	// downloadChip (downloads.js) checks size != null to decide whether to
+	// render a size suffix, which only works if a missing value is
+	// actually absent from the JSON rather than present as a literal 0.
+	require.NotContains(t, string(b), `"size_bytes"`)
+	require.NotContains(t, string(b), `"mime_type"`)
 }
 
-func TestRenderDownloadMarkersForChannel_OtherChannelsGetPlainText(t *testing.T) {
-	text := "Here you go." + appendDownloadMarkers("", []downloadedFile{{fileID: "f1", filename: "a.txt", sizeBytes: 2048}})
+func TestToDownloadRefs_NilForNoFiles(t *testing.T) {
+	require.Nil(t, toDownloadRefs(nil))
+}
 
+func TestAppendDownloadFootnotes_WebUIUntouched(t *testing.T) {
+	text := "Here you go."
+	got := appendDownloadFootnotes(text, []downloadedFile{{fileID: "f1", filename: "a.txt", sizeBytes: 10}}, webUISource)
+	require.Equal(t, text, got, "the web UI renders chips from InputResponse.Downloads, not from Reply's text")
+}
+
+func TestAppendDownloadFootnotes_OtherChannelsGetPlainText(t *testing.T) {
+	text := "Here you go."
 	for _, source := range []string{"ha_assist", "telegram", "scheduled", ""} {
-		got := renderDownloadMarkersForChannel(text, source)
-		require.NotContains(t, got, "<download>", "source %q must never see the raw marker tag", source)
-		require.NotContains(t, got, "</download>", "source %q must never see the raw marker tag", source)
+		got := appendDownloadFootnotes(text, []downloadedFile{{fileID: "f1", filename: "a.txt", sizeBytes: 2048}}, source)
 		require.Contains(t, got, "a.txt", "source %q should still see the filename", source)
 	}
 }
 
-// TestAppendDownloadMarkers_OmitsZeroSizeAndEmptyMIMEType guards a real
-// display bug: a generically detected file (see detectRemoteFileLinks) often
-// has no known size/mime — without omitempty on the marker JSON, a literal
-// "size_bytes":0 would make downloadChip's "size != null" check in
-// downloads.js render a bogus "· 0 B" suffix instead of omitting it.
-func TestAppendDownloadMarkers_OmitsZeroSizeAndEmptyMIMEType(t *testing.T) {
-	text := appendDownloadMarkers("", []downloadedFile{{fileID: "f1", filename: "unknown.bin"}})
-	require.NotContains(t, text, `"size_bytes"`)
-	require.NotContains(t, text, `"mime_type"`)
-	require.Contains(t, text, `"filename":"unknown.bin"`)
+// TestTurnControl_RecordDownloadedFile_LatestWinsOnSameFileDifferentURL
+// guards a real, previously-confirmed bug (git history, commit 821a482): the
+// sandbox mints a fresh file_id (and thus a fresh file_uri) on every
+// download_file call even for the same underlying file, so URL-only dedup
+// (hasRemoteFile) isn't enough on its own — a second call for a file with
+// the same filename/size/mime as one already recorded this turn must
+// replace it, not sit alongside it as a second chip. It must be the *later*
+// file_id that survives: of two file_ids for nominally the same file, the
+// sandbox's earlier one is the one that stops resolving by the time the
+// chip is clicked, not the later one — keeping the first would leave a
+// single, permanently-broken chip instead of the one that still works.
+func TestTurnControl_RecordDownloadedFile_LatestWinsOnSameFileDifferentURL(t *testing.T) {
+	c := &turnControl{}
+	first := downloadedFile{fileID: "f1", filename: "autumn.docx", sizeBytes: 36864, mimeType: "application/vnd.openxmlformats-officedocument.wordprocessingml.document"}
+	c.recordDownloadedFile(first)
+	require.Equal(t, []downloadedFile{first}, c.downloadedFiles)
+
+	second := downloadedFile{fileID: "f2", filename: "autumn.docx", sizeBytes: 36864, mimeType: "application/vnd.openxmlformats-officedocument.wordprocessingml.document"}
+	c.recordDownloadedFile(second)
+	require.Equal(t, []downloadedFile{second}, c.downloadedFiles, "the later file_id must replace the earlier one, not sit alongside it")
+
+	different := downloadedFile{fileID: "f3", filename: "medical_profile.pdf", sizeBytes: 60335, mimeType: "application/pdf"}
+	c.recordDownloadedFile(different)
+	require.Equal(t, []downloadedFile{second, different}, c.downloadedFiles, "a genuinely different file must be kept as its own chip")
 }

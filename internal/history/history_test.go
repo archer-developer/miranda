@@ -250,6 +250,54 @@ func TestSearchConversations_OnlyMatchesEndedConversationsForThatUser(t *testing
 	require.Equal(t, "trip to Italy planned", results[0].Summary)
 }
 
+// TestAppendAssistantMessage_DownloadsRoundTripSeparateFromContent guards
+// the fix for a real double-chip incident: downloads used to be appended as
+// an in-band "\n\n<download>{json}</download>" marker inside the message's
+// own Content, which meant a stored assistant reply's Content — replayed
+// back to the model as conversation history on every later turn — carried
+// that exact tag shape, and a model was observed copying it into a new
+// reply of its own with the wrong id. Downloads must round-trip via their
+// own column, leaving Content exactly what was passed in, with no trace of
+// the file reference in the text at all.
+func TestAppendAssistantMessage_DownloadsRoundTripSeparateFromContent(t *testing.T) {
+	ctx := context.Background()
+	s := openTestStore(t)
+
+	convID, err := s.StartConversation(ctx, "alex", "web_ui")
+	require.NoError(t, err)
+
+	const content = "Файл готов!"
+	downloads := []DownloadRef{{FileID: "abc123", Filename: "autumn.docx", SizeBytes: 37293, MIMEType: "application/zip"}}
+	_, err = s.AppendAssistantMessage(ctx, convID, content, nil, downloads)
+	require.NoError(t, err)
+
+	msgs, err := s.ConversationMessages(ctx, convID)
+	require.NoError(t, err)
+	require.Len(t, msgs, 1)
+	require.Equal(t, content, msgs[0].Content, "content must be exactly what was passed in — no marker text appended")
+	require.NotContains(t, msgs[0].Content, "download")
+	require.Equal(t, downloads, msgs[0].Downloads)
+}
+
+// TestAppendAssistantMessage_NilDownloadsRoundTripAsEmpty covers the common
+// case (a reply with no files) alongside the above: Downloads must decode
+// as nil/empty, not error, when downloads_json was never set for the row.
+func TestAppendAssistantMessage_NilDownloadsRoundTripAsEmpty(t *testing.T) {
+	ctx := context.Background()
+	s := openTestStore(t)
+
+	convID, err := s.StartConversation(ctx, "alex", "web_ui")
+	require.NoError(t, err)
+
+	_, err = s.AppendAssistantMessage(ctx, convID, "просто текст", nil, nil)
+	require.NoError(t, err)
+
+	msgs, err := s.ConversationMessages(ctx, convID)
+	require.NoError(t, err)
+	require.Len(t, msgs, 1)
+	require.Empty(t, msgs[0].Downloads)
+}
+
 func TestMigrate_IsIdempotentAcrossReopens(t *testing.T) {
 	ctx := context.Background()
 	path := filepath.Join(t.TempDir(), "miranda.db")
