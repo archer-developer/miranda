@@ -207,37 +207,24 @@ type ScheduleConfig struct {
 // independent paths sharing this one config block for historical reasons,
 // not because they still share a mechanism: an upload is staged locally
 // (internal/attachments.Store) and served back out over GET /files/{id}
-// under PublicBaseURL (see docs/file-staging-refactor.md); a download still
-// proxies to the sandbox's own GET /files/{id} via SandboxMCPServerName,
-// unchanged. Opt-in (Enabled defaults false) since there's no safe
-// auto-detected default for either.
+// under PublicBaseURL (see docs/file-staging-refactor.md); a download
+// proxies to whichever MCP server actually hosts the file, via that
+// server's own MCPServer.ExposeFiles opt-in (see
+// Config.FileExposingServers) — every file-serving server, including the
+// sandbox, goes through this one mechanism; there is deliberately no
+// second, server-specific download path. Opt-in (Enabled defaults false)
+// since there's no safe auto-detected default for either direction.
 type FileUploadConfig struct {
 	// Enabled activates POST /api/upload, GET /files/{id}, GET
 	// /api/files/{file_id}, and attachment processing in the agent loop.
-	// Requires both PublicBaseURL and SandboxMCPServerName to be set
-	// (checked at startup, cmd/miranda) — even though SandboxMCPServerName
-	// is only actually used for the download direction, main.go resolves
-	// it unconditionally whenever Enabled is true, so an upload-only setup
-	// still needs a valid entry there.
+	// Requires PublicBaseURL to be set (checked at startup, cmd/miranda).
 	Enabled bool `yaml:"enabled"`
-	// SandboxMCPServerName is the name of an MCP server entry in
-	// MCPConfig.Servers whose URL hosts the sandbox's file transfer API —
-	// used only for the download direction (GET /api/files/{file_id}
-	// proxying a download_file result back to the browser). The files
-	// endpoint URL is derived by replacing the "/mcp" suffix of that
-	// server's URL with "/files" — e.g. "http://192.168.1.50:8788/mcp" →
-	// "http://192.168.1.50:8788/files". The same server's TokenEnv
-	// authenticates the download request, and this same name is what
-	// SetSandboxDownload namespaces the download_file MCP tool name
-	// against.
-	SandboxMCPServerName string `yaml:"sandbox_mcp_server_name"`
 	// MaxFileSizeBytes is the maximum size of a single uploaded file.
-	// Defaults to 50 MB. Applies to the /api/upload read limit. Downloads
-	// are bounded separately, by the sandbox's own max_download_size_bytes
-	// — a download_file call already rejects an oversized file before
-	// Miranda ever proxies a GET /api/files/{file_id} for it.
+	// Defaults to 50 MB. Applies to the /api/upload read limit only — a
+	// download's size is bounded by whichever remote server produced it
+	// (e.g. the sandbox's own max_download_size_bytes), not by Miranda.
 	MaxFileSizeBytes int64 `yaml:"max_file_size_bytes"`
-	// DownloadRecordTTLHours is how long a download_file ownership record
+	// DownloadRecordTTLHours is how long a download record
 	// (internal/attachments.Store, Record.TTL) stays valid before
 	// GET /api/files/{file_id} starts 404ing it. Unlike an upload-staging
 	// record — which only needs to outlive the turn still composing a
@@ -476,6 +463,24 @@ type MCPServer struct {
 	// tool with a schema-validation error at call time, since the injected
 	// field shows up as an unrecognized additional property).
 	EncryptionKeyArgName string `yaml:"encryption_key_arg,omitempty"`
+	// ExposeFiles opts this server into Miranda's generic MCP file-download
+	// proxy: httpapi.Orchestrator.executeTool scans every tool call result
+	// routed to this server for a URL rooted at this server's own
+	// FilesEndpoint() (e.g. a metadata tool's "fileUri" field, such as
+	// miranda-medical-card's medical.get_document, or the sandbox's own
+	// download_file result), and rewrites it into a Miranda-hosted,
+	// session-authenticated download (a "<download>...</download> marker +
+	// GET /api/files/{file_id}") — detected generically by URL shape rather
+	// than by any specific tool name, so the same one mechanism covers
+	// every file-serving MCP server, whatever tool on it happens to hand
+	// back the link. Defaults false: a server's own tool output is
+	// untrusted input, and
+	// proxying a URL found in it (with this server's own bearer token
+	// attached) must never happen for a server nobody explicitly opted in —
+	// same reasoning as EncryptionKeyAllowed. Only takes effect when
+	// FileUpload.Enabled (cmd/miranda only calls
+	// Config.FileExposingServers/Orchestrator.SetFileExposingServers then).
+	ExposeFiles bool `yaml:"expose_files,omitempty"`
 }
 
 // defaultEncryptionKeyArgName is the tool-call argument name used for a
@@ -508,10 +513,10 @@ func (s MCPServer) EncryptionKeyPermitted() bool {
 // FilesEndpoint returns the HTTP endpoint URL and bearer token for this
 // server's file-transfer API: the server's own URL with its "/mcp" suffix
 // replaced by "/files", authenticated with the same TokenEnv-resolved token
-// as its MCP connection. Used by Config.SandboxFilesURL to build the
-// sandbox's own download proxy URL (see internal/httpapi's handleDownload)
-// — the sandbox protects its GET /files/{id} with the same bearer token as
-// /mcp, not a separate one.
+// as its MCP connection. Used by Config.FileExposingServers for any server
+// with ExposeFiles set (see internal/httpapi's handleDownload) — a server
+// exposing files this way protects its GET /files/{id} with the same
+// bearer token as /mcp, not a separate one.
 func (s MCPServer) FilesEndpoint() (filesURL, token string, err error) {
 	if !strings.HasSuffix(s.URL, "/mcp") {
 		return "", "", fmt.Errorf("config: mcp server %q url %q does not end with /mcp — cannot derive files endpoint", s.Name, s.URL)
@@ -855,26 +860,39 @@ func Default() Config {
 	}
 }
 
-// SandboxFilesURL returns the HTTP endpoint URL and bearer token for the
-// sandbox's file-upload API, derived from the MCP server named by
-// FileUpload.SandboxMCPServerName. The endpoint URL is that server's URL
-// with its "/mcp" suffix replaced by "/files"; the token is the resolved
-// value of the server's TokenEnv environment variable. Returns an error if
-// FileUpload is disabled, the server name is empty, or no matching MCP
-// server entry exists.
-func (c *Config) SandboxFilesURL() (filesURL, token string, err error) {
-	if !c.FileUpload.Enabled {
-		return "", "", fmt.Errorf("config: file_upload is not enabled")
-	}
-	if c.FileUpload.SandboxMCPServerName == "" {
-		return "", "", fmt.Errorf("config: file_upload.sandbox_mcp_server_name is not set")
-	}
+// FileServerEndpoint is one MCP server's file-serving HTTP endpoint (see
+// MCPServer.FilesEndpoint) — the URL prefix httpapi.Orchestrator.executeTool
+// treats as that server's own trusted file namespace, and the bearer token
+// it authenticates a proxied download with. Returned by
+// Config.FileExposingServers and passed to
+// Orchestrator.SetFileExposingServers.
+type FileServerEndpoint struct {
+	FilesURL string
+	Token    string
+}
+
+// FileExposingServers returns FileServerEndpoint for every enabled MCP
+// server with ExposeFiles set — including the sandbox, which uses this same
+// mechanism rather than a dedicated path of its own — keyed by each
+// server's own unprefixed Name, matching what mcp.Manager.ServerForTool
+// resolves a tool call's prefixed name back to, which is how executeTool
+// looks a call's owning server up in the returned map. Only meaningful when
+// FileUpload.Enabled (cmd/miranda's only caller); an error here (e.g. an
+// opted-in server's URL doesn't end in "/mcp") fails startup rather than
+// silently leaving that server's files undetected.
+func (c *Config) FileExposingServers() (map[string]FileServerEndpoint, error) {
+	out := make(map[string]FileServerEndpoint)
 	for _, s := range c.MCP.Servers {
-		if s.Name == c.FileUpload.SandboxMCPServerName {
-			return s.FilesEndpoint()
+		if !s.Enabled || !s.ExposeFiles {
+			continue
 		}
+		filesURL, token, err := s.FilesEndpoint()
+		if err != nil {
+			return nil, fmt.Errorf("config: expose_files server %q: %w", s.Name, err)
+		}
+		out[s.Name] = FileServerEndpoint{FilesURL: filesURL, Token: token}
 	}
-	return "", "", fmt.Errorf("config: no MCP server named %q found in mcp.servers", c.FileUpload.SandboxMCPServerName)
+	return out, nil
 }
 
 // Load reads the YAML file at path and merges it over Default(). A missing
@@ -911,9 +929,6 @@ func Load(paths ...string) (Config, error) {
 	if err := validateMCPServerNames(cfg.MCP.Servers); err != nil {
 		return cfg, err
 	}
-	if err := validateFileUploadConfig(cfg.FileUpload, cfg.MCP.Servers); err != nil {
-		return cfg, err
-	}
 	if err := validateEncryptionKeyServers(cfg.MCP.Servers); err != nil {
 		return cfg, err
 	}
@@ -938,22 +953,6 @@ func validateMCPServerNames(servers []MCPServer) error {
 		seen[s.Name] = true
 	}
 	return nil
-}
-
-// validateFileUploadConfig rejects a FileUploadConfig that names an MCP
-// server which doesn't exist in the server list. The check only runs when
-// file_upload.enabled is true and sandbox_mcp_server_name is set — if the
-// feature is disabled there is nothing to validate.
-func validateFileUploadConfig(cfg FileUploadConfig, servers []MCPServer) error {
-	if !cfg.Enabled || cfg.SandboxMCPServerName == "" {
-		return nil
-	}
-	for _, s := range servers {
-		if s.Name == cfg.SandboxMCPServerName {
-			return nil
-		}
-	}
-	return fmt.Errorf("config: file_upload.sandbox_mcp_server_name %q does not match any entry in mcp.servers", cfg.SandboxMCPServerName)
 }
 
 // validateEncryptionKeyServers rejects an MCP server marked

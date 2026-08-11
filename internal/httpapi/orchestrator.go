@@ -179,20 +179,28 @@ type Orchestrator struct {
 	schedule *schedule.Store
 	// attachStore is set via SetAttachmentStore; nil means Attachments in
 	// InputRequest are ignored (file_upload.enabled is false). Also doubles
-	// as the ownership record for files retrieved via download_file (see
-	// sandboxDownloadToolName) so GET /api/files/{file_id} can reject a
-	// household member fetching another member's file, the same check
-	// processAttachments already does for uploaded files.
+	// as the store for download records staged by the generic file-URI
+	// detector (see fileExposingServers) so GET /api/files/{file_id} can
+	// reject a household member fetching another member's file, the same
+	// check processAttachments already does for uploaded files.
 	attachStore *attachments.Store
-	// sandboxDownloadToolName is set via SetSandboxDownload to the namespaced
-	// MCP tool name (mcp.Manager's "<serverName>_download_file") of the
-	// sandbox's download_file tool; "" means executeTool never recognizes a
-	// download_file result, so no <download>...</download> marker is ever
-	// injected into a reply. See appendDownloadMarkers in agent_loop.go.
-	sandboxDownloadToolName string
-	// downloadRecordTTL is set via SetSandboxDownload from
+	// fileExposingServers is set via SetFileExposingServers: which MCP
+	// servers (keyed by their unprefixed config.MCPServer.Name, matching
+	// what mcp.Manager.ServerForTool resolves a tool call to) have opted
+	// into the file-URI download proxy (config.MCPServer.ExposeFiles), and
+	// the FilesEndpoint each one's own file links are expected to be rooted
+	// at. executeTool scans a matching server's tool-call results for a URL
+	// under that prefix and proxies it — detected by URL shape, not by any
+	// specific tool name, which is what lets every file-serving MCP server
+	// (the sandbox's download_file included — it has no dedicated path of
+	// its own) share this one mechanism. A server absent from this map
+	// never has its tool results scanned at all — see
+	// config.MCPServer.ExposeFiles's doc comment for why this is opt-in per
+	// server.
+	fileExposingServers map[string]config.FileServerEndpoint
+	// downloadRecordTTL is set via SetFileExposingServers from
 	// config.FileUploadConfig.DownloadRecordTTLHours and stamped onto every
-	// download ownership record's Record.TTL (see executeTool) — longer than
+	// download record's Record.TTL (see executeTool) — longer than
 	// attachStore's own short upload-oriented default TTL, since a download
 	// marker is embedded durably in persisted conversation history and can be
 	// revisited long after the turn that created it.
@@ -276,19 +284,18 @@ func (o *Orchestrator) SetAttachmentStore(s *attachments.Store) {
 	o.attachStore = s
 }
 
-// SetSandboxDownload wires the sandbox's download_file MCP tool name in,
-// mirroring SetAttachmentStore's post-construction style — call it once from
-// cmd/miranda with mcp.PrefixedToolName(SandboxMCPServerName, "download_file")
-// and config.FileUploadConfig.DownloadRecordTTLHours, only when
-// config.FileUploadConfig.Enabled (the same gate that creates o.attachStore;
-// both directions share the one config block since they proxy the same
-// sandbox "/files" HTTP namespace — see FileUploadConfig's doc comment).
-// Leaving it uncalled (the default, "") means executeTool never special-cases
-// a download_file result, so no download marker is ever injected and
-// GET /api/files/{file_id} has nothing to serve anyway (the route itself is
-// gated by SetUploadHandler, not this).
-func (o *Orchestrator) SetSandboxDownload(toolName string, recordTTL time.Duration) {
-	o.sandboxDownloadToolName = toolName
+// SetFileExposingServers wires in the set of MCP servers that opted into
+// the file-URI download proxy (config.MCPServer.ExposeFiles), via
+// config.Config.FileExposingServers, and recordTTL from
+// config.FileUploadConfig.DownloadRecordTTLHours — call it once from
+// cmd/miranda, mirroring SetAttachmentStore's post-construction style, only
+// when config.FileUploadConfig.Enabled (the same gate that creates
+// o.attachStore). Leaving it uncalled (the default, a nil map) means
+// executeTool never scans any MCP tool result for an embedded file URI —
+// every server needs an explicit, present entry to be trusted this way,
+// including the sandbox, which has no dedicated path of its own here.
+func (o *Orchestrator) SetFileExposingServers(servers map[string]config.FileServerEndpoint, recordTTL time.Duration) {
+	o.fileExposingServers = servers
 	o.downloadRecordTTL = recordTTL
 }
 

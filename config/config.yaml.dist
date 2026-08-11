@@ -158,6 +158,13 @@ mcp:
       url: "http://127.0.0.1:8788/mcp"
       token_env: "SANDBOX_MCP_TOKEN"
       enabled: true
+      # Opts this server into the generic file-download proxy (see
+      # file_upload's own comment below): executeTool scans every tool
+      # result routed to this server for a URL rooted at its own
+      # "/files" endpoint (derived from url above by replacing the "/mcp"
+      # suffix) — covers the sandbox's download_file tool, no
+      # server-specific wiring needed elsewhere in this config.
+      expose_files: true
     # Example: a diary MCP server (github.com/archer-developer/miranda-diary)
     # that supports per-user encryption — encryption_key_allowed lets
     # executeTool inject the calling user's unwrapped master key (see
@@ -184,14 +191,14 @@ mcp:
 # service whose tools might need to fetch an uploaded file this way (the
 # sandbox, miranda-medical-card, ...), not just by the browser.
 #
-# sandbox_mcp_server_name is unrelated to uploads — it's still used for the
-# other direction, GET /api/files/{file_id} proxying a file the sandbox's
-# download_file tool produced back out to the browser (Miranda derives that
-# proxy URL from the named server's URL by replacing the /mcp suffix with
-# /files, so that server's URL must end with /mcp).
+# The other direction — GET /api/files/{file_id} proxying a file some other
+# backend service's tool produced (the sandbox's download_file, or any other
+# server's tool that hands back a file_uri/fileUri) back out to the browser
+# — has no config of its own here: it's controlled per-server by that
+# server's own expose_files: true in mcp.servers above (see
+# code_exec_sandbox's entry), not by anything under file_upload.
 file_upload:
   enabled: true
-  sandbox_mcp_server_name: code_exec_sandbox # must match a name in mcp.servers above; download direction only
   public_base_url: "http://192.168.1.50:8787"
   max_file_size_bytes: 52428800 # 50 MB — same as the sandbox's staged_files default
 

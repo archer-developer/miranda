@@ -304,36 +304,31 @@ func run(cfg config.Config, logger *slog.Logger, eventHub *hub.Hub) error {
 	orchestrator.SetEncryptionKeyAllowedServers(encryptionKeyAllowedServers(cfg.MCP.Servers, logger))
 
 	// File upload is opt-in (Enabled defaults false). Resolve config early
-	// so a misconfigured sandbox URL fails fast before the HTTP server starts.
-	// The attachments.Store and SetUploadHandler wiring happens after
-	// server construction below (SetUploadHandler registers the route on the
-	// server's mux, which only exists after NewServer).
-	var (
-		uploadFilesURL    string
-		uploadToken       string
-		uploadAttachStore *attachments.Store
-	)
+	// so a misconfigured expose_files entry fails fast before the HTTP
+	// server starts. The attachments.Store and SetUploadHandler wiring
+	// happens after server construction below (SetUploadHandler registers
+	// the route on the server's mux, which only exists after NewServer).
+	var uploadAttachStore *attachments.Store
 	if cfg.FileUpload.Enabled {
-		var err error
-		uploadFilesURL, uploadToken, err = cfg.SandboxFilesURL()
-		if err != nil {
-			return fmt.Errorf("main: configure file upload: %w", err)
-		}
 		uploadAttachStore = attachments.NewStore(0) // 0 → default 1-hour TTL
 		defer uploadAttachStore.Close()
 		orchestrator.SetAttachmentStore(uploadAttachStore)
-		// mcp.PrefixedToolName matches mcp.Manager.Tools' own prefixing of
-		// every MCP tool name ("<serverName>_<toolName>") so executeTool can
-		// recognize a download_file result regardless of which MCP server
-		// entry the sandbox is configured under.
-		downloadRecordTTL := time.Duration(cfg.FileUpload.DownloadRecordTTLHours) * time.Hour
-		orchestrator.SetSandboxDownload(mcp.PrefixedToolName(cfg.FileUpload.SandboxMCPServerName, "download_file"), downloadRecordTTL)
+
+		// Every file-serving MCP server (the sandbox included — it has no
+		// dedicated path of its own here, see config.MCPServer.ExposeFiles)
+		// opts in via expose_files: true; executeTool scans that server's
+		// tool results for an embedded file URI rather than Miranda relying
+		// on any one hardcoded tool name.
+		fileExposingServers, err := cfg.FileExposingServers()
+		if err != nil {
+			return fmt.Errorf("main: configure file upload: %w", err)
+		}
+		orchestrator.SetFileExposingServers(fileExposingServers, time.Duration(cfg.FileUpload.DownloadRecordTTLHours)*time.Hour)
 
 		// Required for processAttachments to build a fileURI any tool can
 		// pull an upload's bytes from (see docs/file-staging-refactor.md) —
-		// same "fail fast at startup rather than silently serve broken
-		// URIs" reasoning as SandboxFilesURL's own error above, mirroring
-		// gemini_tts's identical PublicBaseURL requirement
+		// fail fast at startup rather than silently serve broken URIs,
+		// mirroring gemini_tts's identical PublicBaseURL requirement
 		// (internal/tts/gemini.go).
 		if cfg.FileUpload.PublicBaseURL == "" {
 			return fmt.Errorf("main: file_upload.public_base_url is not configured — other services have no way to fetch an uploaded file's bytes")
@@ -355,7 +350,7 @@ func run(cfg config.Config, logger *slog.Logger, eventHub *hub.Hub) error {
 		server.SetTTSAudioHandler(ttsAudioHandler)
 	}
 	if cfg.FileUpload.Enabled {
-		server.SetUploadHandler(uploadFilesURL, uploadToken, cfg.FileUpload.MaxFileSizeBytes)
+		server.SetUploadHandler(cfg.FileUpload.MaxFileSizeBytes)
 	}
 	if cfg.Telegram.Enabled {
 		server.SetTelegramWebhook(&httpapi.TelegramWebhook{

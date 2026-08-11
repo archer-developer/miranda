@@ -8,7 +8,6 @@ import (
 	"mime"
 	"mime/multipart"
 	"net/http"
-	"net/url"
 	"strings"
 	"time"
 
@@ -202,34 +201,40 @@ func (s *Server) handleFilesServe(w http.ResponseWriter, r *http.Request) {
 	_, _ = w.Write(rec.Data)
 }
 
-// handleDownload proxies a GET request for a file the model retrieved from a
-// sandbox session via the download_file MCP tool (see
-// ../../miranda-code-execution-sandbox/CLAUDE.md's "File download flow").
-// The file_id path value is what that tool call returned and what
-// appendDownloadMarkers (internal/httpapi/agent_loop.go) embeds in a
-// <download>...</download> marker in the assistant's reply — the web UI chat
-// screen (chat.js's extractDownloadBlocks) turns that marker into a chip
-// linking straight to this route.
+// handleDownload proxies a GET request for a file the model retrieved from
+// some other backend service — the generic MCP file-URI detector (see
+// Orchestrator.SetFileExposingServers) recognizing a file_uri/fileUri-shaped
+// field or line in an opted-in server's tool result, whether that's
+// miranda-medical-card's medical.get_document or the sandbox's own
+// download_file; there is no second, server-specific path. It stages an
+// attachments.Record carrying the file's real address (RemoteURL) and the
+// bearer token to fetch it with (RemoteToken) under a Miranda-minted
+// file_id — this handler is what actually proxies the bytes through using
+// that record. The file_id path value is what appendDownloadMarkers
+// (internal/httpapi/agent_loop.go) embeds in a <download>...</download>
+// marker in the assistant's reply — the web UI chat screen (chat.js's
+// extractDownloadBlocks) turns that marker into a chip linking straight to
+// this route.
 //
 // Auth: same dual bearer-token / session-cookie check as /api/v1/input and
 // POST /api/upload. The file's recorded owner (o.attachStore, populated by
-// executeTool at download_file call time with the actual resolved userID,
-// not just the session identity — see executeTool) must match the
-// requesting user — a mismatched or unknown file_id 404s rather than
-// revealing whether it exists, the same IDOR-safe pattern GET
-// /api/dialogs/{id} uses. Session-cookie auth identifies the requester as
-// the logged-in user, same as every other endpoint. Bearer-token auth has
-// no identity of its own, so (mirroring how POST /api/v1/input lets a
-// bearer-token caller supply InputRequest.UserID) the caller must pass a
-// "user_id" query parameter to be recognized as anyone in particular; with
-// none given, requestingUser is "" and only ever matches an ownerless
-// record (rec.UserID == ""), the same fail-closed default processAttachments
-// applies for an anonymous bearer-token upload.
+// executeTool with the actual resolved userID, not just the session
+// identity — see executeTool) must match the requesting user — a
+// mismatched or unknown file_id 404s rather than revealing whether it
+// exists, the same IDOR-safe pattern GET /api/dialogs/{id} uses.
+// Session-cookie auth identifies the requester as the logged-in user, same
+// as every other endpoint. Bearer-token auth has no identity of its own, so
+// (mirroring how POST /api/v1/input lets a bearer-token caller supply
+// InputRequest.UserID) the caller must pass a "user_id" query parameter to
+// be recognized as anyone in particular; with none given, requestingUser is
+// "" and only ever matches an ownerless record (rec.UserID == ""), the same
+// fail-closed default processAttachments applies for an anonymous
+// bearer-token upload.
 //
-// The staged file on the sandbox side is NOT deleted by this GET (mirroring
-// the sandbox's own GET /files/{id} semantics — see that repo's CLAUDE.md),
-// so a dropped connection or retry can re-fetch the same file_id until the
-// sandbox's own TTL sweeper removes it.
+// The staged file on the remote side is NOT deleted by this GET (mirroring
+// the sandbox's own GET /files/{id} semantics), so a dropped connection or
+// retry can re-fetch the same file_id until whichever remote TTL sweeper
+// owns it removes it there.
 func (s *Server) handleDownload(w http.ResponseWriter, r *http.Request) {
 	sessionUser, ok := s.authorize(r)
 	if !ok {
@@ -259,7 +264,7 @@ func (s *Server) handleDownload(w http.ResponseWriter, r *http.Request) {
 	}
 
 	rec, found := s.orchestrator.attachStore.Get(fileID)
-	if !found || (rec.UserID != "" && rec.UserID != requestingUser) {
+	if !found || (rec.UserID != "" && rec.UserID != requestingUser) || rec.RemoteURL == "" {
 		http.Error(w, "not found", http.StatusNotFound)
 		return
 	}
@@ -267,37 +272,39 @@ func (s *Server) handleDownload(w http.ResponseWriter, r *http.Request) {
 	downloadCtx, cancel := context.WithTimeout(r.Context(), sandboxDownloadTimeout)
 	defer cancel()
 
-	req, err := http.NewRequestWithContext(downloadCtx, http.MethodGet, s.upload.sandboxURL+"/"+url.PathEscape(fileID), nil)
+	req, err := http.NewRequestWithContext(downloadCtx, http.MethodGet, rec.RemoteURL, nil)
 	if err != nil {
-		http.Error(w, "failed to build sandbox request: "+err.Error(), http.StatusInternalServerError)
+		http.Error(w, "failed to build remote request: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
-	if s.upload.sandboxToken != "" {
-		req.Header.Set("Authorization", "Bearer "+s.upload.sandboxToken)
+	if rec.RemoteToken != "" {
+		req.Header.Set("Authorization", "Bearer "+rec.RemoteToken)
 	}
 
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
-		s.logger.Error("download: sandbox request failed", "error", err, "file_id", fileID)
-		http.Error(w, "failed to fetch file from sandbox: "+err.Error(), http.StatusBadGateway)
+		s.logger.Error("download: remote request failed", "error", err, "file_id", fileID)
+		http.Error(w, "failed to fetch file: "+err.Error(), http.StatusBadGateway)
 		return
 	}
 	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
 		errBody, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
-		http.Error(w, fmt.Sprintf("sandbox returned HTTP %d: %s", resp.StatusCode, strings.TrimSpace(string(errBody))), resp.StatusCode)
+		http.Error(w, fmt.Sprintf("remote server returned HTTP %d: %s", resp.StatusCode, strings.TrimSpace(string(errBody))), resp.StatusCode)
 		return
 	}
 
 	// Forward only the specific headers a file download needs — never copy
-	// resp.Header wholesale, which would let the sandbox dictate arbitrary
-	// response headers (e.g. Set-Cookie) to this handler's caller.
+	// resp.Header wholesale, which would let the remote server dictate
+	// arbitrary response headers (e.g. Set-Cookie) to this handler's caller.
 	if ct := resp.Header.Get("Content-Type"); ct != "" {
 		w.Header().Set("Content-Type", ct)
 	}
 	if cd := resp.Header.Get("Content-Disposition"); cd != "" {
 		w.Header().Set("Content-Disposition", cd)
+	} else if rec.Filename != "" {
+		w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=%q", rec.Filename))
 	}
 	if cl := resp.Header.Get("Content-Length"); cl != "" {
 		w.Header().Set("Content-Length", cl)

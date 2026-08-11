@@ -9,9 +9,12 @@
 // internal/httpapi's GET /files/{id} route — Miranda is the canonical host
 // for an uploaded file's bytes, and hands the model a URI under that route
 // rather than pushing the bytes anywhere itself (see
-// docs/file-staging-refactor.md). The one exception is a download_file
-// *ownership* record (set by executeTool, not by an upload) — that only
-// ever needs UserID for an access check, so it never populates Data.
+// docs/file-staging-refactor.md). The one exception is a *download* record
+// (set by executeTool, not by an upload, for a file retrieved from some
+// other backend service — the sandbox's download_file tool, or a generic
+// MCP file-URI detection — see Record.RemoteURL) — that one never populates
+// Data, only RemoteURL/RemoteToken for handleDownload to proxy against on
+// demand, plus UserID for the same access check an upload record uses.
 package attachments
 
 import (
@@ -65,9 +68,23 @@ type Record struct {
 	// for providers that support it (images for vision, text for context
 	// injection), and/or served back out on demand at GET /files/{id} to
 	// whichever external tool the model handed the resulting fileURI to
-	// (see package doc comment). Nil only for a download_file
-	// ownership record, which never had bytes of its own to buffer.
+	// (see package doc comment). Nil for a download record instead backed
+	// by RemoteURL — Miranda never buffers those bytes itself, only proxies
+	// them on demand.
 	Data []byte
+	// RemoteURL, when set, marks this record as a download proxy rather
+	// than a locally-buffered upload: internal/httpapi's GET
+	// /api/files/{file_id} (handleDownload) fetches this exact URL instead
+	// of serving Data, using RemoteToken as its bearer credential. Set by
+	// executeTool's generic MCP file-URI detector (see
+	// Orchestrator.SetFileExposingServers) — the one mechanism that
+	// discovers a file living on some other backend service rather than
+	// uploaded straight into this store, covering the sandbox's own
+	// download_file the same way as any other opted-in server.
+	RemoteURL string
+	// RemoteToken is the bearer token handleDownload attaches when fetching
+	// RemoteURL. Only meaningful together with RemoteURL.
+	RemoteToken string
 	// TTL overrides the store's default TTL for this one record when
 	// non-zero. Upload-staging records rely on the store default (built for
 	// a turn still being composed); a download's ownership record instead

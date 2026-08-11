@@ -28,13 +28,12 @@ import (
 // transient error to retry next turn on the same, still-live session.
 var ErrDisconnected = errors.New("mcp: server disconnected")
 
-// PrefixedToolName builds the tool name Manager.Tools advertises for a given
-// server/tool pair — the single source of truth for that "<serverName>_<toolName>"
-// convention, so callers that need to recognize a specific well-known MCP
-// tool by name from outside this package (e.g. cmd/miranda wiring the
-// sandbox's download_file tool into Orchestrator.SetSandboxDownload) don't
-// have to hand-reconstruct the format and risk drifting from Tools/Call below.
-func PrefixedToolName(serverName, toolName string) string {
+// prefixedToolName builds the tool name Manager.Tools advertises for a
+// given server/tool pair — the single source of truth for that
+// "<serverName>_<toolName>" convention, used by Tools/Call/serverForTool
+// below so the format can't drift between where it's built and where it's
+// parsed back apart.
+func prefixedToolName(serverName, toolName string) string {
 	return serverName + "_" + toolName
 }
 
@@ -177,7 +176,7 @@ func (m *Manager) Tools(ctx context.Context) []llm.ToolDef {
 			continue
 		}
 		for _, t := range tools {
-			t.Name = PrefixedToolName(name, t.Name)
+			t.Name = prefixedToolName(name, t.Name)
 			out = append(out, t)
 		}
 	}
@@ -200,7 +199,7 @@ func (m *Manager) Call(ctx context.Context, prefixedName, argumentsJSON string) 
 	if !ok {
 		return "", fmt.Errorf("mcp: server %q for tool %q is currently disconnected", name, prefixedName)
 	}
-	result, err := c.CallTool(ctx, strings.TrimPrefix(prefixedName, PrefixedToolName(name, "")), argumentsJSON)
+	result, err := c.CallTool(ctx, strings.TrimPrefix(prefixedName, prefixedToolName(name, "")), argumentsJSON)
 	if err != nil && errors.Is(err, ErrDisconnected) {
 		m.logger.Warn("mcp: server disconnected, dropping it until it reconnects", "server", name, "error", err)
 		m.removeClient(name)
@@ -231,7 +230,7 @@ func (m *Manager) orderSnapshot() []string {
 
 func serverForTool(order []string, prefixedName string) (string, bool) {
 	for _, name := range order {
-		if strings.HasPrefix(prefixedName, PrefixedToolName(name, "")) {
+		if strings.HasPrefix(prefixedName, prefixedToolName(name, "")) {
 			return name, true
 		}
 	}

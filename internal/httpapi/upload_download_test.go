@@ -43,7 +43,7 @@ func newDownloadTestServer(t *testing.T, registry *users.Registry, sessions *ses
 	t.Cleanup(sandbox.Close)
 
 	server := NewServer(o, o.hub, authToken, nil, nil, registry, sessions)
-	server.SetUploadHandler(sandbox.URL, "", 0)
+	server.SetUploadHandler(0)
 
 	return server, store, sandbox.URL
 }
@@ -55,8 +55,8 @@ func TestHandleDownload_SessionCookieRejectsAnotherUsersFile(t *testing.T) {
 	token, err := sessions.Create("archer")
 	require.NoError(t, err)
 
-	server, store, _ := newDownloadTestServer(t, registry, sessions, "secret")
-	store.Put(attachments.Record{UserID: "anna", FileID: "f1", Filename: "report.pdf"})
+	server, store, sandboxURL := newDownloadTestServer(t, registry, sessions, "secret")
+	store.Put(attachments.Record{UserID: "anna", FileID: "f1", Filename: "report.pdf", RemoteURL: sandboxURL + "/f1"})
 
 	ts := httptest.NewServer(server)
 	defer ts.Close()
@@ -76,8 +76,8 @@ func TestHandleDownload_SessionCookieAllowsOwnFile(t *testing.T) {
 	token, err := sessions.Create("anna")
 	require.NoError(t, err)
 
-	server, store, _ := newDownloadTestServer(t, registry, sessions, "secret")
-	store.Put(attachments.Record{UserID: "anna", FileID: "f1", Filename: "report.pdf"})
+	server, store, sandboxURL := newDownloadTestServer(t, registry, sessions, "secret")
+	store.Put(attachments.Record{UserID: "anna", FileID: "f1", Filename: "report.pdf", RemoteURL: sandboxURL + "/f1"})
 
 	ts := httptest.NewServer(server)
 	defer ts.Close()
@@ -101,8 +101,8 @@ func TestHandleDownload_BearerTokenWithoutUserIDCannotFetchOwnedFile(t *testing.
 	registry, err := users.NewRegistry([]config.UserConfig{{Username: "anna", PasswordHash: "x"}})
 	require.NoError(t, err)
 
-	server, store, _ := newDownloadTestServer(t, registry, nil, "secret")
-	store.Put(attachments.Record{UserID: "anna", FileID: "f1", Filename: "report.pdf"})
+	server, store, sandboxURL := newDownloadTestServer(t, registry, nil, "secret")
+	store.Put(attachments.Record{UserID: "anna", FileID: "f1", Filename: "report.pdf", RemoteURL: sandboxURL + "/f1"})
 
 	ts := httptest.NewServer(server)
 	defer ts.Close()
@@ -119,8 +119,8 @@ func TestHandleDownload_BearerTokenWithMatchingUserIDCanFetchOwnedFile(t *testin
 	registry, err := users.NewRegistry([]config.UserConfig{{Username: "anna", PasswordHash: "x"}})
 	require.NoError(t, err)
 
-	server, store, _ := newDownloadTestServer(t, registry, nil, "secret")
-	store.Put(attachments.Record{UserID: "anna", FileID: "f1", Filename: "report.pdf"})
+	server, store, sandboxURL := newDownloadTestServer(t, registry, nil, "secret")
+	store.Put(attachments.Record{UserID: "anna", FileID: "f1", Filename: "report.pdf", RemoteURL: sandboxURL + "/f1"})
 
 	ts := httptest.NewServer(server)
 	defer ts.Close()
@@ -137,8 +137,8 @@ func TestHandleDownload_BearerTokenWithWrongUserIDCannotFetchOwnedFile(t *testin
 	registry, err := users.NewRegistry([]config.UserConfig{{Username: "anna", PasswordHash: "x"}, {Username: "archer", PasswordHash: "x"}})
 	require.NoError(t, err)
 
-	server, store, _ := newDownloadTestServer(t, registry, nil, "secret")
-	store.Put(attachments.Record{UserID: "anna", FileID: "f1", Filename: "report.pdf"})
+	server, store, sandboxURL := newDownloadTestServer(t, registry, nil, "secret")
+	store.Put(attachments.Record{UserID: "anna", FileID: "f1", Filename: "report.pdf", RemoteURL: sandboxURL + "/f1"})
 
 	ts := httptest.NewServer(server)
 	defer ts.Close()
@@ -156,11 +156,8 @@ func TestHandleDownload_NilAttachStoreFailsClosed(t *testing.T) {
 	o, _, _ := newTestOrchestrator(t, provider)
 	// Deliberately never call o.SetAttachmentStore.
 
-	sandbox := fakeSandboxFiles(t, "file contents")
-	defer sandbox.Close()
-
 	server := NewServer(o, o.hub, "", nil, nil, nil, nil)
-	server.SetUploadHandler(sandbox.URL, "", 0)
+	server.SetUploadHandler(0)
 
 	ts := httptest.NewServer(server)
 	defer ts.Close()
@@ -185,7 +182,7 @@ func TestHandleFilesServe_ServesKnownFile(t *testing.T) {
 	store.Put(attachments.Record{FileID: "abc123", Filename: "scan.pdf", MIMEType: "application/pdf", Data: []byte("%PDF-bytes")})
 
 	server := NewServer(o, o.hub, "", nil, nil, nil, nil)
-	server.SetUploadHandler("http://unused.invalid", "", 0)
+	server.SetUploadHandler(0)
 	ts := httptest.NewServer(server)
 	defer ts.Close()
 
@@ -206,7 +203,7 @@ func TestHandleFilesServe_UnknownIDReturns404(t *testing.T) {
 	o.SetAttachmentStore(store)
 
 	server := NewServer(o, o.hub, "", nil, nil, nil, nil)
-	server.SetUploadHandler("http://unused.invalid", "", 0)
+	server.SetUploadHandler(0)
 	ts := httptest.NewServer(server)
 	defer ts.Close()
 
@@ -218,10 +215,9 @@ func TestHandleFilesServe_UnknownIDReturns404(t *testing.T) {
 
 // TestHandleUpload_StagesLocallyWithoutForwardingAnywhere guards the actual
 // point of this refactor: POST /api/upload must never make an outbound
-// request (the sandboxURL passed to SetUploadHandler here is deliberately
-// unreachable — if handleUpload tried to forward to it, this test would
-// fail on a connection error, not silently pass), and the returned file_id
-// must be immediately fetchable back from GET /files/{id}.
+// request at all — it stages bytes straight into attachStore, with no
+// remote target configured anywhere in this test — and the returned
+// file_id must be immediately fetchable back from GET /files/{id}.
 func TestHandleUpload_StagesLocallyWithoutForwardingAnywhere(t *testing.T) {
 	provider := llmtest.New("local")
 	o, _, _ := newTestOrchestrator(t, provider)
@@ -230,7 +226,7 @@ func TestHandleUpload_StagesLocallyWithoutForwardingAnywhere(t *testing.T) {
 	o.SetAttachmentStore(store)
 
 	server := NewServer(o, o.hub, "", nil, nil, nil, nil)
-	server.SetUploadHandler("http://127.0.0.1:1/unreachable", "", 10<<20)
+	server.SetUploadHandler(10 << 20)
 	ts := httptest.NewServer(server)
 	defer ts.Close()
 

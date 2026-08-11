@@ -212,3 +212,29 @@ func TestMCPServer_FilesEndpoint(t *testing.T) {
 	_, _, err = MCPServer{Name: "bad", URL: "https://127.0.0.1:8791/not-mcp"}.FilesEndpoint()
 	require.Error(t, err)
 }
+
+func TestConfig_FileExposingServers_OnlyIncludesOptedInEnabledServers(t *testing.T) {
+	cfg := Config{MCP: MCPConfig{Servers: []MCPServer{
+		{Name: "medical_card", URL: "https://127.0.0.1:8791/mcp", Enabled: true, ExposeFiles: true},
+		{Name: "sandbox", URL: "http://127.0.0.1:8788/mcp", Enabled: true, ExposeFiles: true},
+		{Name: "ha", URL: "http://192.168.1.50:8123/api/mcp", Enabled: true, ExposeFiles: false},
+		{Name: "disabled_but_opted_in", URL: "http://127.0.0.1:9000/mcp", Enabled: false, ExposeFiles: true},
+	}}}
+
+	servers, err := cfg.FileExposingServers()
+	require.NoError(t, err)
+	require.Len(t, servers, 2)
+	require.Equal(t, "https://127.0.0.1:8791/files", servers["medical_card"].FilesURL)
+	require.Equal(t, "http://127.0.0.1:8788/files", servers["sandbox"].FilesURL)
+	require.NotContains(t, servers, "ha")
+	require.NotContains(t, servers, "disabled_but_opted_in")
+}
+
+func TestConfig_FileExposingServers_FailsFastOnMalformedURL(t *testing.T) {
+	cfg := Config{MCP: MCPConfig{Servers: []MCPServer{
+		{Name: "bad", URL: "https://127.0.0.1:8791/not-mcp", Enabled: true, ExposeFiles: true},
+	}}}
+
+	_, err := cfg.FileExposingServers()
+	require.Error(t, err)
+}

@@ -274,7 +274,7 @@ predicate `config.MCPServer.EncryptionKeyPermitted()` (`EncryptionKeyAllowed
 apart on what "permitted" means:
 
 1. **Config-load time** (`config.validateEncryptionKeyServers`, called from
-   `config.Load` alongside `validateMCPServerNames`/`validateFileUploadConfig`):
+   `config.Load` alongside `validateMCPServerNames`):
    rejects `encryption_key_allowed: true` combined with a non-`https://`
    URL outright — fails startup rather than silently degrading.
 2. **Startup, before serving traffic** (`cmd/miranda`'s

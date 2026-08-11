@@ -303,11 +303,11 @@ resource by URL): the id's own randomness plus the store's TTL is the
 security boundary, not a token. `config.FileUploadConfig.PublicBaseURL`
 mirrors `TTSConfig`'s `gemini_tts.PublicBaseURL` for the same reason —
 `cmd/miranda` refuses to start with file upload enabled and no
-`public_base_url` set. This route is distinct from the pre-existing,
-*authenticated* `GET /api/files/{file_id}` (`handleDownload`), which is
-unrelated and untouched: that one proxies a file the sandbox's
-`download_file` tool produced back out to the user's own browser, the
-opposite direction from what this section covers.
+`public_base_url` set. This route is distinct from the separate,
+*authenticated* `GET /api/files/{file_id}` (`handleDownload`) — that one
+proxies a file some other backend service produced back out to the user's
+own browser, the opposite direction from what this section covers; see
+"File download proxy" below.
 
 The upshot for any external MCP server that wants to receive a
 Miranda-hosted file: its own upload-shaped tool must take a `fileUri`
@@ -332,6 +332,59 @@ into the bubble — the moment that sentence's wording changed elsewhere in
 the same diff. The marker's `note` field is still human/model-readable
 prose (with the real URI substituted in), but the client never parses it —
 only the JSON shape is load-bearing for rendering.
+
+### File download proxy (external MCP services → attachments)
+
+The mirror image of file staging above: some MCP servers hand back a link
+to a file they host rather than accept one, and the model must never be
+handed a URI it can't actually reach and would relay verbatim (e.g.
+`miranda-medical-card`'s `medical.get_document` returning a `fileUri` on
+`https://127.0.0.1:8791/...` — an internal address requiring the same
+bearer token as `/mcp`, useless to a browser). `GET /api/files/{file_id}`
+(`handleDownload`) is the one *authenticated* download route (distinct from
+the unauthenticated `GET /files/{id}` above): it proxies a request through
+to whichever remote file some `attachments.Record` names via `RemoteURL`
+(fetched with `RemoteToken` as bearer auth), rather than a single
+hardcoded target — this is what lets one instance proxy several different
+backend services' files at once.
+
+There is exactly **one** mechanism that stages such a record, for every
+file-exposing MCP server including the sandbox — no server gets a
+dedicated code path of its own. A server opts in via
+`config.MCPServer.ExposeFiles` (`expose_files: true`); `Orchestrator`'s
+`fileExposingServers` map (wired via `SetFileExposingServers`, built from
+`config.Config.FileExposingServers`) is which servers are trusted this way
+and what each one's own `FilesEndpoint()` (the `/mcp` → `/files` URL
+convention) is expected to be rooted at. `executeTool` scans *every* tool
+call result routed to an opted-in server — `detectRemoteFileLinks` in
+`internal/httpapi/agent_loop.go` — for a URL matching that prefix,
+regardless of which tool produced it or what shape the rest of the result
+takes:
+
+- **JSON results** (e.g. `medical.get_document`'s `{"fileUri": "..."}`) —
+  the matched URL's sibling fields in the same JSON object (`title`/
+  `filename`/`name`/`size_bytes`/`mime_type`/...) are read for a
+  best-effort filename/MIME type/size (`findSiblingObject` +
+  `stringSiblingField`/`int64SiblingField`).
+- **Plain "key: value" text results** (the sandbox's `download_file`,
+  which reports `file_id: ...\nfile_uri: ...\nfilename: ...\n...` rather
+  than JSON) — the same metadata is read from matching lines instead
+  (`keyValueStringField`/`keyValueInt64Field`), using the identical
+  priority-ordered key lists.
+
+Either way, only a URL whose prefix matches an explicitly opted-in server's
+own `FilesEndpoint()` is ever treated as a file reference — untrusted
+input (a malicious/compromised tool result) must never make Miranda's
+backend proxy, with that server's own bearer token attached, to an
+arbitrary address. Missing metadata degrades cleanly: the download chip
+(`downloadChip` in `downloads.js`) simply omits a size/name it doesn't
+have rather than guessing wrong.
+
+This is the reason the sandbox's `download_file` tool needs to return a
+full `file_uri` field (not just a bare `file_id`) for its downloads to work
+under this design — see `docs/file-staging-refactor.md`'s §6 for the
+incident that prompted this whole mechanism and the exact contract each
+file-exposing MCP server (sandbox included) is expected to follow.
 
 ### Scheduled tasks
 

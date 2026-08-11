@@ -67,16 +67,13 @@ type Server struct {
 }
 
 // uploadConfig holds the static configuration for the upload/download
-// routes. sandboxURL/sandboxToken are used only by handleDownload now (see
-// config.FileUploadConfig.SandboxMCPServerName / Config.SandboxFilesURL) —
-// POST /api/upload no longer talks to the sandbox at all, it stages bytes
-// straight into the orchestrator's own attachStore (see
-// docs/file-staging-refactor.md). Wired in by SetUploadHandler at startup;
-// all fields are read-only after that.
+// routes. handleDownload no longer reads a fixed remote target from here —
+// each attachments.Record it proxies against carries its own RemoteURL/
+// RemoteToken (set by executeTool, one per file, possibly pointing at
+// different backend services) — so the only thing left here is the upload
+// size limit. Wired in by SetUploadHandler at startup.
 type uploadConfig struct {
-	sandboxURL   string // e.g. "http://192.168.1.50:8788/files" — download proxy target only
-	sandboxToken string // bearer token for the sandbox's download endpoint
-	maxBytes     int64  // per-file size limit, enforced only on POST /api/upload
+	maxBytes int64 // per-file size limit, enforced only on POST /api/upload
 }
 
 // NewServer builds a Server. webUI, if non-nil, is mounted at "/" (see
@@ -116,12 +113,11 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 // SetUploadHandler wires the optional file routes in when file_upload is
 // enabled, mirroring SetTTSAudioHandler's post-construction style for
-// optional routes. sandboxURL/sandboxToken identify the sandbox's download
-// endpoint (derived from config via Config.SandboxFilesURL — unrelated to
-// uploads now, see uploadConfig); maxBytes caps the per-file read limit
-// (config.FileUploadConfig.MaxFileSizeBytes) on POST /api/upload only — the
-// sandbox's own max_download_size_bytes already bounds a download_file
-// call, so nothing here needs to re-check it.
+// optional routes. maxBytes caps the per-file read limit
+// (config.FileUploadConfig.MaxFileSizeBytes) on POST /api/upload only — a
+// download's own remote size limit (e.g. the sandbox's
+// max_download_size_bytes) already bounds it upstream, so nothing here
+// needs to re-check it.
 //
 // Three routes:
 //   - POST /api/upload (handleUpload) stages a file straight into
@@ -133,16 +129,16 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 //     an uploaded attachment's bytes from, given the fileURI
 //     processAttachments handed the model.
 //   - GET /api/files/{file_id} (handleDownload) is unrelated to the above
-//     two: it proxies a file the model retrieved via the sandbox's
-//     download_file MCP tool (see Orchestrator.SetSandboxDownload) back out
-//     to whoever the chat UI is rendering a <download>...</download> marker
-//     for — the one direction this refactor left untouched.
-func (s *Server) SetUploadHandler(sandboxURL, sandboxToken string, maxBytes int64) {
-	s.upload = &uploadConfig{
-		sandboxURL:   sandboxURL,
-		sandboxToken: sandboxToken,
-		maxBytes:     maxBytes,
-	}
+//     two: it proxies a file the model retrieved from some other backend
+//     service, detected by the generic MCP file-URI detector (see
+//     Orchestrator.SetFileExposingServers — covers the sandbox's own
+//     download_file the same way as any other opted-in server, no
+//     server-specific path) back out to whoever the chat UI is rendering
+//     a <download>...</download> marker for, using that file's own
+//     attachments.Record.RemoteURL/RemoteToken rather than a single fixed
+//     target.
+func (s *Server) SetUploadHandler(maxBytes int64) {
+	s.upload = &uploadConfig{maxBytes: maxBytes}
 	s.mux.HandleFunc("POST /api/upload", s.handleUpload)
 	s.mux.HandleFunc("GET /files/{id}", s.handleFilesServe)
 	s.mux.HandleFunc("GET /api/files/{file_id}", s.handleDownload)
