@@ -253,7 +253,7 @@ access is what this defends against, not a live memory-dump attacker.
 MCP server's tool-call arguments right before dispatch, on a local
 variable only — never mutating the `tc` that `history`/`llmtrace` already
 recorded — so the key structurally cannot leak into persisted history or
-`llm.log`. See **`docs/encryption.md`** for the full design: the wrap/unwrap
+`llm.log`. See **`docs/adr/encryption.md`** for the full design: the wrap/unwrap
 sequencing (including the per-username lock that closes a real bootstrap
 race between two unlock methods), the PRF ceremony details (including a
 real client-side `ArrayBuffer`/`JSON.stringify` bug this had to fix), the
@@ -279,7 +279,7 @@ raw bytes directly (`miranda-medical-card`'s `medical.upload_file`, `data`
 argument) instead of the one the push mechanism intercepted, reproducing
 the exact hallucination bug this exists to prevent — nothing short of
 removing every raw-bytes-accepting tool closes that gap for good, which is
-what the current design does. See **`docs/file-staging-refactor.md`** for
+what the current design does. See **`docs/adr/file-staging-refactor.md`** for
 the full incident writeup (both the original bug and this one) and why the
 push design was abandoned rather than patched further.
 
@@ -313,7 +313,7 @@ The upshot for any external MCP server that wants to receive a
 Miranda-hosted file: its own upload-shaped tool must take a `fileUri`
 argument and fetch it itself, not accept raw bytes as an argument at all —
 there is deliberately no tool left for the model to hallucinate content
-into. See `docs/file-staging-refactor.md`'s contract section for exactly
+into. See `docs/adr/file-staging-refactor.md`'s contract section for exactly
 what that means for the sandbox's and miranda-medical-card's own tool
 schemas (implemented in their own repos, not here).
 
@@ -389,7 +389,7 @@ have rather than guessing wrong.
 
 This is the reason the sandbox's `download_file` tool needs to return a
 full `file_uri` field (not just a bare `file_id`) for its downloads to work
-under this design — see `docs/file-staging-refactor.md`'s §6 for the
+under this design — see `docs/adr/file-staging-refactor.md`'s §6 for the
 incident that prompted this whole mechanism and the exact contract each
 file-exposing MCP server (sandbox included) is expected to follow.
 
@@ -646,7 +646,7 @@ must never be trusted to invent this id on its own. Unlike
 per-tool: most tools on a given server don't declare a session-id parameter
 in their own schema at all, and injecting one anyway is exactly the kind of
 schema mismatch `EncryptionKeyArgName` had to be added to work around in
-the first place — see `docs/medical-card-session-injection.md` for the full
+the first place — see `docs/adr/medical-card-session-injection.md` for the full
 design. Both mechanisms, plus the file-URI download detection described in
 "File download proxy" below, are config-driven per-MCP-server opt-ins of
 the same underlying shape, so `httpapi.Orchestrator` bundles all three into

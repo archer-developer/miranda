@@ -1,8 +1,8 @@
 # Автоматическая подстановка `sessionId` в `medical.ask`
 
-> Статус: реализовано (`internal/config`, `internal/mcp`, `internal/httpapi`, `cmd/miranda`,
-> `config/mcp.yaml`). Итоговый код местами отличается от псевдокода ниже в деталях именования
-> (например, `SessionIDServer`/`ServerAndTool` экспортированы, поскольку `cmd/miranda` строит их
+> Статус: реализовано (`../../internal/config`, `../../internal/mcp`, `../../internal/httpapi`, `../../cmd/miranda`,
+> `../../config/mcp.yaml`). Итоговый код местами отличается от псевдокода ниже в деталях именования
+> (например, `SessionIDServer`/`ServerAndTool` экспортированы, поскольку `../../cmd/miranda` строит их
 > напрямую) — если что-то из описанного ниже разойдётся с кодом в будущем, верь коду, не этому файлу.
 
 ---
@@ -11,14 +11,14 @@
 
 `miranda-medical-card`'s `medical.ask` (см. `miranda-medical-card/docs/adr/001-internal-agent-loop-implementation.md`, `miranda-medical-card/docs/mcp/04-medical.md` §5, §7.1) теперь поддерживает необязательный параметр `sessionId`: если он передан, medical-card сохраняет историю вопросов/ответов и вызовов инструментов этой сессии в собственной SQLite и учитывает её при следующем вопросе с тем же `sessionId` — это то, что делает уточняющие вопросы ("а что насчёт анализов сына?") осмысленными без повторения полного контекста в каждом вопросе.
 
-Идея (см. тот ADR, §2): Miranda должна передавать **своё уже разрешённое** `conversationID` (то же самое значение, что уже используется для `llmtrace.WithConversationID` и передаётся в `runAgentLoop`, см. `internal/httpapi/orchestrator.go`'s `resolveConversation`) — так гарантируется, что сессия Miranda и внутренняя сессия медкарты остаются синхронизированы 1:1.
+Идея (см. тот ADR, §2): Miranda должна передавать **своё уже разрешённое** `conversationID` (то же самое значение, что уже используется для `llmtrace.WithConversationID` и передаётся в `runAgentLoop`, см. `../../internal/httpapi/orchestrator.go`'s `resolveConversation`) — так гарантируется, что сессия Miranda и внутренняя сессия медкарты остаются синхронизированы 1:1.
 
-**Сейчас этого не происходит.** `sessionId` — обычный параметр в JSON Schema тула `medical.ask`, как и любой другой аргумент MCP-вызова: значение для него, если оно вообще появляется, должна написать сама модель внутри своего tool call (см. `internal/httpapi/agent_loop.go`'s `executeTool`, `o.tools.Call(ctx, tc.Name, callArgs)` — `callArgs` в норме приходит из `tc.Arguments`, то есть из того, что написала модель). У модели нет доступа к `conversationID` как к значению, которое она может просто вписать в аргумент — это внутренняя деталь оркестратора, не часть контекста модели. В результате:
+**Сейчас этого не происходит.** `sessionId` — обычный параметр в JSON Schema тула `medical.ask`, как и любой другой аргумент MCP-вызова: значение для него, если оно вообще появляется, должна написать сама модель внутри своего tool call (см. `../../internal/httpapi/agent_loop.go`'s `executeTool`, `o.tools.Call(ctx, tc.Name, callArgs)` — `callArgs` в норме приходит из `tc.Arguments`, то есть из того, что написала модель). У модели нет доступа к `conversationID` как к значению, которое она может просто вписать в аргумент — это внутренняя деталь оркестратора, не часть контекста модели. В результате:
 
 - либо модель никогда не передаёт `sessionId` — и вся функциональность сессий медкарты простаивает вхолостую;
 - либо (хуже) модель, увидев параметр в схеме тула, может попытаться придумать правдоподобно выглядящее значение самостоятельно — medical-card's `AskInput.SessionID`'s jsonschema-описание уже прямо просит этого не делать ("never invent or guess a value for this field yourself"), но полагаться на то, что модель всегда послушается инструкции в описании поля, не годится как единственная защита.
 
-Корень проблемы — тот же, что уже был решён для ключа шифрования miranda-diary (см. `miranda-medical-card/docs/file-staging-refactor.md`-style прецедент в этом же репозитории, `docs/encryption.md`): **передача внутреннего идентификатора между Miranda и внешним MCP-сервисом — механическая задача, а не задача, требующая понимания языка**, и её должен делать backend, перехватывая исходящий вызов, а не модель.
+Корень проблемы — тот же, что уже был решён для ключа шифрования miranda-diary (см. `miranda-medical-card/docs/file-staging-refactor.md`-style прецедент в этом же репозитории, `encryption.md`): **передача внутреннего идентификатора между Miranda и внешним MCP-сервисом — механическая задача, а не задача, требующая понимания языка**, и её должен делать backend, перехватывая исходящий вызов, а не модель.
 
 ---
 
@@ -26,7 +26,7 @@
 
 Тот же паттерн, что уже используется для ключа шифрования (`internal/httpapi/agent_loop.go:1032-1057`, `setEncryptionKeyArg` на строке 1158), с двумя упрощениями: `sessionId` не секрет (не нужна проверка HTTPS-only, как для `EncryptionKeyPermitted`), и подставлять его имеет смысл только для конкретных тулов конкретного сервера (не для всех тулов сервера разом, как с ключом шифрования — см. §3).
 
-### 2.1 Конфигурация (`internal/config/config.go`)
+### 2.1 Конфигурация (`../../internal/config/config.go`)
 
 По аналогии с `MCPServer.EncryptionKeyAllowed`/`EncryptionKeyArgName` (строки 443-465) добавить:
 
@@ -67,7 +67,7 @@ func (s MCPServer) SessionIDArg() string {
 }
 ```
 
-Пример для medical-card в `config/mcp.yaml` (или где у Miranda хранится конфигурация серверов):
+Пример для medical-card в `../../config/mcp.yaml` (или где у Miranda хранится конфигурация серверов):
 
 ```yaml
 mcp:
@@ -96,7 +96,7 @@ result := o.executeTool(ctx, userID, conversationID, tc, control)
 
 ### 2.3 Предпосылка: `mcp.Manager` должен отдавать непрефиксованное имя тула
 
-`o.tools` (тип `*mcp.Manager`, `internal/mcp/mcp.go`) уже умеет резолвить владеющий
+`o.tools` (тип `*mcp.Manager`, `../../internal/mcp/mcp.go`) уже умеет резолвить владеющий
 сервер по префиксованному имени — `ServerForTool` (строка 218) — но не сам тул: имя
 без префикса собирается/разбирается только через `prefixedToolName` (строка 36), а
 эта функция **не экспортирована** и используется исключительно внутри пакета `mcp`
@@ -183,7 +183,7 @@ func setSessionIDArg(args, argName, sessionID string) (result string, ok bool) {
 
 (`decodeToolArgs`/`encodeToolArgs` уже существуют, строки 1174-1192 — переиспользовать как есть.)
 
-### 2.5 Wiring в `cmd/miranda/main.go`
+### 2.5 Wiring в `../../cmd/miranda/main.go`
 
 По аналогии с `encryptionKeyAllowedServers(cfg.MCP.Servers, logger)` → `orchestrator.SetEncryptionKeyAllowedServers(...)` (строка 304, использует `s.EncryptionKeyArg()` для резолва имени аргумента — строка 574): построить аналогичную функцию `sessionIDAllowedServers(cfg.MCP.Servers) map[string]sessionIDServer` (сервер → `sessionIDServer{argName: s.SessionIDArg(), tools: ...}`, где `argName` берётся через аксессор из §2.1, а не напрямую из `SessionIDArgName`) и передать через новый `orchestrator.SetSessionIDAllowedServers(...)`.
 
@@ -197,7 +197,7 @@ func setSessionIDArg(args, argName, sessionID string) (result string, ok bool) {
 конфига), а `ServerAndTool` разбирает префикс механически, не заглядывая в то, что за
 сервер/тул перед ним. Это значит: включить ту же подстановку `conversationID` для
 любого другого MCP-сервера и любого набора его тулов в будущем — вопрос строки в
-`config/mcp.yaml` (`session_id_tools: [...]`, при необходимости `session_id_arg: ...`),
+`../../config/mcp.yaml` (`session_id_tools: [...]`, при необходимости `session_id_arg: ...`),
 без единой правки Go-кода.
 
 ---
@@ -221,7 +221,7 @@ func setSessionIDArg(args, argName, sessionID string) (result string, ok bool) {
 
 ## 5. Проверка после реализации
 
-1. Сценарий: вопрос пользователя → Miranda вызывает `medical_card_medical.ask` без явного `sessionId` в аргументах модели → в `logs/llm.log` (или эквивалентном трейсе вызова тула) видно, что реально отправленный `sessionId` равен `conversationID` этой беседы.
+1. Сценарий: вопрос пользователя → Miranda вызывает `medical_card_medical.ask` без явного `sessionId` в аргументах модели → в `../../logs/llm.log` (или эквивалентном трейсе вызова тула) видно, что реально отправленный `sessionId` равен `conversationID` этой беседы.
 2. Follow-up вопрос в той же беседе → второй вызов `medical.ask` с тем же `sessionId` → ответ демонстрирует использование контекста первого вопроса (см. `miranda-medical-card/internal/ask/agent_loop_test.go`'s `TestAsk_SessionContinuity_ReplaysHistoryIntoSecondCall` за примером того, что именно должно происходить на стороне medical-card).
 3. Вызов любого другого тула сервера `medical_card` (например `medical.profile`) не содержит внедрённого `sessionId` — подтверждает, что scope ограничен `SessionIDTools`, а не всем сервером.
 4. Модель, попытавшаяся сама вписать `sessionId` в аргументы `medical.ask`, не может повлиять на итоговое значение — `setSessionIDArg` всегда перезаписывает.

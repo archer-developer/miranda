@@ -331,7 +331,7 @@ mcp:
 
 Only a server explicitly marked `encryption_key_allowed: true` *and*
 reachable over `https://` ever receives the key, injected invisibly into
-that server's own tool calls. See **[`docs/encryption.md`](docs/encryption.md)**
+that server's own tool calls. See **[`docs/adr/encryption.md`](docs/adr/encryption.md)**
 for the full design, threat model, and known limitations (there's no
 recovery key — losing every passkey and never having logged in with a
 password permanently loses access to anything encrypted this way).

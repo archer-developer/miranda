@@ -4,8 +4,8 @@ Optional per-user encryption of data Miranda's agent loop hands off to
 external tools — today the diary MCP tool
 ([miranda-diary](https://github.com/archer-developer/miranda-diary)), but
 designed to generalize to any future MCP server that wants it. This is the
-deep-dive; see `CLAUDE.md`'s "Data encryption (keyring)" section for a short
-pointer back here, and `README.md`'s "Data encryption" subsection for the
+deep-dive; see `../../CLAUDE.md`'s "Data encryption (keyring)" section for a short
+pointer back here, and `../../README.md`'s "Data encryption" subsection for the
 user-facing config walkthrough.
 
 Always on — no config toggle. Unlike `webauthn.enabled`/`telegram.enabled`
@@ -46,7 +46,7 @@ wrapped_password = AES-256-GCM(Argon2id(password, salt), K)
 
 - **Primary unlock**: a registered WebAuthn passkey's [PRF
   extension](https://www.w3.org/TR/webauthn-3/#prf-extension) output — reuses
-  the same passkeys already used for biometric login (`internal/webauthn`).
+  the same passkeys already used for biometric login (`../../internal/webauthn`).
   PRF's security rests on the authenticator's own private key material, not a
   secret Miranda stores.
 - **Fallback unlock**: a KDF (Argon2id) over the user's plaintext password,
@@ -124,7 +124,7 @@ refuses with `ErrNotUnlocked` rather than minting its own K — this
 preserves the single-mint invariant above. The web UI should tell the user
 to log in with their password once first in that case.
 
-## `keyring_slots` schema (`internal/keyring/store.go`)
+## `keyring_slots` schema (`../../internal/keyring/store.go`)
 
 Its own SQLite file, `storage.keyring_sqlite_path` (default
 `./data/keyring.db`) — kept separate from every other Miranda database for
@@ -156,21 +156,21 @@ rows keep unwrapping correctly using whatever params they were created
 with, read back from this column rather than a hardcoded constant.
 
 Every wrap/unwrap binds **AES-GCM associated data (AAD)** to the row's own
-identity (`username|slot_type|slot_ref`, see `internal/keyring/crypto.go`'s
+identity (`username|slot_type|slot_ref`, see `../../internal/keyring/crypto.go`'s
 `slotAAD`). Without this, an attacker with disk access could copy one row's
 `wrapped_key`+`nonce` into a different row's identity and, given a
 correctly-derived key for the *target* row, have it decrypt there
 undetected; with AAD, `cipher.AEAD.Open` fails loudly (authentication tag
 mismatch) on any such splice.
 
-Argon2id parameters (`internal/keyring/crypto.go`): `time=1,
+Argon2id parameters (`../../internal/keyring/crypto.go`): `time=1,
 memory=64MiB, parallelism=4, keyLen=32`. Deliberately **not** exposed as a
 config knob — this is security-sensitive and easy to misconfigure into
 uselessness (e.g. an admin setting `time=0`), with no real per-deployment
 reason to differ, unlike genuinely deployment-specific settings like
 `webauthn.rp_id`.
 
-## In-memory cache (`internal/keyring/cache.go`)
+## In-memory cache (`../../internal/keyring/cache.go`)
 
 `Cache` holds every currently-unlocked user's K in a
 `sync.RWMutex`-guarded `map[string][]byte`, in-process only — never
@@ -180,15 +180,15 @@ long as a user is logged in — anywhere, since the same K then becomes
 usable by HA voice/Telegram/scheduled-task turns for that same username,
 not just requests that happen to arrive through the web UI — is an
 accepted risk. Only two things ever clear an entry: explicit logout
-(`Service.Lock`, called from `internal/webui/auth.go`'s `handleLogout`) or a
+(`Service.Lock`, called from `../../internal/webui/auth.go`'s `handleLogout`) or a
 process restart. There is deliberately no auto-lock sweep/ticker.
 
-## WebAuthn PRF plumbing (`internal/webauthn`)
+## WebAuthn PRF plumbing (`../../internal/webauthn`)
 
 The PRF extension's `eval.first` salt is a **fixed, non-secret,
 application-specific constant** — SHA-256 of the literal string
 `"miranda:master-key:v1"`, base64url-encoded
-(`internal/webui/static/js/webauthn.js`'s `PRF_SALT_B64URL`). It doesn't
+(`../../internal/webui/static/js/webauthn.js`'s `PRF_SALT_B64URL`). It doesn't
 need to be secret or per-user: PRF's security comes entirely from the
 authenticator's private key material, and the salt is pure domain
 separation (the same role HKDF's "info" parameter plays) — versioned
@@ -207,7 +207,7 @@ skipping the round trip sidesteps that encoding mismatch entirely.
 the raw assertion response itself (`protocol.ParseCredentialRequestResponseBytes`,
 the same pattern already used for the Android `BackupEligible` flag
 reconciliation) and JSON-round-trips the `"prf"` entry into a small typed
-struct (`extractPRFOutput`, `internal/webauthn/service.go`). A missing or
+struct (`extractPRFOutput`, `../../internal/webauthn/service.go`). A missing or
 malformed PRF result is never an error — it just means this login/probe
 didn't produce a usable output, handled as a normal no-op throughout.
 
@@ -235,7 +235,7 @@ ceremony scoped to just the new credential:
   browser doesn't prompt for a different passkey).
 - `Service.FinishKeyProbe(ctx, username, ceremonyKey, body)` —
   `s.rp.FinishLogin(...)`, then the same `extractPRFOutput` parse.
-- Wired into `internal/webui` as `POST /api/webauthn/register/probe-begin`
+- Wired into `../../internal/webui` as `POST /api/webauthn/register/probe-begin`
   / `probe-finish`, called by `webauthn.js`'s `registerPasskey()`
   immediately after `register/finish` succeeds — using the credential ID
   now returned in `CredentialInfo.ID` (base64url of `cred.ID`, a one-line
@@ -246,13 +246,13 @@ This is designed to **fail soft**: a probe failure (no PRF support, or the
 ceremony errors) must never be treated as the passkey registration itself
 having failed — that already succeeded before the probe ever runs. The
 routes themselves are only registered when `webauthn.enabled` is true
-(`internal/webui/webui.go`'s `New` — the keyring service it's handed is
+(`../../internal/webui/webui.go`'s `New` — the keyring service it's handed is
 never nil outside of tests, so in practice this is the only gate that
 matters); if a caller ever does pass a nil `KeyringService`,
 `registerPasskey()`'s probe call just gets a 404 and returns `false`, same
 as any other soft failure.
 
-## MCP whitelist + HTTPS gating (`internal/mcp`, `internal/config`)
+## MCP whitelist + HTTPS gating (`../../internal/mcp`, `../../internal/config`)
 
 The unwrapped key is only ever sent to MCP servers that are **both**
 explicitly whitelisted in config **and** actually connected over
@@ -277,7 +277,7 @@ apart on what "permitted" means:
    `config.Load` alongside `validateMCPServerNames`):
    rejects `encryption_key_allowed: true` combined with a non-`https://`
    URL outright — fails startup rather than silently degrading.
-2. **Startup, before serving traffic** (`cmd/miranda`'s
+2. **Startup, before serving traffic** (`../../cmd/miranda`'s
    `encryptionKeyAllowedServers`): builds a `map[string]string` (server name
    → the tool-call argument name that server's own config entry expects the
    key under, from `EncryptionKeyArg()`) from every configured server whose
@@ -300,7 +300,7 @@ server-name order under a read lock rather than the full live-client-map
 copy `Call` itself needs) are what `internal/httpapi.executeTool` reads at
 dispatch time.
 
-## Injection at dispatch time (`internal/httpapi/agent_loop.go`)
+## Injection at dispatch time (`../../internal/httpapi/agent_loop.go`)
 
 `Orchestrator.SetKeyring(*keyring.Service)` and
 `Orchestrator.SetEncryptionKeyAllowedServers(map[string]string)` wire the
@@ -349,7 +349,7 @@ loop) — both of these run against the same `tc` value that's never touched
 by the injection above, since Go passes `tc` into `executeTool` by value.
 The messages array fed back to the LLM for the next iteration is built from
 that same original `toolCalls` slice, too. So neither `history`'s SQLite
-tables nor `internal/llmtrace`'s `llm.log` — nor the model's own context —
+tables nor `../../internal/llmtrace`'s `llm.log` — nor the model's own context —
 ever see the real key value; only the literal bytes sent over the wire to
 `o.tools.Call` do.
 
@@ -367,7 +367,7 @@ this was set). Confirm against that repo directly (or whichever
 encryption-aware server you're wiring in) before assuming the default is
 correct.
 
-The wire encoding itself (`setEncryptionKeyArg`, `internal/httpapi/agent_loop.go`)
+The wire encoding itself (`setEncryptionKeyArg`, `../../internal/httpapi/agent_loop.go`)
 is lowercase hex, 64 characters for a 32-byte key — not configurable per
 server, since it's the encoding the one real consumer's
 `parseEncryptionKey` requires and there's no evidence yet any future

@@ -88,7 +88,7 @@ func Parse(text string) []Block // never errors; malformed markup degrades to li
   shape (JSON tags above). Computed **on read**, not persisted (it's 100%
   derivable from `Content`; persisting would mean backfilling on every
   future parser-rule tweak). Three attachment points, all outside
-  `internal/history`:
+  `../../internal/history`:
   - `InputResponse` (orchestrator.go) gains `Blocks []replyformat.Block`,
     set via `replyformat.Parse(finalText)` where `Reply` is built.
   - `ChatEvent` (orchestrator.go) gains `Blocks []replyformat.Block`,
@@ -98,9 +98,9 @@ func Parse(text string) []Block // never errors; malformed markup degrades to li
   - `GET /api/dialogs/{id}` (`webui.go`'s `handleDialogMessages`): wrap in
     a local `messageView{ history.Message; Blocks []replyformat.Block }`
     response type, populated for assistant messages only, right before
-    `writeJSON` — keeps `internal/history` itself free of formatting
+    `writeJSON` — keeps `../../internal/history` itself free of formatting
     concerns, mirroring how `toDownloadRefs` already lives in
-    `internal/httpapi`, not `internal/history`.
+    `../../internal/httpapi`, not `../../internal/history`.
 - **Telegram** (`internal/replyformat/telegram.go`):
   `ToTelegramHTMLChunks(blocks []Block, maxChars int) []string` — escapes
   `&`/`<`/`>` in plain text and inside bold/italic/code/link-label content,
@@ -158,14 +158,14 @@ func Parse(text string) []Block // never errors; malformed markup degrades to li
   ordinary paragraph block, so this composes without any special-casing on
   the Telegram side.
 - *Telegram* — new `Client.SendHTML(ctx, chatID, blocks)` in
-  `internal/telegram/client.go` (alongside the existing `SendMessage`, kept
+  `../../internal/telegram/client.go` (alongside the existing `SendMessage`, kept
   for Miranda's own static markdown-free strings) and `Sender.SendHTMLToUser`
   in `sender.go`, both reusing the existing `maxMessageChars`
   constant/`ToTelegramHTMLChunks`. Two call-site swaps:
-  `internal/httpapi/telegram.go`'s webhook success-reply send, and
+  `../../internal/httpapi/telegram.go`'s webhook success-reply send, and
   `agent_loop.go`'s `send_telegram` tool handler.
 
-**System prompt** (`internal/config/config.go`, `Default().Agent.SystemPrompt`):
+**System prompt** (`../../internal/config/config.go`, `Default().Agent.SystemPrompt`):
 add a `## Форматирование` section (after `## Ограничения длины`) telling the
 model it may use `**bold**`/`*italic*`/`` `code` ``/`[label](url)`/`- list`
 when it genuinely helps (multi-step instructions, option lists, source
@@ -177,14 +177,14 @@ list-vs-italic ambiguity + malformed-markup degradation + mixed
 paragraph/list chunks), `telegram_test.go` (per-construct HTML + escaping +
 the block-straddling chunk test), `voice_test.go` (per-construct stripping +
 "URL never appears in output" + list/paragraph joining). Extend existing
-`internal/telegram/client_test.go`/`sender_test.go` (mirroring
+`../../internal/telegram/client_test.go`/`sender_test.go` (mirroring
 `TestSendMessage_PostsToCorrectMethodAndChat`/`TestSender_SendToUser_KnownChatSendsMessage`)
 for the HTML send path with `parse_mode` asserted. Extend
-`internal/httpapi/orchestrator_test.go` with a new markdown-containing
+`../../internal/httpapi/orchestrator_test.go` with a new markdown-containing
 `speak_reply` case (existing speak tests around line 492-560 all use
 plain text today, so they don't exercise the new stripping) and a
 `InputResponse.Blocks` assertion. Extend
-`internal/webui/webui_test.go`'s `TestHandleDialogMessages_ReturnsMessagesJSON`
+`../../internal/webui/webui_test.go`'s `TestHandleDialogMessages_ReturnsMessagesJSON`
 to assert the new `blocks` field.
 
 ## Workstream B — vendor lit-html, migrate `chat.js`

@@ -182,6 +182,12 @@ func splitSections(doc string) []section {
 
 	var sections []section
 	lines := strings.Split(doc, "\n")
+	// strings.Split on a newline-terminated string always produces a trailing
+	// empty element that isn't a real blank line — drop it so each round-trip
+	// through splitSections/joinSections doesn't accumulate an extra "\n".
+	if len(lines) > 0 && lines[len(lines)-1] == "" {
+		lines = lines[:len(lines)-1]
+	}
 	cur := section{}
 	for _, line := range lines {
 		if strings.HasPrefix(line, "## ") {
