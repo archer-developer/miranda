@@ -301,7 +301,13 @@ func run(cfg config.Config, logger *slog.Logger, eventHub *hub.Hub) error {
 		orchestrator.SetSpeakerHA(ttsHAClient)
 	}
 	orchestrator.SetKeyring(keyringService)
-	orchestrator.SetEncryptionKeyAllowedServers(encryptionKeyAllowedServers(cfg.MCP.Servers, logger))
+
+	// mcpExtensions bundles every configured MCP server's static opt-ins
+	// (encryption-key/session-id injection now, file-URI download detection
+	// merged in below once it's known) into the one map
+	// SetMCPServerExtensions takes — see httpapi.MCPServerExtension.
+	mcpExtensions := mcpServerExtensions(cfg.MCP.Servers, logger)
+	var downloadRecordTTL time.Duration
 
 	// File upload is opt-in (Enabled defaults false). Resolve config early
 	// so a misconfigured expose_files entry fails fast before the HTTP
@@ -323,7 +329,22 @@ func run(cfg config.Config, logger *slog.Logger, eventHub *hub.Hub) error {
 		if err != nil {
 			return fmt.Errorf("main: configure file upload: %w", err)
 		}
-		orchestrator.SetFileExposingServers(fileExposingServers, time.Duration(cfg.FileUpload.DownloadRecordTTLHours)*time.Hour)
+		if len(fileExposingServers) == 0 {
+			// Not fatal — a deployment may genuinely only want the upload
+			// direction — but silent is worse than loud here: this is the
+			// exact shape of a forgotten/mismatched expose_files: true that
+			// used to fail startup outright before servers could opt in
+			// individually. Surface it instead of letting it be discovered
+			// only when a user reports a missing download chip.
+			logger.Warn("main: file_upload is enabled but no MCP server has expose_files: true — tool-returned files will never be detected or downloadable")
+		}
+		for name, endpoint := range fileExposingServers {
+			endpoint := endpoint
+			ext := mcpExtensions[name]
+			ext.FilesEndpoint = &endpoint
+			mcpExtensions[name] = ext
+		}
+		downloadRecordTTL = time.Duration(cfg.FileUpload.DownloadRecordTTLHours) * time.Hour
 
 		// Required for processAttachments to build a fileURI any tool can
 		// pull an upload's bytes from (see docs/file-staging-refactor.md) —
@@ -335,6 +356,7 @@ func run(cfg config.Config, logger *slog.Logger, eventHub *hub.Hub) error {
 		}
 		orchestrator.SetFilesPublicBaseURL(cfg.FileUpload.PublicBaseURL)
 	}
+	orchestrator.SetMCPServerExtensions(mcpExtensions, downloadRecordTTL)
 
 	var webHandler http.Handler
 	if cfg.WebUI.Enabled {
@@ -549,32 +571,46 @@ func connectMCP(ctx context.Context, servers []config.MCPServer, logger *slog.Lo
 	return manager
 }
 
-// encryptionKeyAllowedServers computes which configured MCP servers are
-// permitted to receive a user's unwrapped master key, and under which
-// argument name each one expects it (see config.MCPServer.EncryptionKeyPermitted
-// / EncryptionKeyArg) — static config data, entirely independent of
-// connection lifecycle, so this is deliberately its own function rather
-// than folded into connectMCP: Manager's job is connection bookkeeping over
-// live/reconnecting clients, not a static permission store, and the result
-// here goes straight to httpapi.Orchestrator.SetEncryptionKeyAllowedServers
-// instead. Logs loudly on a mismatch even though
-// config.validateEncryptionKeyServers should already have rejected
-// EncryptionKeyAllowed=true on a non-https URL at load time — defense in
-// depth, not a substitute for that validation. A server absent from the
-// returned map is simply not permitted; only permitted servers get an
-// entry, keyed to their own configured argument name.
-func encryptionKeyAllowedServers(servers []config.MCPServer, logger *slog.Logger) map[string]string {
-	allowed := make(map[string]string, len(servers))
+// mcpServerExtensions computes every configured MCP server's static,
+// config-driven opt-ins — encryption-key injection permission and session-id
+// injection permission (file-URI download detection is merged in
+// separately by the caller, since it's only resolved when
+// config.FileUploadConfig.Enabled and can fail config validation — see
+// config.Config.FileExposingServers) — keyed by server name, ready to hand
+// to httpapi.Orchestrator.SetMCPServerExtensions. Entirely independent of
+// connection lifecycle, so this is deliberately its own function rather than
+// folded into connectMCP: Manager's job is connection bookkeeping over
+// live/reconnecting clients, not a static permission store. Logs loudly on
+// an encryption-key mismatch even though config.validateEncryptionKeyServers
+// should already have rejected EncryptionKeyAllowed=true on a non-https URL
+// at load time — defense in depth, not a substitute for that validation. A
+// server absent from the returned map (or present with zero-value fields)
+// simply has none of these behaviors.
+func mcpServerExtensions(servers []config.MCPServer, logger *slog.Logger) map[string]httpapi.MCPServerExtension {
+	extensions := make(map[string]httpapi.MCPServerExtension, len(servers))
 	for _, s := range servers {
+		var ext httpapi.MCPServerExtension
+
 		permitted := s.EncryptionKeyPermitted()
 		if s.EncryptionKeyAllowed && !permitted {
 			logger.Warn("mcp: encryption_key_allowed set but server url is not https, refusing to grant", "server", s.Name, "url", s.URL)
 		}
 		if permitted {
-			allowed[s.Name] = s.EncryptionKeyArg()
+			ext.EncryptionKeyArg = s.EncryptionKeyArg()
 		}
+
+		if len(s.SessionIDTools) > 0 {
+			tools := make(map[string]bool, len(s.SessionIDTools))
+			for _, t := range s.SessionIDTools {
+				tools[t] = true
+			}
+			ext.SessionIDArg = s.SessionIDArg()
+			ext.SessionIDTools = tools
+		}
+
+		extensions[s.Name] = ext
 	}
-	return allowed
+	return extensions
 }
 
 // buildWebTools constructs Miranda's own web_search/web_fetch tools (see

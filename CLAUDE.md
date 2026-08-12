@@ -351,15 +351,22 @@ backend services' files at once.
 There is exactly **one** mechanism that stages such a record, for every
 file-exposing MCP server including the sandbox — no server gets a
 dedicated code path of its own. A server opts in via
-`config.MCPServer.ExposeFiles` (`expose_files: true`); `Orchestrator`'s
-`fileExposingServers` map (wired via `SetFileExposingServers`, built from
-`config.Config.FileExposingServers`) is which servers are trusted this way
-and what each one's own `FilesEndpoint()` (the `/mcp` → `/files` URL
-convention) is expected to be rooted at. `executeTool` scans *every* tool
-call result routed to an opted-in server — `detectRemoteFileLinks` in
-`internal/httpapi/agent_loop.go` — for a URL matching that prefix,
-regardless of which tool produced it or what shape the rest of the result
-takes:
+`config.MCPServer.ExposeFiles` (`expose_files: true`); each opted-in
+server's `FilesEndpoint()` (the `/mcp` → `/files` URL convention) lands in
+that server's `FilesEndpoint` field of `Orchestrator`'s `mcpExtensions` map
+(wired via `SetMCPServerExtensions` — see "Tools available to the model"
+above for why this is one shared map/setter across all three per-server
+opt-ins, not a dedicated one for this feature) — built in `cmd/miranda` from
+`config.Config.FileExposingServers`, which fails startup on a malformed
+opted-in server's URL but only *logs a warning* (not a hard failure) when
+`file_upload.enabled` is true and it resolves to an empty map — a
+deployment that only wants the upload direction is a legitimate config, but
+a forgotten `expose_files: true` on every server should still be visible
+somewhere other than a user reporting a missing download chip.
+`executeTool` scans *every* tool call result routed to an opted-in server —
+`detectRemoteFileLinks` in `internal/httpapi/agent_loop.go` — for a URL
+matching that prefix, regardless of which tool produced it or what shape
+the rest of the result takes:
 
 - **JSON results** (e.g. `medical.get_document`'s `{"fileUri": "..."}`) —
   the matched URL's sibling fields in the same JSON object (`title`/
@@ -628,11 +635,29 @@ whitelisted server's calls (`MCPServer.EncryptionKeyAllowed`, see "Data
 encryption (keyring)" above) get a real `encryption_key` argument injected
 server-side, invisibly to the model — it never appears in what the model
 itself generated for that tool call, only on the wire to that one server.
-File staging (see "File staging" above) is a different shape of the same
-underlying goal — keeping real bytes out of the model's own output — but
-not an invisible backend substitution: the model itself passes the
-`fileURI` it was given verbatim, and the *target server* fetches the bytes,
-not Miranda.
+Miranda's own resolved conversation id gets the identical treatment for any
+server/tool pair listed in that server's `MCPServer.SessionIDTools` (e.g.
+`miranda-medical-card`'s `medical.ask`, which needs to correlate a
+follow-up question with the same session on its own side) — injected
+server-side under that server's `SessionIDArg()`, unconditionally
+overwriting any value the model may have supplied itself, since the model
+must never be trusted to invent this id on its own. Unlike
+`EncryptionKeyAllowed`'s server-wide grant, this permission is scoped
+per-tool: most tools on a given server don't declare a session-id parameter
+in their own schema at all, and injecting one anyway is exactly the kind of
+schema mismatch `EncryptionKeyArgName` had to be added to work around in
+the first place — see `docs/medical-card-session-injection.md` for the full
+design. Both mechanisms, plus the file-URI download detection described in
+"File download proxy" below, are config-driven per-MCP-server opt-ins of
+the same underlying shape, so `httpapi.Orchestrator` bundles all three into
+one `MCPServerExtension` per server name (`SetMCPServerExtensions`) rather
+than three independent maps/setters — `executeTool` resolves a tool call's
+owning server once (`mcp.Manager.ServerAndTool`) and reuses that one lookup
+for whichever of the three behaviors apply. File staging (see "File
+staging" above) is a different shape of the same underlying goal — keeping
+real bytes out of the model's own output — but not an invisible backend
+substitution: the model itself passes the `fileURI` it was given verbatim,
+and the *target server* fetches the bytes, not Miranda.
 
 ### Web UI surface
 

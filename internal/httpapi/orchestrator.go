@@ -190,21 +190,24 @@ type Orchestrator struct {
 	// reject a household member fetching another member's file, the same
 	// check processAttachments already does for uploaded files.
 	attachStore *attachments.Store
-	// fileExposingServers is set via SetFileExposingServers: which MCP
-	// servers (keyed by their unprefixed config.MCPServer.Name, matching
-	// what mcp.Manager.ServerForTool resolves a tool call to) have opted
-	// into the file-URI download proxy (config.MCPServer.ExposeFiles), and
-	// the FilesEndpoint each one's own file links are expected to be rooted
-	// at. executeTool scans a matching server's tool-call results for a URL
-	// under that prefix and proxies it — detected by URL shape, not by any
-	// specific tool name, which is what lets every file-serving MCP server
-	// (the sandbox's download_file included — it has no dedicated path of
-	// its own) share this one mechanism. A server absent from this map
-	// never has its tool results scanned at all — see
-	// config.MCPServer.ExposeFiles's doc comment for why this is opt-in per
-	// server.
-	fileExposingServers map[string]config.FileServerEndpoint
-	// downloadRecordTTL is set via SetFileExposingServers from
+	// mcpExtensions is set via SetMCPServerExtensions: every config-driven,
+	// per-MCP-server argument-injection/detection behavior Orchestrator
+	// applies around a tool call (see MCPServerExtension), keyed by that
+	// server's unprefixed config.MCPServer.Name — matching what
+	// mcp.Manager.ServerAndTool resolves a tool call's prefixed name to.
+	// This used to be three independent maps (encryption-key allowlist,
+	// session-id allowlist, file-exposing endpoints), each with its own
+	// setter and config-load path; they're bundled into one map/one setter
+	// now because they're all the same shape of thing — a server opting
+	// into a specific behavior via static config — and executeTool only
+	// ever needs one lookup by server name to learn everything it's
+	// permitted to do for a given call, not three. Static config data,
+	// deliberately kept here rather than on mcp.Manager — Manager's job is
+	// connection lifecycle over live/reconnecting clients, and none of this
+	// is that. A server absent from the map (or a zero-value entry) has
+	// none of these behaviors applied.
+	mcpExtensions map[string]MCPServerExtension
+	// downloadRecordTTL is set via SetMCPServerExtensions from
 	// config.FileUploadConfig.DownloadRecordTTLHours and stamped onto every
 	// download record's Record.TTL (see executeTool) — longer than
 	// attachStore's own short upload-oriented default TTL, since a download
@@ -216,20 +219,8 @@ type Orchestrator struct {
 	speakerHA speakerHA
 	// keyring is set via SetKeyring; nil means executeTool never injects an
 	// encryption_key argument into any MCP tool call, regardless of
-	// encryptionKeyAllowed below — see docs/encryption.md.
+	// mcpExtensions above — see docs/encryption.md.
 	keyring *keyring.Service
-	// encryptionKeyAllowed is set via SetEncryptionKeyAllowedServers: which
-	// MCP server names (by their unprefixed config.MCPServer.Name) may
-	// receive a user's unwrapped master key as a tool-call argument, and
-	// under which tool-call argument name each one expects it (that
-	// server's config.MCPServer.EncryptionKeyArg()). Static config data
-	// (config.MCPServer.EncryptionKeyPermitted, computed once at startup),
-	// deliberately kept here rather than on mcp.Manager — Manager's job is
-	// connection lifecycle over live/reconnecting clients, and this
-	// permission bit is neither, so executeTool reads it directly from the
-	// Orchestrator instead of asking the connection manager to remember a
-	// static config fact. A server absent from the map is not permitted.
-	encryptionKeyAllowed map[string]string
 	// filesPublicBaseURL is set via SetFilesPublicBaseURL: the base URL
 	// other backend services (sandbox, medical-card, ...) can reach
 	// Miranda's own GET /files/{id} route through, e.g.
@@ -290,21 +281,6 @@ func (o *Orchestrator) SetAttachmentStore(s *attachments.Store) {
 	o.attachStore = s
 }
 
-// SetFileExposingServers wires in the set of MCP servers that opted into
-// the file-URI download proxy (config.MCPServer.ExposeFiles), via
-// config.Config.FileExposingServers, and recordTTL from
-// config.FileUploadConfig.DownloadRecordTTLHours — call it once from
-// cmd/miranda, mirroring SetAttachmentStore's post-construction style, only
-// when config.FileUploadConfig.Enabled (the same gate that creates
-// o.attachStore). Leaving it uncalled (the default, a nil map) means
-// executeTool never scans any MCP tool result for an embedded file URI —
-// every server needs an explicit, present entry to be trusted this way,
-// including the sandbox, which has no dedicated path of its own here.
-func (o *Orchestrator) SetFileExposingServers(servers map[string]config.FileServerEndpoint, recordTTL time.Duration) {
-	o.fileExposingServers = servers
-	o.downloadRecordTTL = recordTTL
-}
-
 // SetKeyring wires the per-user data-encryption keyring in, mirroring
 // SetTelegram/SetSchedule's post-construction style — cmd/miranda always
 // calls this once at startup, since the keyring has no config toggle (see
@@ -316,15 +292,50 @@ func (o *Orchestrator) SetKeyring(k *keyring.Service) {
 	o.keyring = k
 }
 
-// SetEncryptionKeyAllowedServers wires in the static, config-derived set of
-// MCP server names permitted to receive a user's unwrapped master key,
-// mapped to the tool-call argument name each one expects it under — call it
-// once from cmd/miranda with a map built from every config.MCPServer whose
-// EncryptionKeyPermitted() is true, keyed to that server's EncryptionKeyArg().
-// Leaving it uncalled (the default, a nil map) means every server reads as
-// not-allowed.
-func (o *Orchestrator) SetEncryptionKeyAllowedServers(allowed map[string]string) {
-	o.encryptionKeyAllowed = allowed
+// MCPServerExtension bundles the config-driven, per-MCP-server behaviors
+// executeTool applies around a tool call routed to that server — replacing
+// what used to be three separate maps (encryption-key allowlist, session-id
+// allowlist, file-exposing endpoints), each independently keyed by the same
+// server name. A zero-value MCPServerExtension (the value SetMCPServerExtensions
+// implicitly gives any server absent from its argument) grants none of these.
+type MCPServerExtension struct {
+	// EncryptionKeyArg is the tool-call argument name executeTool injects a
+	// user's unwrapped master key under — "" means this server may never
+	// receive one, regardless of whether the keyring itself is configured
+	// (see config.MCPServer.EncryptionKeyPermitted). See docs/encryption.md.
+	EncryptionKeyArg string
+	// SessionIDArg/SessionIDTools mirror config.MCPServer.SessionIDArg()/
+	// SessionIDTools: SessionIDArg is "" when no tool on this server should
+	// ever receive Miranda's own resolved conversation id; otherwise only
+	// the (unprefixed) tool names present as true keys in SessionIDTools do
+	// — permission here is scoped per-tool, not per-server, unlike
+	// EncryptionKeyArg, since most tools on a server won't declare a
+	// session-id parameter in their own schema at all. See
+	// docs/medical-card-session-injection.md.
+	SessionIDArg   string
+	SessionIDTools map[string]bool
+	// FilesEndpoint is non-nil when this server opted into the file-URI
+	// download proxy (config.MCPServer.ExposeFiles) — executeTool scans a
+	// matching server's tool-call results for a URL rooted at
+	// FilesEndpoint.FilesURL and proxies it, detected by URL shape rather
+	// than by any specific tool name, which is what lets every
+	// file-serving MCP server (the sandbox's download_file included) share
+	// this one mechanism.
+	FilesEndpoint *config.FileServerEndpoint
+}
+
+// SetMCPServerExtensions wires in the static, config-derived set of
+// per-server behaviors above (encryption-key injection, session-id
+// injection, file-URI download detection), keyed by each server's
+// unprefixed config.MCPServer.Name, plus recordTTL from
+// config.FileUploadConfig.DownloadRecordTTLHours for any staged download
+// record. Call it once from cmd/miranda after resolving every server's
+// config opt-ins (mirrors SetAttachmentStore's post-construction style).
+// Leaving it uncalled (the default, a nil map) means no server has any of
+// these behaviors applied.
+func (o *Orchestrator) SetMCPServerExtensions(extensions map[string]MCPServerExtension, recordTTL time.Duration) {
+	o.mcpExtensions = extensions
+	o.downloadRecordTTL = recordTTL
 }
 
 // SetFilesPublicBaseURL wires in the base URL other backend services can

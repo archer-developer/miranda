@@ -228,13 +228,32 @@ func (m *Manager) orderSnapshot() []string {
 	return append([]string(nil), m.order...)
 }
 
-func serverForTool(order []string, prefixedName string) (string, bool) {
+// ServerAndTool returns which server owns prefixedName (as produced by
+// Tools) and that tool's own, unprefixed name — the extended form of
+// ServerForTool needed by callers (e.g. httpapi.Orchestrator.executeTool's
+// session-id injection, see docs/medical-card-session-injection.md) that
+// must know the bare tool name, not just its owning server, without
+// duplicating the "<server>_<tool>" convention prefixedToolName already owns
+// as its single source of truth. ServerForTool and serverForTool below both
+// delegate to the same serverAndTool so there is exactly one place that
+// walks order looking for a prefix match.
+func (m *Manager) ServerAndTool(prefixedName string) (server, tool string, ok bool) {
+	return serverAndTool(m.orderSnapshot(), prefixedName)
+}
+
+func serverAndTool(order []string, prefixedName string) (server, tool string, ok bool) {
 	for _, name := range order {
-		if strings.HasPrefix(prefixedName, prefixedToolName(name, "")) {
-			return name, true
+		prefix := prefixedToolName(name, "")
+		if strings.HasPrefix(prefixedName, prefix) {
+			return name, strings.TrimPrefix(prefixedName, prefix), true
 		}
 	}
-	return "", false
+	return "", "", false
+}
+
+func serverForTool(order []string, prefixedName string) (string, bool) {
+	server, _, ok := serverAndTool(order, prefixedName)
+	return server, ok
 }
 
 // KeepConnected keeps a client named name attached to m for as long as ctx is

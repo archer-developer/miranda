@@ -140,7 +140,11 @@ type remoteFileLink struct {
 // wherever the attacker chose. See config.MCPServer.ExposeFiles.
 func detectRemoteFileLinks(result string, endpoint config.FileServerEndpoint) []remoteFileLink {
 	prefix := strings.TrimRight(endpoint.FilesURL, "/") + "/"
-	pattern := regexp.MustCompile(regexp.QuoteMeta(prefix) + `[A-Za-z0-9_-]+`)
+	// RFC 3986 unreserved characters plus "%" for percent-encoding, so a
+	// file id containing e.g. an extension suffix or an encoded character
+	// isn't truncated mid-id (a truncated RemoteURL would still get staged
+	// and chipped, then 404/502 on click — see git history).
+	pattern := regexp.MustCompile(regexp.QuoteMeta(prefix) + `[A-Za-z0-9._~%-]+`)
 
 	var doc interface{}
 	hasJSON := json.Unmarshal([]byte(result), &doc) == nil
@@ -702,7 +706,7 @@ func (o *Orchestrator) runAgentLoop(ctx context.Context, userID, conversationID,
 		o.recordAssistantToolCallMessage(ctx, userID, conversationID, text, toolCalls)
 		messages = append(messages, llm.Message{Role: llm.RoleAssistant, Content: text, ToolCalls: toolCalls})
 		for _, tc := range toolCalls {
-			result := o.executeTool(ctx, userID, tc, control)
+			result := o.executeTool(ctx, userID, conversationID, tc, control)
 			o.recordToolCall(ctx, userID, conversationID, tc, result)
 			messages = append(messages, llm.Message{Role: llm.RoleTool, ToolCallID: tc.ID, Content: result})
 		}
@@ -812,7 +816,7 @@ func (o *Orchestrator) speakText(ctx context.Context, text string) {
 // Errors are turned into a result string rather than aborting the turn, so
 // the model can see what went wrong and react (apologize, retry
 // differently) instead of the whole request failing.
-func (o *Orchestrator) executeTool(ctx context.Context, userID string, tc llm.ToolCall, control *turnControl) string {
+func (o *Orchestrator) executeTool(ctx context.Context, userID, conversationID string, tc llm.ToolCall, control *turnControl) string {
 	if tc.Name == rememberToolName {
 		var args struct {
 			Fact string `json:"fact"`
@@ -1029,6 +1033,17 @@ func (o *Orchestrator) executeTool(ctx context.Context, userID string, tc llm.To
 	// the mutation local-only is what keeps a real key from ever reaching
 	// history's SQLite tables or internal/llmtrace's llm.log. See
 	// docs/encryption.md.
+
+	// Resolved once and reused by every block below that needs to know
+	// tc.Name's owning server (and, where relevant, its bare tool name, or
+	// that server's bundle of opted-in behaviors) instead of each
+	// re-running the same prefix-matching scan over o.tools' server list.
+	toolServer, toolName, toolServerOK := o.tools.ServerAndTool(tc.Name)
+	var toolExt MCPServerExtension
+	if toolServerOK {
+		toolExt = o.mcpExtensions[toolServer]
+	}
+
 	callArgs := tc.Arguments
 	if o.keyring != nil {
 		// key stays nil unless tc.Name targets a whitelisted server AND
@@ -1043,16 +1058,29 @@ func (o *Orchestrator) executeTool(ctx context.Context, userID string, tc llm.To
 		// the package default name below.
 		var key []byte
 		argName := defaultEncryptionKeyArgName
-		if server, ok := o.tools.ServerForTool(tc.Name); ok {
-			if a, permitted := o.encryptionKeyAllowed[server]; permitted {
-				argName = a
-				key, _ = o.keyring.Get(userID)
-			}
+		if toolExt.EncryptionKeyArg != "" {
+			argName = toolExt.EncryptionKeyArg
+			key, _ = o.keyring.Get(userID)
 		}
 		var decodeOK bool
 		callArgs, decodeOK = setEncryptionKeyArg(tc.Arguments, argName, key)
 		if !decodeOK && len(key) > 0 {
 			o.hub.Publish(hub.Event{Source: "error", Message: "keyring: tool call arguments were not valid JSON, encryption key not attached to " + tc.Name})
+		}
+	}
+
+	// Session-id injection is independent of the keyring block above — it
+	// operates on callArgs' current value (already keyring-adjusted, if
+	// applicable) rather than tc.Arguments, so the two compose for a tool
+	// call that happens to be whitelisted for both. Config-driven and
+	// generic across any MCP server/tool pair (o.sessionIDAllowed, built by
+	// cmd/miranda from every config.MCPServer.SessionIDTools), not specific
+	// to any one server — see docs/medical-card-session-injection.md.
+	if toolExt.SessionIDArg != "" && toolExt.SessionIDTools[toolName] {
+		var setOK bool
+		callArgs, setOK = setSessionIDArg(callArgs, toolExt.SessionIDArg, conversationID)
+		if !setOK {
+			o.hub.Publish(hub.Event{Source: "error", Message: "session id not attached to " + tc.Name + ": arguments were not valid JSON"})
 		}
 	}
 
@@ -1069,32 +1097,31 @@ func (o *Orchestrator) executeTool(ctx context.Context, userID string, tc llm.To
 	// tool produced it, stage a download record, and queue it to be
 	// attached to the turn's final reply as structured data (see
 	// history.Message.Downloads).
-	if server, ok := o.tools.ServerForTool(tc.Name); ok {
-		if endpoint, exposesFiles := o.fileExposingServers[server]; exposesFiles {
-			for _, link := range detectRemoteFileLinks(result, endpoint) {
-				if control.hasRemoteFile(link.url) {
-					continue
-				}
-				control.recordRemoteFile(link.url)
-				fileID, err := attachments.NewFileID()
-				if err != nil {
-					continue
-				}
-				control.recordDownloadedFile(downloadedFile{
-					fileID: fileID, filename: link.filename, sizeBytes: link.sizeBytes, mimeType: link.mimeType,
+	if toolExt.FilesEndpoint != nil {
+		endpoint := *toolExt.FilesEndpoint
+		for _, link := range detectRemoteFileLinks(result, endpoint) {
+			if control.hasRemoteFile(link.url) {
+				continue
+			}
+			control.recordRemoteFile(link.url)
+			fileID, err := attachments.NewFileID()
+			if err != nil {
+				continue
+			}
+			control.recordDownloadedFile(downloadedFile{
+				fileID: fileID, filename: link.filename, sizeBytes: link.sizeBytes, mimeType: link.mimeType,
+			})
+			if o.attachStore != nil {
+				o.attachStore.Put(attachments.Record{
+					UserID:      userID,
+					FileID:      fileID,
+					Filename:    link.filename,
+					MIMEType:    link.mimeType,
+					Size:        link.sizeBytes,
+					RemoteURL:   link.url,
+					RemoteToken: endpoint.Token,
+					TTL:         o.downloadRecordTTL,
 				})
-				if o.attachStore != nil {
-					o.attachStore.Put(attachments.Record{
-						UserID:      userID,
-						FileID:      fileID,
-						Filename:    link.filename,
-						MIMEType:    link.mimeType,
-						Size:        link.sizeBytes,
-						RemoteURL:   link.url,
-						RemoteToken: endpoint.Token,
-						TTL:         o.downloadRecordTTL,
-					})
-				}
 			}
 		}
 	}
@@ -1168,6 +1195,22 @@ func setEncryptionKeyArg(args, argName string, key []byte) (result string, ok bo
 	} else {
 		m[argName] = hex.EncodeToString(key)
 	}
+	return encodeToolArgs(m, args), true
+}
+
+// setSessionIDArg sets argName to sessionID in args' JSON, unconditionally
+// overwriting any value the model may have set itself — see
+// docs/medical-card-session-injection.md §1 for why the model must never be
+// trusted to supply this value on its own. Unlike setEncryptionKeyArg, there
+// is no "strip" branch: sessionID is conversationID, which executeTool's
+// caller (runAgentLoop) only ever receives already resolved (see
+// resolveConversation), so it is never empty here.
+func setSessionIDArg(args, argName, sessionID string) (result string, ok bool) {
+	m, decodeOK := decodeToolArgs(args)
+	if !decodeOK {
+		return args, false
+	}
+	m[argName] = sessionID
 	return encodeToolArgs(m, args), true
 }
 

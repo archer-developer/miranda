@@ -481,6 +481,22 @@ type MCPServer struct {
 	// FileUpload.Enabled (cmd/miranda only calls
 	// Config.FileExposingServers/Orchestrator.SetFileExposingServers then).
 	ExposeFiles bool `yaml:"expose_files,omitempty"`
+	// SessionIDArgName overrides the tool-call argument name this server's
+	// schema expects Miranda's own resolved conversation id under. Only
+	// meaningful when SessionIDTools is non-empty. Left unset,
+	// defaultSessionIDArgName ("sessionId") is used.
+	SessionIDArgName string `yaml:"session_id_arg,omitempty"`
+	// SessionIDTools lists which of this server's own (unprefixed) tool
+	// names should receive the injected conversation id — unlike
+	// EncryptionKeyAllowed, this is NOT server-wide: most tools on a given
+	// MCP server won't declare a session-id parameter in their own schema
+	// at all (e.g. miranda-medical-card's medical.profile, medical.timeline
+	// alongside medical.ask), and injecting an argument a tool's schema
+	// doesn't expect is exactly the kind of mismatch that made
+	// EncryptionKeyArgName necessary in the first place — see that field's
+	// own doc comment on the diary incident. Empty (the default) means this
+	// server receives no injection at all — see docs/medical-card-session-injection.md.
+	SessionIDTools []string `yaml:"session_id_tools,omitempty"`
 }
 
 // defaultEncryptionKeyArgName is the tool-call argument name used for a
@@ -496,6 +512,21 @@ func (s MCPServer) EncryptionKeyArg() string {
 		return s.EncryptionKeyArgName
 	}
 	return defaultEncryptionKeyArgName
+}
+
+// defaultSessionIDArgName is the tool-call argument name used for a server
+// that lists itself in SessionIDTools without overriding SessionIDArgName.
+const defaultSessionIDArgName = "sessionId"
+
+// SessionIDArg returns the tool-call argument name this server's schema
+// expects Miranda's own resolved conversation id under: SessionIDArgName if
+// set, else defaultSessionIDArgName — same override-or-default shape as
+// EncryptionKeyArg.
+func (s MCPServer) SessionIDArg() string {
+	if s.SessionIDArgName != "" {
+		return s.SessionIDArgName
+	}
+	return defaultSessionIDArgName
 }
 
 // EncryptionKeyPermitted reports whether this server may actually receive
@@ -945,6 +976,9 @@ func Load(paths ...string) (Config, error) {
 	if err := validateEncryptionKeyServers(cfg.MCP.Servers); err != nil {
 		return cfg, err
 	}
+	if err := validateSessionIDServers(cfg.MCP.Servers); err != nil {
+		return cfg, err
+	}
 	return cfg, nil
 }
 
@@ -980,6 +1014,24 @@ func validateEncryptionKeyServers(servers []MCPServer) error {
 	for _, s := range servers {
 		if s.EncryptionKeyAllowed && !s.EncryptionKeyPermitted() {
 			return fmt.Errorf("config: mcp.servers %q has encryption_key_allowed=true but url %q is not https://", s.Name, s.URL)
+		}
+	}
+	return nil
+}
+
+// validateSessionIDServers rejects a server with session_id_arg set but no
+// session_id_tools — SessionIDArgName only matters as an override for tools
+// actually listed in SessionIDTools (see MCPServer.SessionIDArg), so an
+// empty SessionIDTools alongside a non-default arg name is a meaningless,
+// almost certainly mistaken config (the override silently does nothing).
+// SessionIDTools without SessionIDArgName is fine on its own —
+// defaultSessionIDArgName covers that case — so there's nothing to reject
+// in the other direction, unlike the symmetric HTTPS check
+// validateEncryptionKeyServers runs for EncryptionKeyAllowed.
+func validateSessionIDServers(servers []MCPServer) error {
+	for _, s := range servers {
+		if s.SessionIDArgName != "" && len(s.SessionIDTools) == 0 {
+			return fmt.Errorf("config: mcp.servers %q has session_id_arg set but session_id_tools is empty", s.Name)
 		}
 	}
 	return nil

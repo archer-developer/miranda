@@ -37,7 +37,7 @@ func TestExecuteTool_InjectsEncryptionKeyForWhitelistedUnlockedServer(t *testing
 	)
 	o, _, _ := newTestOrchestrator(t, provider, diary)
 	o.SetKeyring(newTestKeyringService(t, "alex", []byte("01234567890123456789012345678901")[:32]))
-	o.SetEncryptionKeyAllowedServers(map[string]string{"diary": "encryption_key"})
+	o.SetMCPServerExtensions(map[string]MCPServerExtension{"diary": {EncryptionKeyArg: "encryption_key"}}, 0)
 
 	resp, err := o.Handle(context.Background(), InputRequest{Source: "cli", UserID: "alex", Text: "add a diary entry"})
 	require.NoError(t, err)
@@ -73,7 +73,7 @@ func TestExecuteTool_InjectsUnderServerConfiguredArgName(t *testing.T) {
 	)
 	o, _, _ := newTestOrchestrator(t, provider, diary)
 	o.SetKeyring(newTestKeyringService(t, "alex", []byte("01234567890123456789012345678901")[:32]))
-	o.SetEncryptionKeyAllowedServers(map[string]string{"diary": "record_encryption_key"})
+	o.SetMCPServerExtensions(map[string]MCPServerExtension{"diary": {EncryptionKeyArg: "record_encryption_key"}}, 0)
 
 	resp, err := o.Handle(context.Background(), InputRequest{Source: "cli", UserID: "alex", Text: "add a diary entry"})
 	require.NoError(t, err)
@@ -98,7 +98,7 @@ func TestExecuteTool_NeverSendsKeyToNonWhitelistedServer(t *testing.T) {
 	)
 	o, _, _ := newTestOrchestrator(t, provider, ha)
 	o.SetKeyring(newTestKeyringService(t, "alex", []byte("01234567890123456789012345678901")[:32]))
-	o.SetEncryptionKeyAllowedServers(map[string]string{"diary": "encryption_key"}) // "ha" is not in this set
+	o.SetMCPServerExtensions(map[string]MCPServerExtension{"diary": {EncryptionKeyArg: "encryption_key"}}, 0) // "ha" is not in this set
 
 	resp, err := o.Handle(context.Background(), InputRequest{Source: "cli", UserID: "alex", Text: "is the light on?"})
 	require.NoError(t, err)
@@ -119,7 +119,7 @@ func TestExecuteTool_ProceedsWithoutKeyWhenLocked(t *testing.T) {
 	o, _, _ := newTestOrchestrator(t, provider, diary)
 	// Keyring configured, server whitelisted, but nobody has unlocked "alex"'s key.
 	o.SetKeyring(newTestKeyringService(t, "someone-else", []byte("01234567890123456789012345678901")[:32]))
-	o.SetEncryptionKeyAllowedServers(map[string]string{"diary": "encryption_key"})
+	o.SetMCPServerExtensions(map[string]MCPServerExtension{"diary": {EncryptionKeyArg: "encryption_key"}}, 0)
 
 	resp, err := o.Handle(context.Background(), InputRequest{Source: "cli", UserID: "alex", Text: "add a diary entry"})
 	require.NoError(t, err, "a locked key must never block the turn")
@@ -140,7 +140,7 @@ func TestExecuteTool_NeverMutatesRecordedToolCallArguments(t *testing.T) {
 	)
 	o, h, _ := newTestOrchestrator(t, provider, diary)
 	o.SetKeyring(newTestKeyringService(t, "alex", []byte("01234567890123456789012345678901")[:32]))
-	o.SetEncryptionKeyAllowedServers(map[string]string{"diary": "encryption_key"})
+	o.SetMCPServerExtensions(map[string]MCPServerExtension{"diary": {EncryptionKeyArg: "encryption_key"}}, 0)
 
 	resp, err := o.Handle(context.Background(), InputRequest{Source: "cli", UserID: "alex", Text: "add a diary entry"})
 	require.NoError(t, err)

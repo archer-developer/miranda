@@ -177,3 +177,15 @@ func TestManager_ServerForTool(t *testing.T) {
 	_, ok = m.ServerForTool("unknown_tool")
 	require.False(t, ok)
 }
+
+func TestManager_ServerAndTool(t *testing.T) {
+	m := NewManager(nil, mcptest.New("ha", llm.ToolDef{Name: "get_state"}), mcptest.New("medical_card", llm.ToolDef{Name: "medical.ask"}))
+
+	server, tool, ok := m.ServerAndTool("medical_card_medical.ask")
+	require.True(t, ok)
+	require.Equal(t, "medical_card", server)
+	require.Equal(t, "medical.ask", tool)
+
+	_, _, ok = m.ServerAndTool("unknown_tool")
+	require.False(t, ok)
+}

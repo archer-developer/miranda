@@ -94,8 +94,9 @@ func TestExecuteTool_GenericFileURIDetection_ProxiesMedicalCardDocument(t *testi
 	store := attachments.NewStore(0)
 	t.Cleanup(store.Close)
 	o.SetAttachmentStore(store)
-	o.SetFileExposingServers(map[string]config.FileServerEndpoint{
-		"medical_card": {FilesURL: "https://127.0.0.1:8791/files", Token: "medical-card-token"},
+	medicalEndpoint := config.FileServerEndpoint{FilesURL: "https://127.0.0.1:8791/files", Token: "medical-card-token"}
+	o.SetMCPServerExtensions(map[string]MCPServerExtension{
+		"medical_card": {FilesEndpoint: &medicalEndpoint},
 	}, time.Hour)
 
 	resp, err := o.Handle(context.Background(), InputRequest{Source: webUISource, UserID: "archer", Text: "покажи файл МРТ"})
@@ -135,8 +136,9 @@ func TestExecuteTool_GenericFileURIDetection_SkipsNonOptedInServer(t *testing.T)
 	t.Cleanup(store.Close)
 	o.SetAttachmentStore(store)
 	// "other" is deliberately absent from this map.
-	o.SetFileExposingServers(map[string]config.FileServerEndpoint{
-		"medical_card": {FilesURL: "https://127.0.0.1:8791/files", Token: "medical-card-token"},
+	medicalEndpoint := config.FileServerEndpoint{FilesURL: "https://127.0.0.1:8791/files", Token: "medical-card-token"}
+	o.SetMCPServerExtensions(map[string]MCPServerExtension{
+		"medical_card": {FilesEndpoint: &medicalEndpoint},
 	}, time.Hour)
 
 	resp, err := o.Handle(context.Background(), InputRequest{Source: webUISource, UserID: "archer", Text: "get the document"})

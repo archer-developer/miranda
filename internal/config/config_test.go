@@ -203,6 +203,63 @@ func TestMCPServer_EncryptionKeyArg(t *testing.T) {
 	require.Equal(t, "record_encryption_key", MCPServer{EncryptionKeyArgName: "record_encryption_key"}.EncryptionKeyArg(), "override wins")
 }
 
+func TestMCPServer_SessionIDArg(t *testing.T) {
+	require.Equal(t, "sessionId", MCPServer{}.SessionIDArg(), "defaults when unset")
+	require.Equal(t, "conversation_session", MCPServer{SessionIDArgName: "conversation_session"}.SessionIDArg(), "override wins")
+}
+
+func TestLoad_SessionIDArgWithoutSessionIDToolsReturnsError(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	yamlContent := `
+mcp:
+  servers:
+    - name: medical_card
+      url: "https://127.0.0.1:8791/mcp"
+      enabled: true
+      session_id_arg: "conversation_session"
+`
+	require.NoError(t, os.WriteFile(path, []byte(yamlContent), 0o644))
+
+	_, err := Load(path)
+	require.Error(t, err)
+}
+
+func TestLoad_SessionIDToolsWithoutSessionIDArgIsFine(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	yamlContent := `
+mcp:
+  servers:
+    - name: medical_card
+      url: "https://127.0.0.1:8791/mcp"
+      enabled: true
+      session_id_tools: ["medical.ask"]
+`
+	require.NoError(t, os.WriteFile(path, []byte(yamlContent), 0o644))
+
+	cfg, err := Load(path)
+	require.NoError(t, err)
+	require.Equal(t, []string{"medical.ask"}, cfg.MCP.Servers[0].SessionIDTools)
+	require.Equal(t, "sessionId", cfg.MCP.Servers[0].SessionIDArg(), "falls back to the default arg name")
+}
+
+func TestLoad_SessionIDArgWithSessionIDToolsIsFine(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	yamlContent := `
+mcp:
+  servers:
+    - name: medical_card
+      url: "https://127.0.0.1:8791/mcp"
+      enabled: true
+      session_id_arg: "conversation_session"
+      session_id_tools: ["medical.ask"]
+`
+	require.NoError(t, os.WriteFile(path, []byte(yamlContent), 0o644))
+
+	cfg, err := Load(path)
+	require.NoError(t, err)
+	require.Equal(t, "conversation_session", cfg.MCP.Servers[0].SessionIDArg())
+}
+
 func TestMCPServer_FilesEndpoint(t *testing.T) {
 	url, token, err := MCPServer{Name: "medical_card", URL: "https://127.0.0.1:8791/mcp", TokenEnv: "NONEXISTENT_TEST_TOKEN_ENV"}.FilesEndpoint()
 	require.NoError(t, err)
