@@ -75,6 +75,62 @@ func TestReplaceSection_OverwritesOnlyThatSectionAndKeepsOthers(t *testing.T) {
 	require.Contains(t, content, "allergic to cats")
 }
 
+func TestRememberShared_AppendsUnderRememberedSection(t *testing.T) {
+	s, err := New(t.TempDir())
+	require.NoError(t, err)
+
+	require.NoError(t, s.RememberShared("у нас живёт кот Барсик"))
+	require.NoError(t, s.RememberShared("wifi пароль: hunter2"))
+
+	content, err := s.ReadShared()
+	require.NoError(t, err)
+	require.Contains(t, content, "## Remembered")
+	require.Contains(t, content, "кот Барсик")
+	require.Contains(t, content, "wifi пароль")
+
+	// Second fact must be appended, not overwrite the first.
+	firstIdx := indexOf(content, "кот Барсик")
+	secondIdx := indexOf(content, "wifi пароль")
+	require.Less(t, firstIdx, secondIdx)
+}
+
+func TestRememberShared_DoesNotTouchPersonalMemory(t *testing.T) {
+	s, err := New(t.TempDir())
+	require.NoError(t, err)
+
+	require.NoError(t, s.Remember("alex", "personal fact"))
+	require.NoError(t, s.RememberShared("shared fact"))
+
+	shared, err := s.ReadShared()
+	require.NoError(t, err)
+	require.Contains(t, shared, "shared fact")
+	require.NotContains(t, shared, "personal fact")
+
+	personal, err := s.Read("alex")
+	require.NoError(t, err)
+	require.Contains(t, personal, "personal fact")
+	require.NotContains(t, personal, "shared fact")
+}
+
+func TestRememberShared_IsSafeForConcurrentUse(t *testing.T) {
+	s, err := New(t.TempDir())
+	require.NoError(t, err)
+
+	done := make(chan error, 20)
+	for i := 0; i < 20; i++ {
+		go func() {
+			done <- s.RememberShared("household fact")
+		}()
+	}
+	for i := 0; i < 20; i++ {
+		require.NoError(t, <-done)
+	}
+
+	content, err := s.ReadShared()
+	require.NoError(t, err)
+	require.Equal(t, 20, countOccurrences(content, "- ("))
+}
+
 func TestRemember_IsSafeForConcurrentUse(t *testing.T) {
 	s, err := New(t.TempDir())
 	require.NoError(t, err)

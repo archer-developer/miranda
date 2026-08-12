@@ -502,12 +502,23 @@ func (o *Orchestrator) availableTools(ctx context.Context) []llm.ToolDef {
 
 	if o.memoryCfg.ExplicitTool {
 		add(llm.ToolDef{
-			Name:        rememberToolName,
-			Description: "Remember a durable fact about the current user for future conversations (preferences, recurring context).",
+			Name: rememberToolName,
+			Description: "Remember a durable fact for future conversations. " +
+				"By default (scope=\"personal\") the fact is saved to the current user's private memory. " +
+				"Set scope=\"shared\" to save to shared household memory visible to all users — " +
+				"use this only when the fact belongs to the household, not to one person " +
+				"(e.g. \"у нас живёт кот Барсик\", \"wifi пароль: ...\").",
 			Parameters: map[string]any{
-				"type":       "object",
-				"properties": map[string]any{"fact": map[string]any{"type": "string"}},
-				"required":   []string{"fact"},
+				"type": "object",
+				"properties": map[string]any{
+					"fact": map[string]any{"type": "string"},
+					"scope": map[string]any{
+						"type":        "string",
+						"enum":        []string{"personal", "shared"},
+						"description": "\"personal\" (default) writes to the current user's memory; \"shared\" writes to household-wide shared memory.",
+					},
+				},
+				"required": []string{"fact"},
 			},
 		})
 	}
@@ -819,10 +830,17 @@ func (o *Orchestrator) speakText(ctx context.Context, text string) {
 func (o *Orchestrator) executeTool(ctx context.Context, userID, conversationID string, tc llm.ToolCall, control *turnControl) string {
 	if tc.Name == rememberToolName {
 		var args struct {
-			Fact string `json:"fact"`
+			Fact  string `json:"fact"`
+			Scope string `json:"scope"`
 		}
 		if err := json.Unmarshal([]byte(tc.Arguments), &args); err != nil {
 			return fmt.Sprintf("error: invalid arguments: %v", err)
+		}
+		if args.Scope == "shared" {
+			if err := o.memory.RememberShared(args.Fact); err != nil {
+				return fmt.Sprintf("error: %v", err)
+			}
+			return "remembered in shared household memory"
 		}
 		if err := o.memory.Remember(userID, args.Fact); err != nil {
 			return fmt.Sprintf("error: %v", err)

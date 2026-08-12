@@ -82,6 +82,33 @@ func (s *Store) Remember(userID, fact string) error {
 	return s.writeLocked(userID, updated)
 }
 
+// RememberShared appends fact under a "## Remembered" section of shared.md,
+// timestamped. Shared memory is household-wide and visible in every user's
+// system prompt — use it for facts that belong to the household rather than
+// one specific person (e.g. "у нас живёт кот Барсик").
+func (s *Store) RememberShared(fact string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	sharedPath := filepath.Join(s.dir, "shared.md")
+	data, err := os.ReadFile(sharedPath)
+	if err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("memory: read shared: %w", err)
+	}
+
+	entry := fmt.Sprintf("- (%s) %s\n", time.Now().Format("2006-01-02"), strings.TrimSpace(fact))
+	updated := appendUnderSection(string(data), "## Remembered", entry)
+
+	tmp := sharedPath + ".tmp"
+	if err := os.WriteFile(tmp, []byte(updated), 0o644); err != nil {
+		return fmt.Errorf("memory: write shared: %w", err)
+	}
+	if err := os.Rename(tmp, sharedPath); err != nil {
+		return fmt.Errorf("memory: rename into place for shared: %w", err)
+	}
+	return nil
+}
+
 // Write overwrites userID's entire memory file verbatim with content. This
 // is the web UI editor's write path: unlike Remember/ReplaceSection, which
 // each only ever touch one section so the model's automated writes can't
