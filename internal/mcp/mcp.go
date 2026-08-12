@@ -241,6 +241,21 @@ func (m *Manager) ServerAndTool(prefixedName string) (server, tool string, ok bo
 	return serverAndTool(m.orderSnapshot(), prefixedName)
 }
 
+// KNOWN ISSUE: this HasPrefix scan is ambiguous, not just in theory — two
+// enabled servers where one name is a "_"-delimited prefix of the other
+// (e.g. "medical" and "medical_card") can resolve a call to the wrong
+// server, and since tool names can themselves contain underscores, the
+// ambiguity isn't even limited to that case (server "a" + tool "b_c" and
+// server "a_b" + tool "c" both mint the identical prefixed name "a_b_c").
+// validateMCPServerNames only rejects exact duplicate server names, not
+// this. Every caller (ServerForTool, ServerAndTool, Call's own dispatch,
+// and everything httpapi.Orchestrator.executeTool gates on their result —
+// see CLAUDE.md's "Tools available to the model" section) inherits the
+// misattribution risk. Not yet fixed; the correct fix is to stop
+// re-deriving (server, tool) from the string here and instead have Tools()
+// record the exact prefixedName -> (server, tool) pairing at the moment it
+// mints each prefixed name (it already knows this unambiguously there),
+// with this function becoming a lookup into that map instead of a scan.
 func serverAndTool(order []string, prefixedName string) (server, tool string, ok bool) {
 	for _, name := range order {
 		prefix := prefixedToolName(name, "")

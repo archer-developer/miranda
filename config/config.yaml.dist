@@ -42,6 +42,9 @@ logging:
   # messages, tools) and response (text/tool calls) — useful for debugging
   # why a prompt didn't produce the expected behavior. Both rotate by size.
   dir: "./logs"
+  # "debug", "info", "warn", or "error". "debug" adds tool-call timings, web
+  # search queries, and other verbose diagnostic output.
+  level: "info"
   max_size_mb: 10
   max_backups: 5
   max_age_days: 30
@@ -180,6 +183,25 @@ mcp:
     #   token_env: "DIARY_MCP_TOKEN"
     #   enabled: true
     #   encryption_key_allowed: true
+    # Example: a medical-records MCP server
+    # (github.com/archer-developer/miranda-medical-card) whose medical.ask
+    # tool supports an optional sessionId parameter so follow-up questions
+    # can reuse context from earlier in the same conversation —
+    # session_id_tools lets executeTool inject Miranda's own resolved
+    # conversation id into calls to *those specific tools only* (unlike
+    # encryption_key_allowed above, this is per-tool, not server-wide, since
+    # most tools on a server won't declare a session-id parameter at all —
+    # see docs/medical-card-session-injection.md). session_id_arg overrides
+    # the argument name the tool's schema expects it under; left unset, the
+    # default "sessionId" is used. expose_files here is the same
+    # file-download opt-in as code_exec_sandbox above — medical.get_document
+    # returns a fileUri Miranda proxies back to the browser.
+    # - name: medical_card
+    #   url: "https://medical-card.example.com/mcp"
+    #   token_env: "MEDICAL_CARD_MCP_TOKEN"
+    #   enabled: true
+    #   expose_files: true
+    #   session_id_tools: ["medical.ask"]
 
 # Optional file upload support for the web UI — lets users attach files before
 # sending a message. Miranda stages an uploaded file's bytes locally
@@ -201,6 +223,12 @@ file_upload:
   enabled: true
   public_base_url: "http://192.168.1.50:8787"
   max_file_size_bytes: 52428800 # 50 MB — same as the sandbox's staged_files default
+  # How long a download record (see mcp.servers' expose_files above) stays
+  # valid before GET /api/files/{file_id} starts 404ing it — longer than an
+  # upload-staging record's own short TTL, since a download link is embedded
+  # durably in conversation history and can be revisited long after the turn
+  # that created it. 720 hours = 30 days.
+  download_record_ttl_hours: 720
 
 tts:
   # yandex_station_text (Yandex Station's own built-in voice — the default,
@@ -210,6 +238,11 @@ tts:
   # enqueued onto a background player and never block the turn on synthesis
   # or physical playback (see README).
   primary: yandex_station_text
+  # Friendly name (not entity_id) of the media_player that receives TTS
+  # output when speak_reply's optional device argument isn't given — resolved
+  # to an entity_id via the HA REST API at runtime. Leave empty if you only
+  # ever have one entity in yandex_station.entities below.
+  default_device: ""
   yandex_station:
     entities: [] # media_player.* entity ids of your Yandex Stations
     chunk_max_chars: 100 # Yandex Station's real-world text limit, even locally

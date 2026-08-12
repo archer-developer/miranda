@@ -659,6 +659,26 @@ real bytes out of the model's own output — but not an invisible backend
 substitution: the model itself passes the `fileURI` it was given verbatim,
 and the *target server* fetches the bytes, not Miranda.
 
+**Known issue:** `mcp.Manager.ServerForTool`/`ServerAndTool` (and `Call`)
+resolve a prefixed tool name back to its owning server by scanning
+configured server names with `strings.HasPrefix` against the
+`"<server>_<tool>"` convention `prefixedToolName` builds — this is
+ambiguous, not just theoretically: two enabled servers where one name is a
+`_`-delimited prefix of the other (e.g. `medical` and `medical_card`) can
+resolve a call to the wrong server, and since tool names can themselves
+contain underscores, the ambiguity isn't even limited to that case (server
+`a` + tool `b_c` and server `a_b` + tool `c` both mint the identical
+prefixed name `a_b_c`). `validateMCPServerNames` only rejects exact
+duplicate server names, not this. Every consumer of this resolution —
+encryption-key injection, session-id injection, file-exposing-server
+detection, and `Call`'s own dispatch — inherits the misattribution risk.
+Not yet fixed; the intended fix is to stop re-deriving `(server, tool)`
+from the string at all and instead have `Manager.Tools()` record the exact
+`prefixedName → (server, tool)` pairing at the moment it mints each
+prefixed name (it already knows this unambiguously there), with
+`ServerForTool`/`ServerAndTool`/`Call` looking that mapping up instead of
+re-parsing.
+
 ### Web UI surface
 
 - `GET /api/dialogs`, `GET /api/dialogs/{id}` — read-only, always scoped to
