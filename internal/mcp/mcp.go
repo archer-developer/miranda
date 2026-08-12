@@ -132,6 +132,16 @@ func (m *Manager) removeClient(name string) {
 	delete(m.clients, name)
 }
 
+// client returns name's currently connected client, if any, under a read
+// lock — the single-client counterpart to snapshot() for callers (currently
+// just checkHealth) that don't need a full copy of the client set.
+func (m *Manager) client(name string) (Client, bool) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	c, ok := m.clients[name]
+	return c, ok
+}
+
 // snapshot copies the current client set and iteration order under a read
 // lock, so Tools/Call can walk them without holding the lock across
 // potentially slow network calls.
@@ -271,18 +281,50 @@ func serverForTool(order []string, prefixedName string) (string, bool) {
 	return server, ok
 }
 
+// checkHealth proactively verifies name's currently-connected client is
+// still alive by issuing a lightweight ListTools call, evicting it on
+// ErrDisconnected exactly like Manager.Tools/Call do. Without this,
+// KeepConnected's reconnect attempt below only ever fires after
+// HasClient(name) goes false — and the only thing that used to flip it false
+// was a real ListTools/CallTool made from a live agent turn (see Tools/Call
+// above). A server that restarts with nobody talking to Miranda at that
+// moment would otherwise sit marked "connected" indefinitely: the eviction
+// that wakes the reconnect logic never fires until some later turn happens
+// to hit the dead session. This runs once per already-connected tick (i.e.
+// every baseInterval — see the backoff comment below) so a dead session gets
+// noticed on its own.
+func (m *Manager) checkHealth(ctx context.Context, name string, timeout time.Duration) {
+	c, ok := m.client(name)
+	if !ok {
+		return
+	}
+	checkCtx, cancel := context.WithTimeout(ctx, timeout)
+	_, err := c.ListTools(checkCtx)
+	cancel()
+	if err != nil && errors.Is(err, ErrDisconnected) {
+		m.logger.Warn("mcp: health check found server disconnected, dropping until it reconnects", "server", name, "error", err)
+		m.removeClient(name)
+	}
+}
+
 // KeepConnected keeps a client named name attached to m for as long as ctx is
-// alive: whenever HasClient(name) is false (never connected yet, or evicted
-// after a disconnection), it calls connect — bounded by attemptTimeout — and
+// alive: whenever HasClient(name) is false (never connected yet, evicted
+// after a disconnection discovered by Tools/Call, or just evicted by
+// checkHealth below), it calls connect — bounded by attemptTimeout — and
 // SetClients the result on success. A failed attempt retries after
 // baseInterval, doubling up to maxInterval on each consecutive failure so an
 // extended outage doesn't cost an indefinite connection attempt every
-// baseInterval; a success resets the interval back to baseInterval. Callers
+// baseInterval; a success resets the interval back to baseInterval. While
+// already connected, each tick also runs checkHealth so a session that dies
+// with no live agent turn to notice it still gets reconnected. Callers
 // should launch this in its own goroutine — it only returns once ctx is
 // cancelled.
 func (m *Manager) KeepConnected(ctx context.Context, name string, baseInterval, maxInterval, attemptTimeout time.Duration, connect func(ctx context.Context) (Client, error)) {
 	wait := baseInterval
 	for {
+		if m.HasClient(name) {
+			m.checkHealth(ctx, name, attemptTimeout)
+		}
 		if !m.HasClient(name) {
 			attemptCtx, cancel := context.WithTimeout(ctx, attemptTimeout)
 			client, err := connect(attemptCtx)

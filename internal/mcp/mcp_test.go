@@ -167,6 +167,40 @@ func TestManager_KeepConnectedRetriesUntilSuccess(t *testing.T) {
 	<-done
 }
 
+// TestManager_KeepConnectedReconnectsAfterSilentDisconnect guards the fix for
+// a real gap: eviction used to only happen inside Tools/Call, i.e. only when
+// a live agent turn happened to hit the dead session. A server that restarts
+// with nobody talking to Miranda at that moment would sit marked "connected"
+// forever. KeepConnected must notice on its own (via checkHealth) and
+// reconnect, with no Tools/Call in between.
+func TestManager_KeepConnectedReconnectsAfterSilentDisconnect(t *testing.T) {
+	m := NewManager(nil)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	dead := mcptest.New("ha").WithListToolsError(fmt.Errorf("connection reset: %w", ErrDisconnected))
+	m.SetClient(dead)
+
+	var reconnected atomic.Bool
+	connect := func(ctx context.Context) (Client, error) {
+		reconnected.Store(true)
+		return mcptest.New("ha", llm.ToolDef{Name: "get_state"}), nil
+	}
+
+	done := make(chan struct{})
+	go func() {
+		m.KeepConnected(ctx, "ha", time.Millisecond, 10*time.Millisecond, 50*time.Millisecond, connect)
+		close(done)
+	}()
+
+	require.Eventually(t, func() bool { return reconnected.Load() }, time.Second, time.Millisecond,
+		"a dead session must be reconnected without any Tools()/Call() ever being made")
+	require.True(t, dead.Closed, "the health check must have evicted (and closed) the dead client")
+
+	cancel()
+	<-done
+}
+
 func TestManager_ServerForTool(t *testing.T) {
 	m := NewManager(nil, mcptest.New("ha", llm.ToolDef{Name: "get_state"}), mcptest.New("diary", llm.ToolDef{Name: "add_entry"}))
 
