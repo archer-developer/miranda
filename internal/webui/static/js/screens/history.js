@@ -5,6 +5,7 @@ import { t } from "../i18n.js";
 import { icon } from "../icons.js";
 import { downloadChip, extractAttachmentBlocks, attachmentChip } from "../downloads.js";
 import { renderInlineText } from "../inline-text.js";
+import { isChatBubble } from "../message-filter.js";
 
 let listEl;
 
@@ -26,18 +27,9 @@ function sourceLabel(source) {
   return known ? t(known.key, known.fallback) : source;
 }
 
-/** Same rule as isChatBubble in chat.js: tool-call turns (empty assistant
- * content, role "tool") are recorded for history/logs but never shown as
- * conversation lines. A message with no text but a non-empty downloads list
- * still counts. */
-function isConversationLine(m) {
-  if (m.role !== "user" && m.role !== "assistant") return false;
-  return Boolean(m.content?.trim()) || (m.downloads?.length ?? 0) > 0;
-}
-
 function renderMessages(container, messages) {
   container.innerHTML = "";
-  const turns = messages.filter(isConversationLine);
+  const turns = messages.filter(isChatBubble);
   if (turns.length === 0) {
     container.innerHTML = `<p class="py-2 text-xs text-(--color-text-faint)">${t("no_conversations", "No conversations yet.")}</p>`;
     return;

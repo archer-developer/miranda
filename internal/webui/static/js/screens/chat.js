@@ -7,6 +7,7 @@ import { icon } from "../icons.js";
 import * as chatWs from "../chat-ws.js";
 import { downloadChip, extractAttachmentBlocks, attachmentChip } from "../downloads.js";
 import { renderInlineText } from "../inline-text.js";
+import { isChatBubble } from "../message-filter.js";
 
 let messagesEl, scrollEl, formEl, textEl, sendBtn, fileInput, attachBtn, attachChip, unsubscribeWs, unsubscribeReconnect;
 // Non-null while a file upload XHR is in flight — aborted by clearAttachment().
@@ -51,20 +52,6 @@ let pendingUserKey = null;
 // screen remounted — knows not to append a now-orphaned reply into an
 // empty-state thread; see send()'s use of it below.
 let renderGeneration = 0;
-
-/** Same "is this a bubble a person should see" rule loadHistory() has
- * always applied to GET /api/dialogs/{id} rows — tool-call/tool-result
- * turns (see internal/httpapi's recordAssistantToolCallMessage/
- * recordToolCall) are recorded and streamed over chat-ws.js too (for a
- * future debug view), but never rendered as chat bubbles. A message with
- * no text but a non-empty downloads list still counts — the
- * turn-errored-after-a-successful-download recovery path in
- * orchestrator.Handle records exactly that (empty content, downloads set),
- * and it still needs its chip shown. */
-function isChatBubble(m) {
-  if (m.role !== "user" && m.role !== "assistant") return false;
-  return Boolean(m.content?.trim()) || (m.downloads?.length ?? 0) > 0;
-}
 
 function formatTime(iso) {
   try {
