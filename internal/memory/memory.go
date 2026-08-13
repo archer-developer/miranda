@@ -38,28 +38,35 @@ func (s *Store) path(userID string) string {
 	return filepath.Join(s.dir, userID+".md")
 }
 
+// sharedPath is shared.md's fixed location — household-wide memory has no
+// userID key of its own, so unlike path(userID) this takes no argument.
+func (s *Store) sharedPath() string {
+	return filepath.Join(s.dir, "shared.md")
+}
+
 // Read returns userID's current memory content, or "" if they have none yet.
 func (s *Store) Read(userID string) (string, error) {
-	data, err := os.ReadFile(s.path(userID))
-	if err != nil {
-		if os.IsNotExist(err) {
-			return "", nil
-		}
-		return "", fmt.Errorf("memory: read %s: %w", userID, err)
-	}
-	return string(data), nil
+	return s.readFile(s.path(userID))
 }
 
 // ReadShared returns the content of shared.md — household-wide facts injected
 // into every user's system prompt before their personal memory. Returns "" if
 // the file doesn't exist yet (not an error; it's optional).
 func (s *Store) ReadShared() (string, error) {
-	data, err := os.ReadFile(filepath.Join(s.dir, "shared.md"))
+	return s.readFile(s.sharedPath())
+}
+
+// readFile is the shared implementation behind Read/ReadShared/readLocked:
+// a missing file is an empty memory document, not an error — every memory
+// file (per-user or shared) starts out absent until something is first
+// remembered into it.
+func (s *Store) readFile(path string) (string, error) {
+	data, err := os.ReadFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return "", nil
 		}
-		return "", fmt.Errorf("memory: read shared: %w", err)
+		return "", fmt.Errorf("memory: read %s: %w", path, err)
 	}
 	return string(data), nil
 }
@@ -90,23 +97,14 @@ func (s *Store) RememberShared(fact string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	sharedPath := filepath.Join(s.dir, "shared.md")
-	data, err := os.ReadFile(sharedPath)
-	if err != nil && !os.IsNotExist(err) {
-		return fmt.Errorf("memory: read shared: %w", err)
+	current, err := s.readFile(s.sharedPath())
+	if err != nil {
+		return err
 	}
 
 	entry := fmt.Sprintf("- (%s) %s\n", time.Now().Format("2006-01-02"), strings.TrimSpace(fact))
-	updated := appendUnderSection(string(data), "## Remembered", entry)
-
-	tmp := sharedPath + ".tmp"
-	if err := os.WriteFile(tmp, []byte(updated), 0o644); err != nil {
-		return fmt.Errorf("memory: write shared: %w", err)
-	}
-	if err := os.Rename(tmp, sharedPath); err != nil {
-		return fmt.Errorf("memory: rename into place for shared: %w", err)
-	}
-	return nil
+	updated := appendUnderSection(current, "## Remembered", entry)
+	return s.writeFile(s.sharedPath(), updated)
 }
 
 // Write overwrites userID's entire memory file verbatim with content. This
@@ -140,25 +138,23 @@ func (s *Store) ReplaceSection(userID, section, body string) error {
 }
 
 func (s *Store) readLocked(userID string) (string, error) {
-	data, err := os.ReadFile(s.path(userID))
-	if err != nil {
-		if os.IsNotExist(err) {
-			return "", nil
-		}
-		return "", fmt.Errorf("memory: read %s: %w", userID, err)
-	}
-	return string(data), nil
+	return s.readFile(s.path(userID))
 }
 
 func (s *Store) writeLocked(userID, content string) error {
-	path := s.path(userID)
+	return s.writeFile(s.path(userID), content)
+}
+
+// writeFile is the shared implementation behind writeLocked/RememberShared:
+// write-to-tmp then rename, so a crash mid-write never leaves a truncated
+// memory file in place — callers must hold s.mu (writeFile itself doesn't).
+func (s *Store) writeFile(path, content string) error {
 	tmp := path + ".tmp"
 	if err := os.WriteFile(tmp, []byte(content), 0o644); err != nil {
-		return fmt.Errorf("memory: write %s: %w", userID, err)
+		return fmt.Errorf("memory: write %s: %w", path, err)
 	}
-	// Atomic rename so a crash mid-write never leaves a truncated memory file.
 	if err := os.Rename(tmp, path); err != nil {
-		return fmt.Errorf("memory: rename into place for %s: %w", userID, err)
+		return fmt.Errorf("memory: rename into place for %s: %w", path, err)
 	}
 	return nil
 }
