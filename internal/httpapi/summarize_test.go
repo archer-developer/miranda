@@ -7,7 +7,7 @@ import (
 
 	"github.com/stretchr/testify/require"
 
-	"github.com/archer-developer/miranda/internal/llm/llmtest"
+	"github.com/archer-developer/miranda-llm/llmtest"
 )
 
 func TestOrchestrator_SummarizeIdleSessionsDistillsMemoryAndEndsConversation(t *testing.T) {
@@ -57,6 +57,32 @@ func TestOrchestrator_SummarizeIdleSessionsSkipsConversationsStillWithinTimeout(
 	require.NoError(t, err)
 	require.Len(t, convos, 1)
 	require.Nil(t, convos[0].EndedAt)
+}
+
+// TestOrchestrator_SummarizeIdleSessionsPromotesHouseholdFactToSharedMemory
+// guards the fix for a real gap: before this, summarizeConversation only
+// ever read/wrote a user's own Preferences section — a household fact
+// mentioned in conversation but never explicitly flagged via
+// remember_this(scope="shared") had no path into shared memory at all, only
+// into that one user's personal notes (or nowhere).
+func TestOrchestrator_SummarizeIdleSessionsPromotesHouseholdFactToSharedMemory(t *testing.T) {
+	provider := llmtest.New("local",
+		llmtest.Response{Text: "Хорошо, буду знать."},
+		llmtest.Response{Text: "## Summary\nMentioned the household cat's name.\n" +
+			"## Preferences\n\n" +
+			"## Shared\n- у нас живёт кот Барсик"},
+	)
+	o, _, mem := newTestOrchestrator(t, provider)
+	ctx := context.Background()
+
+	_, err := o.Handle(ctx, InputRequest{Source: "cli", UserID: "alex", Text: "у нас живёт кот Барсик"})
+	require.NoError(t, err)
+
+	require.NoError(t, o.SummarizeIdleSessions(ctx, 0))
+
+	shared, err := mem.ReadShared()
+	require.NoError(t, err)
+	require.Contains(t, shared, "у нас живёт кот Барсик")
 }
 
 func TestOrchestrator_SummarizeIdleSessionsSkipsMemoryWriteOnEmptyDistillation(t *testing.T) {

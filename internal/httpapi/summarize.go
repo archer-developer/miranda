@@ -6,10 +6,10 @@ import (
 	"strings"
 	"time"
 
+	llm "github.com/archer-developer/miranda-llm"
+	"github.com/archer-developer/miranda-llm/llmtrace"
 	"github.com/archer-developer/miranda/internal/history"
 	"github.com/archer-developer/miranda/internal/hub"
-	"github.com/archer-developer/miranda/internal/llm"
-	"github.com/archer-developer/miranda/internal/llmtrace"
 )
 
 // preferencesSection is the memory section the summarization pass owns. It's
@@ -22,29 +22,46 @@ const summaryMarker = "## Summary"
 
 const preferencesMarker = "## Preferences"
 
-// summarizeSystemPrompt asks the model for two things in one call, to avoid
-// double-billing the idle sweep: a short per-conversation recap (what
-// search_history surfaces when the user asks "помнишь, мы говорили о...")
-// and an updated durable-facts memory section. The recap is distinct from
-// extracting durable facts — it's fine (expected, even) for it to mention
-// one-off details that Preferences must not.
-const summarizeSystemPrompt = `You maintain two things for a home voice assistant: a short recap of one
-finished conversation, and a durable memory file about the user.
-You'll be given the user's existing "Preferences" notes and the transcript of one finished conversation.
-Reply with exactly two sections, in this order:
+const sharedMarker = "## Shared"
+
+// summarizeSystemPrompt asks the model for three things in one call, to
+// avoid double-billing the idle sweep: a short per-conversation recap (what
+// search_history surfaces when the user asks "помнишь, мы говорили о...."),
+// an updated durable-facts memory section for this user, and any new
+// household-wide facts worth promoting to shared memory (the same store the
+// live-turn remember_this(scope="shared") tool writes to — see
+// internal/memory's RememberShared). Without this third section, a fact
+// mentioned in conversation but never explicitly flagged via
+// remember_this(scope="shared") had no path into shared memory at all: this
+// pass only ever saw and wrote the per-user Preferences section. The recap
+// is distinct from extracting durable facts — it's fine (expected, even)
+// for it to mention one-off details that Preferences/Shared must not.
+const summarizeSystemPrompt = `You maintain memory for a home voice assistant shared by a household. You'll be given the user's
+existing "Preferences" notes, the household's existing "Shared" notes, and the transcript of one
+finished conversation with this one user.
+Reply with exactly three sections, in this order:
 
 ## Summary
 A short (1-3 sentence) recap of what was discussed in this conversation, so it can be found and
 recalled later if the user references it (e.g. "помнишь, мы говорили о...").
 
 ## Preferences
-An updated bullet list of durable facts, preferences, and recurring patterns worth remembering in
-future conversations.
+An updated bullet list of durable facts, preferences, and recurring patterns about THIS USER
+worth remembering in future conversations.
 - Do not restate details that only matter for this one conversation.
 - Do not repeat facts already covered by the existing notes unless they changed.
-- If nothing in the transcript is worth remembering long-term, leave this section empty.
+- Do not repeat a fact that's already covered by the household's existing Shared notes below —
+  that's this user's own information, not something new to remember about them specifically.
+- If nothing in the transcript is worth remembering long-term about this user, leave this section empty.
 
-Reply with only these two sections — no extra commentary.`
+## Shared
+A bullet list of NEW facts from this conversation that belong to the whole household rather than
+this one user (e.g. a pet's name, a wifi password, a recurring household routine) — only facts not
+already present in the existing Shared notes above.
+- Leave this section empty if nothing in the transcript is household-wide, or everything worth
+  keeping is already in the existing Shared notes.
+
+Reply with only these three sections — no extra commentary.`
 
 // SummarizeIdleSessions finds conversations that have sat idle past idleFor,
 // distills each into the user's memory (internal/memory), and marks them
@@ -93,8 +110,12 @@ func (o *Orchestrator) summarizeConversation(ctx context.Context, convID, userID
 	if err != nil {
 		return fmt.Errorf("read memory: %w", err)
 	}
+	existingShared, err := o.memory.ReadShared()
+	if err != nil {
+		return fmt.Errorf("read shared memory: %w", err)
+	}
 
-	summary, preferences, err := o.distillConversation(ctx, existing, messages)
+	summary, preferences, sharedFacts, err := o.distillConversation(ctx, existing, existingShared, messages)
 	if err != nil {
 		return fmt.Errorf("distill: %w", err)
 	}
@@ -102,6 +123,19 @@ func (o *Orchestrator) summarizeConversation(ctx context.Context, convID, userID
 	if strings.TrimSpace(preferences) != "" {
 		if err := o.memory.ReplaceSection(userID, preferencesSection, preferences); err != nil {
 			return fmt.Errorf("write memory: %w", err)
+		}
+	}
+
+	// Shared memory has no per-conversation "owner" the way Preferences does
+	// — it aggregates household facts contributed across every user's
+	// conversations, so this pass appends new facts one at a time (the same
+	// atomic shape remember_this(scope="shared") uses) rather than
+	// wholesale-replacing the section the way ReplaceSection does for
+	// Preferences, which would discard whatever other conversations already
+	// contributed.
+	for _, fact := range bulletLines(sharedFacts) {
+		if err := o.memory.RememberShared(fact); err != nil {
+			return fmt.Errorf("write shared memory: %w", err)
 		}
 	}
 
@@ -120,17 +154,25 @@ func (o *Orchestrator) publishConversationEnded(userID, convID string) {
 	o.hub.Publish(hub.Event{Source: "chat", UserID: userID, Data: ChatEvent{Type: "conversation_ended", ConversationID: convID}})
 }
 
-// distillConversation asks the LLM router for a conversation recap plus an
-// updated Preferences section body, given the current memory and one
-// conversation's transcript. It uses the router directly (no tools, no TTS)
-// since this is a background text distillation, not a user-facing turn.
-func (o *Orchestrator) distillConversation(ctx context.Context, existingMemory string, transcript []history.Message) (summary, preferences string, err error) {
+// distillConversation asks the LLM router for a conversation recap, an
+// updated Preferences section body, and any new household-wide facts to
+// promote to shared memory, given the current per-user and shared memory
+// and one conversation's transcript. It uses the router directly (no tools,
+// no TTS) since this is a background text distillation, not a user-facing
+// turn.
+func (o *Orchestrator) distillConversation(ctx context.Context, existingMemory, existingShared string, transcript []history.Message) (summary, preferences, sharedFacts string, err error) {
 	var b strings.Builder
 	b.WriteString("Existing Preferences notes:\n")
 	if existingMemory == "" {
 		b.WriteString("(none yet)\n")
 	} else {
 		b.WriteString(existingMemory)
+	}
+	b.WriteString("\nExisting Shared notes:\n")
+	if existingShared == "" {
+		b.WriteString("(none yet)\n")
+	} else {
+		b.WriteString(existingShared)
 	}
 	b.WriteString("\nConversation transcript:\n")
 	for _, m := range transcript {
@@ -147,34 +189,42 @@ func (o *Orchestrator) distillConversation(ctx context.Context, existingMemory s
 
 	stream, err := o.router.Chat(ctx, req, nil)
 	if err != nil {
-		return "", "", fmt.Errorf("chat: %w", err)
+		return "", "", "", fmt.Errorf("chat: %w", err)
 	}
 
 	var text string
 	for chunk := range stream {
 		if chunk.Err != nil {
-			return "", "", fmt.Errorf("stream: %w", chunk.Err)
+			return "", "", "", fmt.Errorf("stream: %w", chunk.Err)
 		}
 		text += chunk.TextDelta
 	}
 
-	summary, preferences = splitSummaryAndPreferences(text)
-	return summary, preferences, nil
+	summary, preferences, sharedFacts = splitSummaryPreferencesShared(text)
+	return summary, preferences, sharedFacts, nil
 }
 
-// splitSummaryAndPreferences parses the two "## Summary" / "## Preferences"
-// sections out of the model's reply. If the model doesn't follow the
-// expected shape (e.g. omits the Preferences heading), the whole reply is
-// treated as the summary and preferences comes back empty — a safe
-// degradation, since an empty preferences body is already a no-op for the
-// caller.
-func splitSummaryAndPreferences(text string) (summary, preferences string) {
+// splitSummaryPreferencesShared parses the "## Summary" / "## Preferences" /
+// "## Shared" sections out of the model's reply. If the model omits the
+// Preferences heading entirely, the whole reply is treated as the summary
+// and both other sections come back empty — a safe degradation, since an
+// empty section is already a no-op for the caller. Omitting just the Shared
+// heading (a model that hasn't been prompted to know about it, or an older
+// scripted test response) degrades the same way: preferences captures
+// everything after the Preferences marker, sharedFacts comes back empty.
+func splitSummaryPreferencesShared(text string) (summary, preferences, sharedFacts string) {
 	text = strings.TrimSpace(text)
 
-	var summaryPart, preferencesPart string
+	var summaryPart, preferencesPart, sharedPart string
 	if idx := strings.Index(text, preferencesMarker); idx >= 0 {
 		summaryPart = text[:idx]
-		preferencesPart = text[idx+len(preferencesMarker):]
+		rest := text[idx+len(preferencesMarker):]
+		if sharedIdx := strings.Index(rest, sharedMarker); sharedIdx >= 0 {
+			preferencesPart = rest[:sharedIdx]
+			sharedPart = rest[sharedIdx+len(sharedMarker):]
+		} else {
+			preferencesPart = rest
+		}
 	} else {
 		summaryPart = text
 	}
@@ -183,5 +233,23 @@ func splitSummaryAndPreferences(text string) (summary, preferences string) {
 	summaryPart = strings.TrimPrefix(summaryPart, summaryMarker)
 	summaryPart = strings.TrimSpace(summaryPart)
 
-	return summaryPart, strings.TrimSpace(preferencesPart)
+	return summaryPart, strings.TrimSpace(preferencesPart), strings.TrimSpace(sharedPart)
+}
+
+// bulletLines splits a "- fact" bullet list (as sharedFacts comes back from
+// splitSummaryPreferencesShared) into individual fact strings, one per
+// RememberShared call — stripping the leading "- " and skipping blank
+// lines, so a model reply with stray blank lines between bullets doesn't
+// produce an empty RememberShared entry.
+func bulletLines(list string) []string {
+	var out []string
+	for _, line := range strings.Split(list, "\n") {
+		line = strings.TrimSpace(line)
+		line = strings.TrimPrefix(line, "- ")
+		line = strings.TrimSpace(line)
+		if line != "" {
+			out = append(out, line)
+		}
+	}
+	return out
 }
