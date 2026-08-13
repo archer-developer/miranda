@@ -10,7 +10,7 @@ import (
 
 	"github.com/stretchr/testify/require"
 
-	"github.com/archer-developer/miranda/internal/llm"
+	llm "github.com/archer-developer/miranda-llm"
 	"github.com/archer-developer/miranda/internal/mcp/mcptest"
 )
 
@@ -79,7 +79,7 @@ func TestManager_ToolsRetainsClientOnTransientError(t *testing.T) {
 
 	require.Empty(t, tools)
 	require.True(t, m.HasClient("ha"), "a transient error must not evict a still-connected client")
-	require.False(t, flaky.Closed, "a retained client must not be closed")
+	require.False(t, flaky.IsClosed(), "a retained client must not be closed")
 }
 
 // TestManager_ToolsEvictsFailedServerUntilReconnected verifies the
@@ -94,7 +94,7 @@ func TestManager_ToolsEvictsFailedServerUntilReconnected(t *testing.T) {
 	tools := m.Tools(context.Background())
 	require.Empty(t, tools)
 	require.False(t, m.HasClient("noolite"))
-	require.True(t, broken.Closed, "an evicted client must be closed")
+	require.True(t, broken.IsClosed(), "an evicted client must be closed")
 
 	m.SetClient(mcptest.New("noolite", llm.ToolDef{Name: "get_state"}))
 	require.True(t, m.HasClient("noolite"))
@@ -115,8 +115,8 @@ func TestManager_SetClientClosesReplacedLiveClient(t *testing.T) {
 	second := mcptest.New("ha", llm.ToolDef{Name: "get_state"})
 	m.SetClient(second)
 
-	require.True(t, first.Closed)
-	require.False(t, second.Closed)
+	require.True(t, first.IsClosed())
+	require.False(t, second.IsClosed())
 }
 
 // TestManager_CallEvictsOnDisconnectedError verifies Call reacts to a
@@ -129,7 +129,7 @@ func TestManager_CallEvictsOnDisconnectedError(t *testing.T) {
 	_, err := m.Call(context.Background(), "ha_get_state", `{}`)
 	require.Error(t, err)
 	require.False(t, m.HasClient("ha"))
-	require.True(t, broken.Closed)
+	require.True(t, broken.IsClosed())
 }
 
 // TestManager_KeepConnectedRetriesUntilSuccess exercises the reconnect loop
@@ -195,10 +195,65 @@ func TestManager_KeepConnectedReconnectsAfterSilentDisconnect(t *testing.T) {
 
 	require.Eventually(t, func() bool { return reconnected.Load() }, time.Second, time.Millisecond,
 		"a dead session must be reconnected without any Tools()/Call() ever being made")
-	require.True(t, dead.Closed, "the health check must have evicted (and closed) the dead client")
+	require.True(t, dead.IsClosed(), "the health check must have evicted (and closed) the dead client")
 
 	cancel()
 	<-done
+}
+
+// TestManager_RemoveClientOnlyEvictsMatchingInstance guards the fix for a
+// real race: a caller that observed some client fail must not be able to
+// evict a *different* client a concurrent reconnect has since installed
+// under the same server name. Before this fix, removeClient deleted
+// whatever was currently registered under name, with no check that it was
+// still the same instance the caller saw die — see mcp.go's own doc comment
+// on removeClient for the full failure scenario (a slow Tools()/Call() on a
+// dying client racing against KeepConnected's own health-check-then-reconnect
+// cycle for the same server).
+func TestManager_RemoveClientOnlyEvictsMatchingInstance(t *testing.T) {
+	m := NewManager(nil)
+	original := mcptest.New("ha", llm.ToolDef{Name: "get_state"})
+	m.SetClient(original)
+
+	// A reconnect races in and replaces "ha" with a fresh, healthy client —
+	// SetClient's own old != c guard closes original here.
+	replacement := mcptest.New("ha", llm.ToolDef{Name: "get_state"})
+	m.SetClient(replacement)
+	require.True(t, original.IsClosed())
+
+	// A caller that only ever observed `original` — not the replacement —
+	// finally notices it failed and tries to evict it by name.
+	m.removeClient("ha", original)
+
+	require.True(t, m.HasClient("ha"), "removeClient must not evict a different client instance registered under the same name")
+	require.False(t, replacement.IsClosed(), "the live replacement must survive a stale caller's eviction of a different instance")
+}
+
+// TestManager_CheckHealthDoesNotEvictOnBareTimeout guards the fix for
+// checkHealth conflating "the health check ran out of time" with "the
+// server reported it's disconnected" — a client that's merely slow to
+// answer ListTools (not dead) must not be evicted, since SDKClient's own
+// classifyErr wraps a bare context.DeadlineExceeded as ErrDisconnected the
+// same as a real transport failure, and checkHealth has to tell the two
+// apart itself via checkCtx.Err() rather than trusting the error alone.
+func TestManager_CheckHealthDoesNotEvictOnBareTimeout(t *testing.T) {
+	m := NewManager(nil)
+
+	block := make(chan struct{})
+	defer close(block) // never closes during the health check itself
+	// listErr is wrapped with ErrDisconnected — the same shape a real
+	// classifyErr produces from a bare timeout — so this test actually
+	// exercises checkHealth telling "my own deadline fired" apart from "the
+	// server said it's gone" by timing, not by the error's own type.
+	slow := mcptest.New("ha", llm.ToolDef{Name: "get_state"}).
+		WithListToolsError(fmt.Errorf("checkHealth's own timeout: %w", ErrDisconnected)).
+		WithListToolsBlockingOn(block)
+	m.SetClient(slow)
+
+	m.checkHealth(context.Background(), "ha", 20*time.Millisecond)
+
+	require.True(t, m.HasClient("ha"), "a health check that merely timed out must not evict an otherwise-healthy client")
+	require.False(t, slow.IsClosed())
 }
 
 func TestManager_ServerForTool(t *testing.T) {

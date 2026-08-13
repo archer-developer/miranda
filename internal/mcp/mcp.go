@@ -14,7 +14,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/archer-developer/miranda/internal/llm"
+	llm "github.com/archer-developer/miranda-llm"
 )
 
 // ErrDisconnected marks a ListTools/CallTool error as meaning the
@@ -121,15 +121,25 @@ func (m *Manager) HasClient(name string) bool {
 	return ok
 }
 
-// removeClient closes name's client (if any) and drops it, so a later
-// HasClient(name) tells the reconnect loop to bring it back.
-func (m *Manager) removeClient(name string) {
+// removeClient closes c and drops it from name's slot, so a later
+// HasClient(name) tells the reconnect loop to bring it back — but only if c
+// is still the client actually registered there. A caller only ever learns
+// a client is dead after an RPC on it (ListTools/CallTool) returns, and
+// that call can be in flight for as long as its own timeout while a
+// concurrent KeepConnected tick independently detects the same death,
+// evicts, and successfully reconnects — installing a brand new, healthy
+// client under the same name before the first caller's stale error comes
+// back. Deleting unconditionally by name (as this used to) would then let
+// that stale caller tear down the fresh reconnect instead of the client it
+// actually observed fail. Comparing identity first (mirroring SetClient's
+// own old != c guard) makes a name-only match a no-op instead.
+func (m *Manager) removeClient(name string, c Client) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if c, ok := m.clients[name]; ok {
-		_ = c.Close()
+	if cur, ok := m.clients[name]; ok && cur == c {
+		_ = cur.Close()
+		delete(m.clients, name)
 	}
-	delete(m.clients, name)
 }
 
 // client returns name's currently connected client, if any, under a read
@@ -179,7 +189,7 @@ func (m *Manager) Tools(ctx context.Context) []llm.ToolDef {
 		if err != nil {
 			if errors.Is(err, ErrDisconnected) {
 				m.logger.Warn("mcp: server disconnected, dropping it until it reconnects", "server", name, "error", err)
-				m.removeClient(name)
+				m.removeClient(name, c)
 			} else {
 				m.logger.Warn("mcp: failed to list tools, will retry next turn", "server", name, "error", err)
 			}
@@ -212,7 +222,7 @@ func (m *Manager) Call(ctx context.Context, prefixedName, argumentsJSON string) 
 	result, err := c.CallTool(ctx, strings.TrimPrefix(prefixedName, prefixedToolName(name, "")), argumentsJSON)
 	if err != nil && errors.Is(err, ErrDisconnected) {
 		m.logger.Warn("mcp: server disconnected, dropping it until it reconnects", "server", name, "error", err)
-		m.removeClient(name)
+		m.removeClient(name, c)
 	}
 	return result, err
 }
@@ -293,6 +303,18 @@ func serverForTool(order []string, prefixedName string) (string, bool) {
 // to hit the dead session. This runs once per already-connected tick (i.e.
 // every baseInterval — see the backoff comment below) so a dead session gets
 // noticed on its own.
+//
+// A ListTools call that merely runs past timeout is deliberately NOT
+// treated as disconnection: SDKClient.classifyErr wraps any non-RPC error
+// — including this call's own context.DeadlineExceeded — as ErrDisconnected
+// indiscriminately, since it can't otherwise tell "the transport died" from
+// "the server hasn't answered yet" (e.g. Home Assistant enumerating a large
+// number of entities). Evicting on a bare timeout would turn ordinary
+// slowness into a needless reconnect cycle every tick until the server
+// happens to answer within timeout. checkCtx.Err() lets this function tell
+// the two apart even though the wrapped error can't: only a failure that
+// arrives before checkCtx's own deadline is a genuine transport-level
+// signal worth evicting on.
 func (m *Manager) checkHealth(ctx context.Context, name string, timeout time.Duration) {
 	c, ok := m.client(name)
 	if !ok {
@@ -300,10 +322,18 @@ func (m *Manager) checkHealth(ctx context.Context, name string, timeout time.Dur
 	}
 	checkCtx, cancel := context.WithTimeout(ctx, timeout)
 	_, err := c.ListTools(checkCtx)
+	timedOut := errors.Is(checkCtx.Err(), context.DeadlineExceeded)
 	cancel()
-	if err != nil && errors.Is(err, ErrDisconnected) {
+	if err == nil {
+		return
+	}
+	if timedOut {
+		m.logger.Debug("mcp: health check timed out, leaving client in place", "server", name, "timeout", timeout)
+		return
+	}
+	if errors.Is(err, ErrDisconnected) {
 		m.logger.Warn("mcp: health check found server disconnected, dropping until it reconnects", "server", name, "error", err)
-		m.removeClient(name)
+		m.removeClient(name, c)
 	}
 }
 
