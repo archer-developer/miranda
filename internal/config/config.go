@@ -251,7 +251,7 @@ type FileUploadConfig struct {
 
 // LoggingConfig controls file logging: the general application log (a
 // mirror of everything printed to the terminal) and the separate LLM
-// request/response trace log (internal/llmtrace) used to debug why a given
+// request/response trace log (miranda-llm/llmtrace) used to debug why a given
 // prompt did or didn't produce the expected tool calls/reply. Both rotate by
 // size so they never grow unbounded.
 type LoggingConfig struct {
@@ -285,7 +285,7 @@ type LLMProvider struct {
 	// one API key (never the key itself — same *_env convention as every
 	// other secret in this codebase). All three provider types share this
 	// one field for schema consistency, but only "gemini" actually rotates
-	// across more than one entry (internal/llm/gemini cycles through every
+	// across more than one entry (miranda-llm/gemini cycles through every
 	// resolved key on a quota/server error — see GeminiRotationConfig).
 	// "anthropic" and "openai_compat" use only APIKeyEnvs[0]: those SDKs
 	// take a single credential per client and aren't being changed to
@@ -307,20 +307,20 @@ type LLMProvider struct {
 	GeminiTools GeminiToolsConfig `yaml:"gemini_tools,omitempty"`
 	// GeminiRotation tunes this provider's key-rotation behavior. Only
 	// meaningful when Type == "gemini"; the zero value falls back to
-	// internal/llm/gemini's built-in defaults (1 cycle, no cooldown).
+	// miranda-llm/gemini's built-in defaults (1 cycle, no cooldown).
 	GeminiRotation GeminiRotationConfig `yaml:"gemini_rotation,omitempty"`
 
 	// Escalation lets this specific provider hand a hard turn off to
 	// another configured provider by calling a tool. Lives on each provider
 	// (rather than once globally) so a chain — e.g. a cheap model escalates
 	// to a stronger one, which escalates to Claude — can have each hop pick
-	// its own target/tool name independently. See internal/llm/router for
+	// its own target/tool name independently. See miranda-llm/router for
 	// how a chain of these gets walked hop by hop.
 	Escalation EscalationConfig `yaml:"escalation,omitempty"`
 }
 
 // AnthropicToolsConfig toggles which of Claude's native server-side tools
-// (see internal/llm/anthropic) are sent on every request from this
+// (see miranda-llm/anthropic) are sent on every request from this
 // provider. All default to false (opt-in) since they let the model reach
 // the open internet or run arbitrary code — leave disabled for providers
 // that shouldn't have that reach.
@@ -332,12 +332,12 @@ type AnthropicToolsConfig struct {
 	// CodeExecution runs Python/bash in Anthropic's sandbox. When WebSearch
 	// or WebFetch are also enabled, the sandbox is allowed to call them as
 	// helpers (e.g. fetch a page, then parse/compute over it in code) — see
-	// the AllowedCallers wiring in internal/llm/anthropic.
+	// the AllowedCallers wiring in miranda-llm/anthropic.
 	CodeExecution bool `yaml:"code_execution"`
 }
 
 // GeminiToolsConfig toggles Gemini's own native server-side tools sent on
-// every request from this provider (see internal/llm/gemini) — mirrors
+// every request from this provider (see miranda-llm/gemini) — mirrors
 // AnthropicToolsConfig's opt-in-only shape (all default to false).
 type GeminiToolsConfig struct {
 	// GoogleSearch enables Grounding with Google Search — analogous to
@@ -348,11 +348,11 @@ type GeminiToolsConfig struct {
 	// (genai.ToolCodeExecution) only works on Vertex AI, not the plain
 	// Gemini Developer API key this provider type uses — confirmed via the
 	// SDK's own source comments, consistently applied across ~98 other
-	// genuinely-Vertex-only fields. See internal/llm/gemini.nativeTools's
+	// genuinely-Vertex-only fields. See miranda-llm/gemini.nativeTools's
 	// doc comment for the full reasoning, including why a working-looking
 	// public example doesn't actually contradict this.
 	GoogleSearch bool `yaml:"google_search"`
-	// ContextCaching is not implemented yet — internal/llm/gemini.New
+	// ContextCaching is not implemented yet — miranda-llm/gemini.New
 	// rejects startup if this is true. Gemini's CachedContent is an
 	// explicit, separately-managed resource (create/reference/invalidate),
 	// structurally unlike Anthropic's per-request cache_control breakpoint,
@@ -361,10 +361,10 @@ type GeminiToolsConfig struct {
 	ContextCaching bool `yaml:"context_caching"`
 }
 
-// GeminiRotationConfig tunes internal/llm/gemini's key-rotation — same
+// GeminiRotationConfig tunes miranda-llm/gemini's key-rotation — same
 // shape/reasoning as GeminiTTSConfig's QuotaCooldownSeconds/
 // MaxQuotaRetryCycles, but this adapter's rotation trigger is broader
-// (quota AND server errors — see internal/llm/gemini.isRetryable) than
+// (quota AND server errors — see miranda-llm/gemini.isRetryable) than
 // TTS's quota-only rotation.
 type GeminiRotationConfig struct {
 	CooldownSeconds int `yaml:"cooldown_seconds"`
@@ -383,7 +383,7 @@ type EscalationConfig struct {
 	// prompt. Set this when a provider has a concrete, known-missing
 	// capability worth calling out explicitly, e.g. a Gemini provider (no
 	// working code-execution tool on the plain Developer API — see
-	// internal/llm/gemini.nativeTools) naming that specifically, so the
+	// miranda-llm/gemini.nativeTools) naming that specifically, so the
 	// model reliably escalates for it instead of attempting an answer it
 	// has no way to actually compute.
 	Description    string `yaml:"description,omitempty"`
@@ -574,7 +574,7 @@ type MCPConfig struct {
 // project's way of giving a cheap/free-tier model live web access: Grounding
 // with Google Search turned out to have a zero quota on the free-tier
 // Gemini Developer API, failing every single call with RESOURCE_EXHAUSTED
-// rather than merely being rate-limited — see internal/llm/gemini's doc
+// rather than merely being rate-limited — see miranda-llm/gemini's doc
 // comment and config/llm.yaml.
 type TavilyConfig struct {
 	// APIKeyEnv names the environment variable holding the Tavily API key

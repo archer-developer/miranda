@@ -12,7 +12,7 @@ import (
 	"github.com/coder/websocket/wsjson"
 	"github.com/stretchr/testify/require"
 
-	"github.com/archer-developer/miranda/internal/llm/llmtest"
+	"github.com/archer-developer/miranda-llm/llmtest"
 	"github.com/archer-developer/miranda/internal/session"
 )
 

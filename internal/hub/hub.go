@@ -90,9 +90,9 @@ func (h *Hub) Subscribe(filter func(Event) bool) (ch <-chan Event, replay []Even
 	defer h.mu.Unlock()
 
 	// Sized to match h.bufferSize (config.WebUI.LogBufferSize), not a small
-	// fixed constant: a single internal/llmtrace block publishes every one of
-	// its lines (a large trace can run to hundreds of lines — see
-	// internal/llmtrace/llmtrace.go) from one synchronous Hub.Publish loop,
+	// fixed constant: a single llmtrace block (miranda-llm/llmtrace)
+	// publishes every one of its lines (a large trace can run to hundreds
+	// of lines) from one synchronous Hub.Publish loop,
 	// far faster than the WS handler's Write goroutine can drain them over
 	// the network (see internal/httpapi.Server.handleWSLogs). A too-small
 	// channel used to fill up mid-burst and silently drop the rest of that

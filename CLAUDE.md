@@ -170,9 +170,9 @@ Config flags live on `config.MemoryConfig` unless noted.
 | `stop_speech` | `config.TTSConfig.StopSpeechTool` | Interrupt/clear the TTS queue and stop playback on all entities. |
 | `send_telegram` | `config.TelegramConfig.SendMessageTool` | Push a message to a household member's Telegram. See `internal/telegram/CLAUDE.md`. |
 | `create_scheduled_task` / `list_scheduled_tasks` / `delete_scheduled_task` | `config.ScheduleConfig.Enabled` | Schedule/list/cancel a prompt to replay through the agent loop. See `internal/schedule/CLAUDE.md`. |
-| `web_search` | `config.TavilyConfig.WebSearch.Enabled` | Live web search via Tavily. See `internal/llm/CLAUDE.md`. |
-| `web_fetch` | `config.TavilyConfig.WebFetch.Enabled` | Fetch a URL's readable text via Tavily. See `internal/llm/CLAUDE.md`. |
-| Escalation tool (name configurable per provider) | `config.LLMProvider.Escalation.Enabled` | Hand a hard turn to that provider's configured target. See `internal/llm/CLAUDE.md`. |
+| `web_search` | `config.TavilyConfig.WebSearch.Enabled` | Live web search via Tavily. See `internal/config/CLAUDE.md`. |
+| `web_fetch` | `config.TavilyConfig.WebFetch.Enabled` | Fetch a URL's readable text via Tavily. See `internal/config/CLAUDE.md`. |
+| Escalation tool (name configurable per provider) | `config.LLMProvider.Escalation.Enabled` | Hand a hard turn to that provider's configured target. See `internal/config/CLAUDE.md`. |
 | MCP tools (e.g. `ha_*`) | `config.MCPConfig.Servers[].Enabled` | HA and other MCP-exposed actions. See `internal/mcp/CLAUDE.md`. |
 
 MCP server extensions (encryption-key injection, session-id injection,
@@ -187,7 +187,7 @@ see `internal/config.LoggingConfig`):
 - `miranda.log` — mirror of everything logged to stdout
   (`cmd/miranda.setupLogging`).
 - `llm.log` — request/response trace (`Router.SetTracer`,
-  `internal/llmtrace`). Every provider call (including every escalation
+  `miranda-llm/llmtrace`). Every provider call (including every escalation
   hop) gets one block: exact system prompt, messages, tool names, and the
   model's response or error, tagged `conversation=<id>`. Use this to debug
   why a given prompt didn't produce the expected tool call or reply.

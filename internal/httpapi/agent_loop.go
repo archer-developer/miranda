@@ -12,11 +12,11 @@ import (
 
 	"github.com/robfig/cron/v3"
 
+	llm "github.com/archer-developer/miranda-llm"
 	"github.com/archer-developer/miranda/internal/attachments"
 	"github.com/archer-developer/miranda/internal/config"
 	"github.com/archer-developer/miranda/internal/history"
 	"github.com/archer-developer/miranda/internal/hub"
-	"github.com/archer-developer/miranda/internal/llm"
 	"github.com/archer-developer/miranda/internal/schedule"
 	"github.com/archer-developer/miranda/internal/tts"
 	"github.com/archer-developer/miranda/internal/users"
@@ -479,7 +479,7 @@ func (o *Orchestrator) userLocation(userID string) *time.Location {
 // config.LLMProvider.Escalation), only the Router knows which one applies
 // to whichever provider is active at a given hop — it appends that
 // provider's own escalation ToolDef to this base list right before each
-// Chat() call (see internal/llm/router.requestFor), and intercepts calls to
+// Chat() call (see miranda-llm/router.requestFor), and intercepts calls to
 // it transparently, so it never reaches executeTool.
 //
 // Built-ins are collected first (into the closure-captured `tools`/`names`
@@ -1049,7 +1049,7 @@ func (o *Orchestrator) executeTool(ctx context.Context, userID, conversationID s
 	// call returns (Go passes tc into executeTool by value, so a local
 	// mutation here is invisible to the caller's copy either way). Keeping
 	// the mutation local-only is what keeps a real key from ever reaching
-	// history's SQLite tables or internal/llmtrace's llm.log. See
+	// history's SQLite tables or miranda-llm/llmtrace's llm.log. See
 	// docs/encryption.md.
 
 	// Resolved once and reused by every block below that needs to know

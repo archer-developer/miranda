@@ -6,8 +6,8 @@ import (
 	"fmt"
 	"strings"
 
+	llm "github.com/archer-developer/miranda-llm"
 	"github.com/archer-developer/miranda/internal/attachments"
-	"github.com/archer-developer/miranda/internal/llm"
 )
 
 // textAttachmentThreshold is the maximum number of bytes of a text file that

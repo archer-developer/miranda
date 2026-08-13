@@ -13,12 +13,12 @@ import (
 
 	"github.com/stretchr/testify/require"
 
+	llm "github.com/archer-developer/miranda-llm"
+	"github.com/archer-developer/miranda-llm/llmtest"
+	"github.com/archer-developer/miranda-llm/router"
 	"github.com/archer-developer/miranda/internal/config"
 	"github.com/archer-developer/miranda/internal/history"
 	"github.com/archer-developer/miranda/internal/hub"
-	"github.com/archer-developer/miranda/internal/llm"
-	"github.com/archer-developer/miranda/internal/llm/llmtest"
-	"github.com/archer-developer/miranda/internal/llm/router"
 	"github.com/archer-developer/miranda/internal/mcp"
 	"github.com/archer-developer/miranda/internal/mcp/mcptest"
 	"github.com/archer-developer/miranda/internal/memory"
@@ -154,8 +154,8 @@ func newTestOrchestratorWithTTS(t *testing.T, provider *llmtest.FakeProvider) (*
 // still need the escalate_to_claude tool to be visible to the FakeProvider
 // the same way a real deployment's default provider would see its own
 // configured escalation tool (see config.LLMProvider.Escalation).
-func selfEscalation(providerName string) map[string]config.EscalationConfig {
-	return map[string]config.EscalationConfig{
+func selfEscalation(providerName string) map[string]router.EscalationConfig {
+	return map[string]router.EscalationConfig{
 		providerName: {Enabled: true, ToolName: "escalate_to_claude", TargetProvider: providerName},
 	}
 }
@@ -290,7 +290,7 @@ func TestOrchestrator_EscalationIsTransparentToOrchestrator(t *testing.T) {
 	})
 	claude := llmtest.New("claude", llmtest.Response{Text: "Развёрнутый ответ от Клода."})
 
-	escalations := map[string]config.EscalationConfig{
+	escalations := map[string]router.EscalationConfig{
 		"local-qwen": {Enabled: true, ToolName: "escalate_to_claude", TargetProvider: "claude"},
 	}
 	r, err := router.New([]llm.Provider{local, claude}, escalations, "")
@@ -332,7 +332,7 @@ func TestOrchestrator_EscalatedProviderStaysActiveAcrossToolCall(t *testing.T) {
 		llmtest.Response{Text: "Свет в зале включён."},
 	)
 
-	escalations := map[string]config.EscalationConfig{
+	escalations := map[string]router.EscalationConfig{
 		"gemini-lite": {Enabled: true, ToolName: "escalate_to_strong", TargetProvider: "gemini-strong"},
 	}
 	r, err := router.New([]llm.Provider{lite, strong}, escalations, "")

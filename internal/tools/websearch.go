@@ -8,8 +8,8 @@ import (
 	"strings"
 	"time"
 
+	llm "github.com/archer-developer/miranda-llm"
 	"github.com/archer-developer/miranda/internal/config"
-	"github.com/archer-developer/miranda/internal/llm"
 	"github.com/archer-developer/miranda/internal/tavily"
 )
 
@@ -42,7 +42,7 @@ type WebSearchTool struct {
 // sent to Tavily and a summary of what came back, to debug why a turn did
 // or didn't find what the model expected without needing to reproduce it
 // against the real API; nil falls back to slog.Default(), same convention
-// as internal/llm/gemini.New/internal/mcp.NewManager.
+// as miranda-llm/gemini.New/internal/mcp.NewManager.
 func NewWebSearch(client *tavily.Client, cfg config.WebSearchToolConfig, logger *slog.Logger) *WebSearchTool {
 	if logger == nil {
 		logger = slog.Default()

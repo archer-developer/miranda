@@ -7,7 +7,7 @@ import (
 	"log/slog"
 	"time"
 
-	"github.com/archer-developer/miranda/internal/llm"
+	llm "github.com/archer-developer/miranda-llm"
 	"github.com/archer-developer/miranda/internal/tavily"
 )
 

@@ -1,14 +1,25 @@
-# LLM providers, escalation, and web tools (`internal/llm`)
+# LLM providers, escalation, and web tools (`internal/config`)
+
+The LLM plumbing itself (provider adapters, router, key rotation, tracing)
+lives in the shared [`miranda-llm`](https://github.com/archer-developer/miranda-llm)
+module, not in this repo — see that module's own CLAUDE.md for its
+package-by-package details. This file documents the layer that's still
+Miranda's own: `internal/config`'s YAML-tagged types, and how
+`cmd/miranda/main.go` wires their values into `miranda-llm`'s constructors
+(each provider/router config struct there has an identical-shape
+counterpart here — e.g. `config.AnthropicToolsConfig` ↔
+`anthropic.ToolsConfig` — converted via a plain Go struct conversion at the
+call site, not a field-by-field mapping function).
 
 ## Provider types
 
 `config.LLMConfig.Providers` is an ordered fallback chain
-(`internal/llm/router.Router` tries each in list order on a connection
-failure):
+(`router.Router`, from `miranda-llm/router`, tries each in list order on a
+connection failure):
 
 - `type: openai_compat` — any OpenAI Chat Completions-compatible backend.
-- `type: anthropic` — native Claude (`internal/llm/anthropic`).
-- `type: gemini` — native Gemini (`internal/llm/gemini`,
+- `type: anthropic` — native Claude (`miranda-llm/anthropic`).
+- `type: gemini` — native Gemini (`miranda-llm/gemini`,
   `google.golang.org/genai`).
 
 `LLMConfig.DefaultProvider`, if set, is moved to the front of the fallback
@@ -73,20 +84,31 @@ low — every request fails with `RESOURCE_EXHAUSTED`, including the first
 call of the day on a fresh key). Gemini key rotation can't route around it
 since the exhaustion is per-feature, not per-key.
 
-**Name-collision risk:** enabling a provider's native `web_search`/
-`web_fetch` *and* the matching `tavily.*` flag together is a real conflict
-(Anthropic requires unique tool names on one request). Three safety nets:
+**Name-collision risk:** Anthropic requires unique tool names on one
+request, so enabling a provider's native `web_search`/`web_fetch` *and* a
+same-named custom tool together would be a real conflict — except Tavily's
+own tools are deliberately named `tavily_web_search`/`tavily_web_fetch`
+(`internal/tools/websearch.go`'s `WebSearchToolName`,
+`internal/tools/webfetch.go`'s `WebFetchToolName`), not `web_search`/
+`web_fetch`, specifically so they never collide with Anthropic's native
+ones — enabling `anthropic_tools.web_search` alongside
+`tavily.web_search.enabled` is fully supported today (see
+`TestLoad_AnthropicNativeToolsAlongsideTavilyIsAllowed` in
+`internal/config/config_test.go`). There is no config-load-time rejection
+of this combination — the rename is the whole fix.
 
-1. `config.validateNoDuplicateWebTools` (called from `Load`) rejects a
-   config where an `anthropic`-type provider's `anthropic_tools.web_search`/
-   `web_fetch` is enabled alongside the matching `tavily.*` flag.
-2. `httpapi.ReservedToolNames()` lists every name the agent loop can ever
+The residual risk this doesn't cover is an MCP server whose *own* prefixed
+tool name happens to match a built-in — that name isn't known until the
+server connects, so it can't be caught at config-load time. Two safety
+nets:
+
+1. `httpapi.ReservedToolNames()` lists every name the agent loop can ever
    advertise; `cmd/miranda.validateEscalationToolNames` checks every
    provider's `escalation.tool_name` against it at startup.
-3. `availableTools` de-duplicates at runtime: built-in names are collected
+2. `availableTools` de-duplicates at runtime: built-in names are collected
    first, and any MCP `ToolDef` sharing one is dropped (logged via the hub)
    rather than being sent to the provider twice or shadowing the built-in.
 
-Neither #1 nor #2 can catch an MCP server whose prefixed tool name happens
-to match — that name isn't known until the server connects. #3 is the
-runtime backstop.
+#1 only catches an escalation tool name misconfigured to collide; #2 is the
+runtime backstop for everything else, including an MCP server discovered
+only after connecting.

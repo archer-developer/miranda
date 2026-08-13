@@ -16,13 +16,13 @@ import (
 
 	"github.com/stretchr/testify/require"
 
+	llm "github.com/archer-developer/miranda-llm"
+	"github.com/archer-developer/miranda-llm/llmtest"
+	"github.com/archer-developer/miranda-llm/router"
 	"github.com/archer-developer/miranda/internal/config"
 	"github.com/archer-developer/miranda/internal/history"
 	"github.com/archer-developer/miranda/internal/httpapi"
 	"github.com/archer-developer/miranda/internal/hub"
-	"github.com/archer-developer/miranda/internal/llm"
-	"github.com/archer-developer/miranda/internal/llm/llmtest"
-	"github.com/archer-developer/miranda/internal/llm/router"
 	"github.com/archer-developer/miranda/internal/mcp"
 	"github.com/archer-developer/miranda/internal/mcp/mcptest"
 	"github.com/archer-developer/miranda/internal/memory"
@@ -52,7 +52,7 @@ func newHarness(t *testing.T, provider *llmtest.FakeProvider, mcpClients ...mcp.
 	// escalate_to_claude tool is visible in its Requests the same way a
 	// real deployment's configured provider would see its own (see
 	// config.LLMProvider.Escalation).
-	escalations := map[string]config.EscalationConfig{
+	escalations := map[string]router.EscalationConfig{
 		provider.Name(): {Enabled: true, ToolName: "escalate_to_claude", TargetProvider: provider.Name()},
 	}
 	r, err := router.New([]llm.Provider{provider}, escalations, "")

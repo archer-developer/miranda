@@ -72,7 +72,7 @@ type DownloadRef struct {
 
 // ToolCallRef is the durable record of one tool invocation the model
 // requested: enough to rebuild an llm.ToolCall when replaying stored
-// history, without internal/history depending on internal/llm.
+// history, without internal/history depending on the miranda-llm module.
 type ToolCallRef struct {
 	ID        string `json:"id"`
 	Name      string `json:"name"`

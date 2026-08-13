@@ -19,6 +19,12 @@ import (
 
 	"gopkg.in/natefinch/lumberjack.v2"
 
+	llm "github.com/archer-developer/miranda-llm"
+	"github.com/archer-developer/miranda-llm/anthropic"
+	"github.com/archer-developer/miranda-llm/gemini"
+	"github.com/archer-developer/miranda-llm/llmtrace"
+	"github.com/archer-developer/miranda-llm/openaicompat"
+	"github.com/archer-developer/miranda-llm/router"
 	"github.com/archer-developer/miranda/internal/attachments"
 	"github.com/archer-developer/miranda/internal/config"
 	"github.com/archer-developer/miranda/internal/envfile"
@@ -27,12 +33,6 @@ import (
 	"github.com/archer-developer/miranda/internal/httpapi"
 	"github.com/archer-developer/miranda/internal/hub"
 	"github.com/archer-developer/miranda/internal/keyring"
-	"github.com/archer-developer/miranda/internal/llm"
-	"github.com/archer-developer/miranda/internal/llm/anthropic"
-	"github.com/archer-developer/miranda/internal/llm/gemini"
-	"github.com/archer-developer/miranda/internal/llm/openaicompat"
-	"github.com/archer-developer/miranda/internal/llm/router"
-	"github.com/archer-developer/miranda/internal/llmtrace"
 	"github.com/archer-developer/miranda/internal/mcp"
 	"github.com/archer-developer/miranda/internal/memory"
 	"github.com/archer-developer/miranda/internal/schedule"
@@ -479,11 +479,11 @@ func buildProviders(ctx context.Context, configs []config.LLMProvider, logger *s
 	for _, c := range configs {
 		switch c.Type {
 		case "anthropic":
-			providers = append(providers, anthropic.New(c.Name, c.Model, firstAPIKey(c.APIKeyEnvs), c.AnthropicTools))
+			providers = append(providers, anthropic.New(c.Name, c.Model, firstAPIKey(c.APIKeyEnvs), anthropic.ToolsConfig(c.AnthropicTools)))
 		case "openai_compat":
 			providers = append(providers, openaicompat.New(c.Name, c.BaseURL, c.Model, firstAPIKey(c.APIKeyEnvs)))
 		case "gemini":
-			p, err := gemini.New(ctx, c.Name, c.Model, c.APIKeyEnvs, c.GeminiTools, c.GeminiRotation, logger)
+			p, err := gemini.New(ctx, c.Name, c.Model, c.APIKeyEnvs, gemini.ToolsConfig(c.GeminiTools), gemini.RotationConfig(c.GeminiRotation), logger)
 			if err != nil {
 				return nil, fmt.Errorf("main: build gemini provider %q: %w", c.Name, err)
 			}
@@ -536,10 +536,10 @@ func validateEscalationToolNames(providers []config.LLMProvider) error {
 // buildEscalations extracts each provider's own EscalationConfig, keyed by
 // name, for router.New — see config.LLMProvider.Escalation's doc comment
 // for why this moved off a single global LLMConfig.Escalation.
-func buildEscalations(configs []config.LLMProvider) map[string]config.EscalationConfig {
-	m := make(map[string]config.EscalationConfig, len(configs))
+func buildEscalations(configs []config.LLMProvider) map[string]router.EscalationConfig {
+	m := make(map[string]router.EscalationConfig, len(configs))
 	for _, c := range configs {
-		m[c.Name] = c.Escalation
+		m[c.Name] = router.EscalationConfig(c.Escalation)
 	}
 	return m
 }

@@ -6,7 +6,7 @@
 // in Gemini's case, ran into a hard architectural wall: Grounding with
 // Google Search is entirely unavailable on the free-tier Gemini Developer
 // API, so any request that triggered it failed with RESOURCE_EXHAUSTED even
-// on the very first call of the day (see internal/llm/gemini's rotation —
+// on the very first call of the day (see miranda-llm/gemini's rotation —
 // it retried across every key and cooldown cycle for nothing, since the
 // quota for that specific tool is zero, not merely low). A single
 // self-hosted implementation, callable by every provider in the chain

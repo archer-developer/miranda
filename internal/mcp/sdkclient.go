@@ -9,7 +9,7 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/jsonrpc"
 	sdkmcp "github.com/modelcontextprotocol/go-sdk/mcp"
 
-	"github.com/archer-developer/miranda/internal/llm"
+	llm "github.com/archer-developer/miranda-llm"
 )
 
 const clientVersion = "0.1.0"

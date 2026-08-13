@@ -13,7 +13,7 @@ package tools
 import (
 	"context"
 
-	"github.com/archer-developer/miranda/internal/llm"
+	llm "github.com/archer-developer/miranda-llm"
 )
 
 // Tool is one model-callable tool: Def is what's advertised to the LLM

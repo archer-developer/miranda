@@ -349,7 +349,7 @@ loop) — both of these run against the same `tc` value that's never touched
 by the injection above, since Go passes `tc` into `executeTool` by value.
 The messages array fed back to the LLM for the next iteration is built from
 that same original `toolCalls` slice, too. So neither `history`'s SQLite
-tables nor `../../internal/llmtrace`'s `llm.log` — nor the model's own context —
+tables nor `miranda-llm/llmtrace`'s `llm.log` — nor the model's own context —
 ever see the real key value; only the literal bytes sent over the wire to
 `o.tools.Call` do.
 

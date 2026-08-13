@@ -7,10 +7,10 @@ import (
 
 	"github.com/stretchr/testify/require"
 
+	llm "github.com/archer-developer/miranda-llm"
+	"github.com/archer-developer/miranda-llm/llmtest"
 	"github.com/archer-developer/miranda/internal/attachments"
 	"github.com/archer-developer/miranda/internal/config"
-	"github.com/archer-developer/miranda/internal/llm"
-	"github.com/archer-developer/miranda/internal/llm/llmtest"
 	"github.com/archer-developer/miranda/internal/mcp/mcptest"
 )
 

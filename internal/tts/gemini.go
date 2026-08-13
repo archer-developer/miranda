@@ -14,8 +14,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/archer-developer/miranda-llm/keyrotation"
 	"github.com/archer-developer/miranda/internal/config"
-	"github.com/archer-developer/miranda/internal/keyrotation"
 )
 
 // geminiAPIBaseURL is Gemini's public API host. It's a var, not a const, so
@@ -237,10 +237,11 @@ func estimatedDurationFromChars(chars int) time.Duration {
 // most free-tier Gemini quota windows are per-minute, so a short cooldown
 // often recovers a key that failed moments ago. Once every cycle is
 // exhausted, it returns ErrQuotaExceeded. The cycle/cooldown loop itself is
-// internal/keyrotation.Run — shared with internal/llm/gemini's chat
-// provider, which needs the identical shape but a broader (quota-or-5xx)
-// retryability rule; only that predicate and what one attempt does differ
-// between the two callers.
+// keyrotation.Run (github.com/archer-developer/miranda-llm/keyrotation) —
+// shared with miranda-llm/gemini's chat provider, which needs the
+// identical shape but a broader (quota-or-5xx) retryability rule; only
+// that predicate and what one attempt does differ between the two
+// callers.
 //
 // Any non-quota error (auth, network, malformed request) returns
 // immediately without rotating keys or retrying: cycling keys can't fix a
