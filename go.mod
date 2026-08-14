@@ -3,7 +3,7 @@ module github.com/archer-developer/miranda
 go 1.25.0
 
 require (
-	github.com/archer-developer/miranda-llm v0.0.0-20260813111120-dd5ccfb8024d
+	github.com/archer-developer/miranda-llm v0.0.0-20260814073457-0574e91372c5
 	github.com/braheezy/shine-mp3 v0.1.0
 	github.com/coder/websocket v1.8.15
 	github.com/descope/virtualwebauthn v1.0.5
