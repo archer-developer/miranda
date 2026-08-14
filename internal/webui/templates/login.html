@@ -184,8 +184,17 @@
                remembered method at all. */
           }
 
+          // Only a wrong-password submit (?error=1) should force the
+          // password form open — that's the one case where the remembered
+          // method is actively wrong for whatever's being typed right now.
+          // ?expired=1 (session died server-side, e.g. a Miranda restart
+          // wiped internal/session.Store's in-memory map — see auth-fetch.js)
+          // says nothing about which method the user prefers, so it must
+          // NOT override a remembered passkey — otherwise every restart
+          // would silently downgrade every passkey user back to the
+          // password form.
           var params = new URLSearchParams(location.search);
-          var forcePasswordVisible = params.has("error") || params.has("expired");
+          var forcePasswordVisible = params.has("error");
 
           if (!forcePasswordVisible && lastMethod === "passkey") {
             document.getElementById("password-section").hidden = true;

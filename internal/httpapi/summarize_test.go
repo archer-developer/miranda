@@ -2,13 +2,45 @@ package httpapi
 
 import (
 	"context"
+	"errors"
+	"path/filepath"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/require"
 
+	llm "github.com/archer-developer/miranda-llm"
 	"github.com/archer-developer/miranda-llm/llmtest"
+	"github.com/archer-developer/miranda-llm/router"
+	"github.com/archer-developer/miranda/internal/config"
+	"github.com/archer-developer/miranda/internal/history"
+	"github.com/archer-developer/miranda/internal/hub"
+	"github.com/archer-developer/miranda/internal/mcp"
+	"github.com/archer-developer/miranda/internal/memory"
 )
+
+// newTestOrchestratorWithMemoryConfig is like newTestOrchestrator but takes
+// a caller-chosen config.MemoryConfig, so a test can exercise AutoSummarize
+// independently of newTestOrchestrator's own default.
+func newTestOrchestratorWithMemoryConfig(t *testing.T, provider *llmtest.FakeProvider, memCfg config.MemoryConfig) (*Orchestrator, *history.Store, *memory.Store) {
+	t.Helper()
+
+	r, err := router.New([]llm.Provider{provider}, selfEscalation(provider.Name()), "")
+	require.NoError(t, err)
+
+	h, err := history.Open(filepath.Join(t.TempDir(), "miranda.db"))
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = h.Close() })
+
+	mem, err := memory.New(t.TempDir())
+	require.NoError(t, err)
+
+	o := NewOrchestrator(
+		r, mcp.NewManager(nil), h, mem, nil, hub.New(100), nil,
+		config.AgentConfig{}, memCfg, config.TTSConfig{}, 100, "debug",
+	)
+	return o, h, mem
+}
 
 func TestOrchestrator_SummarizeIdleSessionsDistillsMemoryAndEndsConversation(t *testing.T) {
 	provider := llmtest.New("local",
@@ -106,4 +138,83 @@ func TestOrchestrator_SummarizeIdleSessionsSkipsMemoryWriteOnEmptyDistillation(t
 	require.NoError(t, err)
 	require.Len(t, convos, 1)
 	require.NotNil(t, convos[0].EndedAt)
+}
+
+// TestOrchestrator_SummarizeIdleSessionsSkipsDistillationWhenAutoSummarizeDisabled
+// guards the fix where AutoSummarize used to only gate whether cmd/miranda's
+// background ticker ran at all — meaning a deployment that disabled it also,
+// silently, stopped every conversation from ever closing on the idle
+// timeout. AutoSummarize must control only the LLM-based recap/memory step;
+// idle-timeout closure must always happen.
+func TestOrchestrator_SummarizeIdleSessionsSkipsDistillationWhenAutoSummarizeDisabled(t *testing.T) {
+	// Only one scripted response: if summarizeConversation attempted
+	// distillation anyway, the FakeProvider would panic on the unscripted
+	// second Chat call.
+	provider := llmtest.New("local", llmtest.Response{Text: "Ответ."})
+	o, h, mem := newTestOrchestratorWithMemoryConfig(t, provider, config.MemoryConfig{AutoSummarize: false})
+	ctx := context.Background()
+
+	resp, err := o.Handle(ctx, InputRequest{Source: "cli", UserID: "alex", Text: "привет"})
+	require.NoError(t, err)
+
+	require.NoError(t, o.SummarizeIdleSessions(ctx, 0))
+
+	content, err := mem.Read("alex")
+	require.NoError(t, err)
+	require.Empty(t, content, "no distillation must run when AutoSummarize is disabled")
+
+	convos, err := h.RecentConversations(ctx, "alex", 10)
+	require.NoError(t, err)
+	require.Len(t, convos, 1)
+	require.Equal(t, resp.ConversationID, convos[0].ID)
+	require.NotNil(t, convos[0].EndedAt, "idle-timeout closure must happen regardless of AutoSummarize")
+	require.Empty(t, convos[0].Summary)
+}
+
+// TestOrchestrator_SummarizeIdleSessionsEndsConversationEvenWhenDistillationFails
+// guards the fix where a failed distillation call (LLM error, rate limit,
+// exhausted escalation chain) used to leave the conversation open
+// indefinitely for the next sweep to retry — meaning a persistently broken
+// summarization provider could keep a session (and its sessionId, e.g. the
+// one injected into medical.ask — see docs/adr/medical-card-session-injection.md)
+// pinned open forever, well past its idle timeout. A distillation failure
+// must be logged and skipped, not retried: the conversation still closes on
+// this same pass, just without a recap.
+func TestOrchestrator_SummarizeIdleSessionsEndsConversationEvenWhenDistillationFails(t *testing.T) {
+	provider := llmtest.New("local",
+		llmtest.Response{Text: "Ответ."},
+		llmtest.Response{Err: errors.New("provider unavailable")},
+	)
+	o, h, mem := newTestOrchestrator(t, provider)
+	ctx := context.Background()
+
+	resp, err := o.Handle(ctx, InputRequest{Source: "cli", UserID: "alex", Text: "привет"})
+	require.NoError(t, err)
+
+	// Subscribed only after the turn itself finishes, so the "chat" events
+	// Handle publishes for the user/assistant messages don't show up here —
+	// this test only cares about what SummarizeIdleSessions publishes.
+	hubEvents, _, unsubscribe := o.hub.Subscribe(nil)
+	defer unsubscribe()
+
+	require.NoError(t, o.SummarizeIdleSessions(ctx, 0))
+
+	convos, err := h.RecentConversations(ctx, "alex", 10)
+	require.NoError(t, err)
+	require.Len(t, convos, 1)
+	require.Equal(t, resp.ConversationID, convos[0].ID)
+	require.NotNil(t, convos[0].EndedAt, "a failed distillation must not block idle-timeout closure")
+	require.Empty(t, convos[0].Summary)
+
+	content, err := mem.Read("alex")
+	require.NoError(t, err)
+	require.Empty(t, content)
+
+	select {
+	case ev := <-hubEvents:
+		require.Equal(t, "error", ev.Source)
+		require.Contains(t, ev.Message, "distill")
+	case <-time.After(time.Second):
+		t.Fatal("expected a hub error event logging the failed distillation")
+	}
 }
