@@ -301,6 +301,9 @@ func run(cfg config.Config, logger *slog.Logger, eventHub *hub.Hub) error {
 		orchestrator.SetSpeakerHA(ttsHAClient)
 	}
 	orchestrator.SetKeyring(keyringService)
+	if lazy := cfg.LazyMCPServers(); len(lazy) > 0 {
+		orchestrator.SetLazyMCPServers(lazy)
+	}
 
 	// mcpExtensions bundles every configured MCP server's static opt-ins
 	// (encryption-key/session-id injection now, file-URI download detection

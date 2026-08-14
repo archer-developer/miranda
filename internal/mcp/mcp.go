@@ -167,18 +167,60 @@ func (m *Manager) snapshot() ([]string, map[string]Client) {
 }
 
 // Tools lists every tool across all configured servers, with names prefixed
-// by their owning server so Call can route back to the right one. A server
-// whose ListTools call fails is logged and left out of this call's result
-// rather than failing the whole call — one bad MCP server must never take
-// every other tool source down with it. Only a failure wrapped with
-// ErrDisconnected (the session/transport itself is gone) evicts the server
-// from the Manager so the background reconnect loop picks it back up; a
-// plain application-level error leaves the client in place to retry next
-// turn, since tearing down a healthy session over one transient error would
-// cost up to a full reconnect cycle for no reason.
+// by their owning server so Call can route back to the right one. See
+// listTools for per-server failure handling.
 func (m *Manager) Tools(ctx context.Context) []llm.ToolDef {
 	order, clients := m.snapshot()
+	return m.listTools(ctx, order, clients)
+}
 
+// ToolsForServer returns just one server's own tools, prefixed exactly like
+// Tools does — the subset httpapi.Orchestrator's composeTools splices in
+// once that server's group has been loaded via load_tool_group (see
+// docs/adr/lazy-mcp-tool-loading.md). Unlike Tools, it doesn't aggregate
+// across every configured server, and unlike ToolsExcluding it names the one
+// server to include rather than every server to skip. Returns nil if name
+// has no currently connected client.
+func (m *Manager) ToolsForServer(ctx context.Context, name string) []llm.ToolDef {
+	_, clients := m.snapshot()
+	if _, ok := clients[name]; !ok {
+		return nil
+	}
+	return m.listTools(ctx, []string{name}, clients)
+}
+
+// ToolsExcluding lists tools from every connected server except those named
+// in skip, without ever calling ListTools on a skipped server — the
+// counterpart to ToolsForServer that composeTools uses to assemble a turn's
+// non-lazy (or already-loaded) tool set without paying for an RPC to a lazy
+// MCP server that hasn't been requested this turn (see
+// docs/adr/lazy-mcp-tool-loading.md).
+func (m *Manager) ToolsExcluding(ctx context.Context, skip map[string]bool) []llm.ToolDef {
+	order, clients := m.snapshot()
+	if len(skip) == 0 {
+		return m.listTools(ctx, order, clients)
+	}
+	filtered := make([]string, 0, len(order))
+	for _, name := range order {
+		if !skip[name] {
+			filtered = append(filtered, name)
+		}
+	}
+	return m.listTools(ctx, filtered, clients)
+}
+
+// listTools is Tools/ToolsForServer/ToolsExcluding's shared implementation:
+// list every tool across just the given order (a subset of clients' keys),
+// with names prefixed by their owning server. A server whose ListTools call
+// fails is logged and left out of this call's result rather than failing the
+// whole call — one bad MCP server must never take every other tool source
+// down with it. Only a failure wrapped with ErrDisconnected (the
+// session/transport itself is gone) evicts the server from the Manager so
+// the background reconnect loop picks it back up; a plain application-level
+// error leaves the client in place to retry next turn, since tearing down a
+// healthy session over one transient error would cost up to a full
+// reconnect cycle for no reason.
+func (m *Manager) listTools(ctx context.Context, order []string, clients map[string]Client) []llm.ToolDef {
 	var out []llm.ToolDef
 	for _, name := range order {
 		c, ok := clients[name]

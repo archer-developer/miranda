@@ -497,6 +497,21 @@ type MCPServer struct {
 	// own doc comment on the diary incident. Empty (the default) means this
 	// server receives no injection at all — see docs/medical-card-session-injection.md.
 	SessionIDTools []string `yaml:"session_id_tools,omitempty"`
+	// Lazy opts this server's tools out of every turn's default tool list.
+	// Instead of this server's own real tool schemas, httpapi.Orchestrator's
+	// availableTools shows the model a one-line entry inside the shared
+	// load_tool_group stub tool (built from Description below); the real
+	// schemas only appear once the model calls load_tool_group with this
+	// server's Name, for the rest of that turn's tool-call loop. Servers
+	// used on most turns (e.g. ha) should leave this false — the point is to
+	// hide tools that are relevant to a minority of requests, not to add a
+	// round-trip to the common case. See docs/adr/lazy-mcp-tool-loading.md.
+	Lazy bool `yaml:"lazy,omitempty"`
+	// Description is the one-line, model-facing summary of what this
+	// server's tools are for — shown inside load_tool_group's own parameter
+	// description when Lazy is true. Required when Lazy is true (checked at
+	// config-load time by validateLazyMCPServers); meaningless otherwise.
+	Description string `yaml:"description,omitempty"`
 }
 
 // defaultEncryptionKeyArgName is the tool-call argument name used for a
@@ -939,6 +954,23 @@ func (c *Config) FileExposingServers() (map[string]FileServerEndpoint, error) {
 	return out, nil
 }
 
+// LazyMCPServers returns every enabled MCP server marked Lazy, keyed by its
+// own unprefixed Name, to that server's config Description — the input
+// httpapi.Orchestrator.SetLazyMCPServers needs to hide that server's tools
+// behind the shared load_tool_group stub until the model explicitly
+// requests that domain (see docs/adr/lazy-mcp-tool-loading.md). A disabled
+// server is never included, mirroring FileExposingServers.
+func (c *Config) LazyMCPServers() map[string]string {
+	out := make(map[string]string)
+	for _, s := range c.MCP.Servers {
+		if !s.Enabled || !s.Lazy {
+			continue
+		}
+		out[s.Name] = s.Description
+	}
+	return out
+}
+
 // Load reads the YAML file at path and merges it over Default(). A missing
 // file is not an error: it just means the defaults are used as-is, so the
 // agent has a working config out of the box.
@@ -977,6 +1009,9 @@ func Load(paths ...string) (Config, error) {
 		return cfg, err
 	}
 	if err := validateSessionIDServers(cfg.MCP.Servers); err != nil {
+		return cfg, err
+	}
+	if err := validateLazyMCPServers(cfg.MCP.Servers); err != nil {
 		return cfg, err
 	}
 	return cfg, nil
@@ -1032,6 +1067,19 @@ func validateSessionIDServers(servers []MCPServer) error {
 	for _, s := range servers {
 		if s.SessionIDArgName != "" && len(s.SessionIDTools) == 0 {
 			return fmt.Errorf("config: mcp.servers %q has session_id_arg set but session_id_tools is empty", s.Name)
+		}
+	}
+	return nil
+}
+
+// validateLazyMCPServers rejects a server marked Lazy with an empty
+// Description — without one, load_tool_group's enum-parameter description
+// would list a domain with nothing explaining what it's for, and the model
+// has no way to decide whether it's worth loading. See MCPServer.Description.
+func validateLazyMCPServers(servers []MCPServer) error {
+	for _, s := range servers {
+		if s.Lazy && s.Description == "" {
+			return fmt.Errorf("config: mcp.servers %q has lazy=true but description is empty", s.Name)
 		}
 	}
 	return nil

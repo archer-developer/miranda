@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -35,6 +36,16 @@ const searchHistoryLimit = 8
 type turnControl struct {
 	endRequested    bool
 	forgetRequested bool
+	// loadedGroups accumulates which lazy MCP server names load_tool_group
+	// has expanded so far THIS turn — reset implicitly every turn since
+	// turnControl is constructed fresh in Handle. Never persisted to
+	// history/memory: re-collapsing to the compact stub on the next turn is
+	// intentional, not a bug — see docs/adr/lazy-mcp-tool-loading.md §3/§4.
+	loadedGroups map[string]bool
+	// groupsChanged is set by executeTool whenever loadedGroups grew this
+	// iteration, so runAgentLoop knows to recompute the tool list before the
+	// next call instead of doing it unconditionally every iteration.
+	groupsChanged bool
 	// downloadedFiles accumulates one entry per distinct remote file URI
 	// executeTool's file-URI detector finds in a file-exposing server's
 	// tool result this turn (see detectRemoteFileLinks) — Handle reads this
@@ -570,7 +581,17 @@ func (o *Orchestrator) userLocation(userID string) *time.Location {
 // rather than silently shadowing (or being shadowed by) a built-in of the
 // same name. Sending two ToolDefs with the same name to a provider isn't
 // just confusing — Anthropic specifically rejects the request outright.
-func (o *Orchestrator) availableTools(ctx context.Context) []llm.ToolDef {
+//
+// control gates which lazy MCP servers' (config.MCPServer.Lazy) real tool
+// schemas are included: a lazy server not yet named in control.loadedGroups
+// contributes nothing here except a one-line entry inside the shared
+// load_tool_group stub (see loadToolGroupStub); once the model calls
+// load_tool_group with that server's name, executeTool records it in
+// control.loadedGroups and runAgentLoop calls this again to splice in that
+// server's real tools for the rest of the turn. Called with a control whose
+// loadedGroups is empty/nil on a turn's first iteration (from Handle) — see
+// docs/adr/lazy-mcp-tool-loading.md.
+func (o *Orchestrator) availableTools(ctx context.Context, control *turnControl) []llm.ToolDef {
 	var tools []llm.ToolDef
 	names := make(map[string]bool)
 	add := func(t llm.ToolDef) {
@@ -747,17 +768,74 @@ func (o *Orchestrator) availableTools(ctx context.Context) []llm.ToolDef {
 		})
 	}
 
-	mcpTools := o.tools.Tools(ctx)
-	out := make([]llm.ToolDef, 0, len(mcpTools)+len(tools))
-	for _, t := range mcpTools {
+	addMCP := func(t llm.ToolDef) {
 		if names[t.Name] {
 			o.hub.Publish(hub.Event{Source: "error", Message: fmt.Sprintf(
 				"mcp tool %q collides with a built-in tool of the same name — dropping the mcp one", t.Name)})
-			continue
+			return
 		}
-		out = append(out, t)
+		tools = append(tools, t)
+		names[t.Name] = true
 	}
-	return append(out, tools...)
+
+	// pending collects every lazy server not yet loaded this turn — each
+	// contributes only a one-line entry inside the shared load_tool_group
+	// stub below, not its own real tool schemas, until the model asks for
+	// it. A server absent from o.lazyServerDescriptions (the common case:
+	// lazy loading unconfigured, or this particular server isn't lazy) is
+	// unaffected and always included via ToolsExcluding.
+	//
+	// Every lazy server's name goes into skip regardless of loaded state —
+	// a loaded one is added explicitly via ToolsForServer just below, so it
+	// must NOT also come back through ToolsExcluding's own listing, or it
+	// would be fetched (and ListTools-RPC'd) twice, with the second
+	// occurrence of each tool tripping addMCP's same-name collision guard
+	// and logging a spurious "collides with a built-in tool" error.
+	var pending []string
+	skip := make(map[string]bool, len(o.lazyServerDescriptions))
+	for name := range o.lazyServerDescriptions {
+		skip[name] = true
+		if control.loadedGroups[name] {
+			for _, t := range o.tools.ToolsForServer(ctx, name) {
+				addMCP(t)
+			}
+		} else {
+			pending = append(pending, name)
+		}
+	}
+	for _, t := range o.tools.ToolsExcluding(ctx, skip) {
+		addMCP(t)
+	}
+	if len(pending) > 0 {
+		addMCP(o.loadToolGroupStub(pending))
+	}
+
+	return tools
+}
+
+// loadToolGroupStub builds the single load_tool_group ToolDef standing in
+// for every not-yet-loaded lazy MCP server in pending — one line per domain,
+// drawn from that server's config Description, so the model can decide
+// which (if any) is worth loading before it ever sees that domain's real
+// tool schemas. See docs/adr/lazy-mcp-tool-loading.md §2.6.
+func (o *Orchestrator) loadToolGroupStub(pending []string) llm.ToolDef {
+	sort.Strings(pending) // deterministic order across calls — stable prompt for identical state
+	var desc strings.Builder
+	desc.WriteString("Load the real tools for one of these domains before calling anything in it — you currently only see this one-line summary, not their actual tool schemas:\n")
+	for _, name := range pending {
+		fmt.Fprintf(&desc, "- %s: %s\n", name, o.lazyServerDescriptions[name])
+	}
+	return llm.ToolDef{
+		Name:        loadToolGroupToolName,
+		Description: desc.String(),
+		Parameters: map[string]any{
+			"type": "object",
+			"properties": map[string]any{
+				"group": map[string]any{"type": "string", "enum": pending},
+			},
+			"required": []string{"group"},
+		},
+	}
 }
 
 // runAgentLoop drives the model until it produces a final text-only reply:
@@ -798,6 +876,17 @@ func (o *Orchestrator) runAgentLoop(ctx context.Context, userID, conversationID,
 			result := o.executeTool(ctx, userID, conversationID, tc, control)
 			o.recordToolCall(ctx, userID, conversationID, tc, result)
 			messages = append(messages, llm.Message{Role: llm.RoleTool, ToolCallID: tc.ID, Content: result})
+		}
+
+		// A load_tool_group call this iteration means the next call's tool
+		// list must grow to include that server's real schemas — see
+		// availableTools' control param and docs/adr/lazy-mcp-tool-loading.md.
+		// Skipped when nothing changed so an ordinary iteration doesn't pay
+		// for rebuilding the list (which, unlike the built-ins half, may hit
+		// every connected MCP server) on every single turn.
+		if control.groupsChanged {
+			tools = o.availableTools(ctx, control)
+			control.groupsChanged = false
 		}
 	}
 
@@ -945,6 +1034,24 @@ func (o *Orchestrator) executeTool(ctx context.Context, userID, conversationID s
 			fmt.Fprintf(&b, "[%s] %s\n", c.StartedAt.Format("2006-01-02"), c.Summary)
 		}
 		return b.String()
+	}
+
+	if tc.Name == loadToolGroupToolName {
+		var args struct {
+			Group string `json:"group"`
+		}
+		if err := json.Unmarshal([]byte(tc.Arguments), &args); err != nil {
+			return fmt.Sprintf("error: invalid arguments: %v", err)
+		}
+		if _, ok := o.lazyServerDescriptions[args.Group]; !ok {
+			return fmt.Sprintf("error: unknown tool group %q", args.Group)
+		}
+		if control.loadedGroups == nil {
+			control.loadedGroups = map[string]bool{}
+		}
+		control.loadedGroups[args.Group] = true
+		control.groupsChanged = true
+		return fmt.Sprintf("tools for %q are now available — call the specific tool you need now", args.Group)
 	}
 
 	if tc.Name == endConversationToolName {

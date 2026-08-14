@@ -295,3 +295,52 @@ func TestConfig_FileExposingServers_FailsFastOnMalformedURL(t *testing.T) {
 	_, err := cfg.FileExposingServers()
 	require.Error(t, err)
 }
+
+func TestLoad_LazyWithoutDescriptionReturnsError(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	yamlContent := `
+mcp:
+  servers:
+    - name: diary
+      url: "http://127.0.0.1:8789/mcp"
+      enabled: true
+      lazy: true
+`
+	require.NoError(t, os.WriteFile(path, []byte(yamlContent), 0o644))
+
+	_, err := Load(path)
+	require.Error(t, err)
+}
+
+func TestLoad_LazyWithDescriptionIsFine(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	yamlContent := `
+mcp:
+  servers:
+    - name: diary
+      url: "http://127.0.0.1:8789/mcp"
+      enabled: true
+      lazy: true
+      description: "Personal diary: notes, thoughts, events."
+`
+	require.NoError(t, os.WriteFile(path, []byte(yamlContent), 0o644))
+
+	cfg, err := Load(path)
+	require.NoError(t, err)
+	require.True(t, cfg.MCP.Servers[0].Lazy)
+	require.Equal(t, "Personal diary: notes, thoughts, events.", cfg.MCP.Servers[0].Description)
+}
+
+func TestConfig_LazyMCPServers_OnlyIncludesOptedInEnabledServers(t *testing.T) {
+	cfg := Config{MCP: MCPConfig{Servers: []MCPServer{
+		{Name: "diary", URL: "http://127.0.0.1:8789/mcp", Enabled: true, Lazy: true, Description: "Personal diary."},
+		{Name: "ha", URL: "http://192.168.1.50:8123/api/mcp", Enabled: true, Lazy: false},
+		{Name: "disabled_but_lazy", URL: "http://127.0.0.1:9000/mcp", Enabled: false, Lazy: true, Description: "n/a"},
+	}}}
+
+	lazy := cfg.LazyMCPServers()
+	require.Len(t, lazy, 1)
+	require.Equal(t, "Personal diary.", lazy["diary"])
+	require.NotContains(t, lazy, "ha")
+	require.NotContains(t, lazy, "disabled_but_lazy")
+}

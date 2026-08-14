@@ -265,7 +265,7 @@ func TestOrchestrator_MCPToolCollidingWithWebToolNameIsDroppedNotShadowed(t *tes
 	o, _, _ := newTestOrchestrator(t, provider, collidingMCP)
 	o.SetWebTools([]tools.Tool{&fakeWebTool{name: "web_search"}})
 
-	defs := o.availableTools(context.Background())
+	defs := o.availableTools(context.Background(), &turnControl{})
 
 	var names []string
 	for _, d := range defs {
@@ -282,6 +282,144 @@ func TestOrchestrator_MCPToolCollidingWithWebToolNameIsDroppedNotShadowed(t *tes
 		}
 	}
 	require.Equal(t, 1, count)
+}
+
+// toolDefNames extracts each ToolDef's Name, in order, for asserting on
+// what a given provider request actually saw — used by the
+// lazy-MCP-tool-loading tests below.
+func toolDefNames(defs []llm.ToolDef) []string {
+	names := make([]string, len(defs))
+	for i, d := range defs {
+		names[i] = d.Name
+	}
+	return names
+}
+
+// TestOrchestrator_LazyMCPServerToolsHiddenBehindStub covers
+// docs/adr/lazy-mcp-tool-loading.md §2.6: a server marked Lazy (here via
+// SetLazyMCPServers, mirroring what config.Config.LazyMCPServers/cmd/miranda
+// wires in) contributes only a one-line entry inside the shared
+// load_tool_group stub, not its own real tool schemas, on a turn where the
+// model hasn't asked for it yet.
+func TestOrchestrator_LazyMCPServerToolsHiddenBehindStub(t *testing.T) {
+	diary := mcptest.New("diary", llm.ToolDef{Name: "add_entry"})
+	provider := llmtest.New("local", llmtest.Response{Text: "ok"})
+	o, _, _ := newTestOrchestrator(t, provider, diary)
+	o.SetLazyMCPServers(map[string]string{"diary": "Personal diary: notes, thoughts, events."})
+
+	names := toolDefNames(o.availableTools(context.Background(), &turnControl{}))
+
+	require.Contains(t, names, loadToolGroupToolName)
+	require.NotContains(t, names, "diary_add_entry")
+}
+
+// TestOrchestrator_LoadedLazyGroupIsNotFetchedTwice guards a regression: an
+// earlier version of availableTools only added a lazy server's name to the
+// ToolsExcluding skip set while it was still *pending*, so once
+// load_tool_group loaded it, ToolsForServer fetched its tools explicitly
+// AND ToolsExcluding (no longer told to skip it) fetched them again —
+// harmless to the final list (addMCP dedups by name) but the second,
+// spurious copy tripped addMCP's same-name collision guard, which is meant
+// to catch a genuine MCP/built-in name clash, and logged a false "collides
+// with a built-in tool" hub error on every recompute after a group loaded.
+func TestOrchestrator_LoadedLazyGroupIsNotFetchedTwice(t *testing.T) {
+	diary := mcptest.New("diary", llm.ToolDef{Name: "add_entry"})
+	provider := llmtest.New("local", llmtest.Response{Text: "ok"})
+	o, _, _ := newTestOrchestrator(t, provider, diary)
+	o.SetLazyMCPServers(map[string]string{"diary": "Personal diary: notes, thoughts, events."})
+
+	h := hub.New(100)
+	o.hub = h
+	_, replay, unsubscribe := h.Subscribe(nil)
+	defer unsubscribe()
+
+	defs := o.availableTools(context.Background(), &turnControl{loadedGroups: map[string]bool{"diary": true}})
+
+	count := 0
+	for _, d := range defs {
+		if d.Name == "diary_add_entry" {
+			count++
+		}
+	}
+	require.Equal(t, 1, count, "a loaded lazy server's tool must appear exactly once")
+
+	for _, ev := range replay {
+		require.NotContains(t, ev.Message, "collides", "loading a lazy group must never trip the built-in/MCP name-collision guard")
+	}
+}
+
+// TestOrchestrator_LoadToolGroupExpandsRealToolsForRestOfTurn is the
+// end-to-end flow from docs/adr/lazy-mcp-tool-loading.md §5.2: the model
+// calls load_tool_group("diary") first, sees diary's real tool on the very
+// next iteration (and the stub itself disappears, since every lazy domain
+// is now loaded), calls the real tool, and gets a normal final reply.
+func TestOrchestrator_LoadToolGroupExpandsRealToolsForRestOfTurn(t *testing.T) {
+	diary := mcptest.New("diary", llm.ToolDef{Name: "add_entry"}).WithResult("add_entry", "saved")
+	provider := llmtest.New("local",
+		llmtest.Response{ToolCall: &llm.ToolCall{ID: "call-1", Name: loadToolGroupToolName, Arguments: `{"group":"diary"}`}},
+		llmtest.Response{ToolCall: &llm.ToolCall{ID: "call-2", Name: "diary_add_entry", Arguments: `{"text":"hello"}`}},
+		llmtest.Response{Text: "Записал в дневник."},
+	)
+	o, _, _ := newTestOrchestrator(t, provider, diary)
+	o.SetLazyMCPServers(map[string]string{"diary": "Personal diary: notes, thoughts, events."})
+
+	resp, err := o.Handle(context.Background(), InputRequest{Source: "cli", UserID: "alex", Text: "запиши в дневник"})
+	require.NoError(t, err)
+	require.Equal(t, "Записал в дневник.", resp.Reply)
+	require.Len(t, diary.Calls, 1)
+
+	require.Len(t, provider.Requests, 3)
+	firstNames := toolDefNames(provider.Requests[0].Tools)
+	require.Contains(t, firstNames, loadToolGroupToolName)
+	require.NotContains(t, firstNames, "diary_add_entry")
+
+	secondNames := toolDefNames(provider.Requests[1].Tools)
+	require.Contains(t, secondNames, "diary_add_entry")
+	require.NotContains(t, secondNames, loadToolGroupToolName,
+		"the stub must disappear once every lazy domain has been loaded this turn")
+}
+
+// TestOrchestrator_LoadToolGroupUnknownGroupReturnsError guards against the
+// model hallucinating a domain name that isn't actually configured as lazy
+// — executeTool must hand back an error result the model can react to
+// (retry, apologize) instead of the turn silently misbehaving.
+func TestOrchestrator_LoadToolGroupUnknownGroupReturnsError(t *testing.T) {
+	provider := llmtest.New("local",
+		llmtest.Response{ToolCall: &llm.ToolCall{ID: "call-1", Name: loadToolGroupToolName, Arguments: `{"group":"nonexistent"}`}},
+		llmtest.Response{Text: "ok"},
+	)
+	o, _, _ := newTestOrchestrator(t, provider)
+	o.SetLazyMCPServers(map[string]string{"diary": "Personal diary: notes, thoughts, events."})
+
+	resp, err := o.Handle(context.Background(), InputRequest{Source: "cli", UserID: "alex", Text: "hi"})
+	require.NoError(t, err)
+	require.Equal(t, "ok", resp.Reply)
+
+	require.Len(t, provider.Requests, 2)
+	last := provider.Requests[1].Messages
+	require.Equal(t, llm.RoleTool, last[len(last)-1].Role)
+	require.Contains(t, last[len(last)-1].Content, "unknown tool group")
+}
+
+// TestOrchestrator_DirectCallToUnloadedLazyToolStillSucceeds guards
+// docs/adr/lazy-mcp-tool-loading.md §3: a model that calls a real, existing
+// tool by name without going through load_tool_group first (e.g. remembered
+// from earlier in a long conversation) must still have that call served —
+// mcp.Manager.Call routes by name, not by whether the name was in the list
+// most recently shown to the model.
+func TestOrchestrator_DirectCallToUnloadedLazyToolStillSucceeds(t *testing.T) {
+	diary := mcptest.New("diary", llm.ToolDef{Name: "add_entry"}).WithResult("add_entry", "saved")
+	provider := llmtest.New("local",
+		llmtest.Response{ToolCall: &llm.ToolCall{ID: "call-1", Name: "diary_add_entry", Arguments: `{"text":"hello"}`}},
+		llmtest.Response{Text: "done"},
+	)
+	o, _, _ := newTestOrchestrator(t, provider, diary)
+	o.SetLazyMCPServers(map[string]string{"diary": "Personal diary: notes, thoughts, events."})
+
+	resp, err := o.Handle(context.Background(), InputRequest{Source: "cli", UserID: "alex", Text: "hi"})
+	require.NoError(t, err)
+	require.Equal(t, "done", resp.Reply)
+	require.Len(t, diary.Calls, 1)
 }
 
 func TestOrchestrator_EscalationIsTransparentToOrchestrator(t *testing.T) {

@@ -256,6 +256,72 @@ func TestManager_CheckHealthDoesNotEvictOnBareTimeout(t *testing.T) {
 	require.False(t, slow.IsClosed())
 }
 
+// TestManager_ToolsForServer covers the input composeTools uses to splice a
+// lazy MCP server's real tools back in once the model has called
+// load_tool_group for it — see docs/adr/lazy-mcp-tool-loading.md.
+func TestManager_ToolsForServer(t *testing.T) {
+	ha := mcptest.New("ha", llm.ToolDef{Name: "get_state"})
+	diary := mcptest.New("diary", llm.ToolDef{Name: "add_entry"})
+	m := NewManager(nil, ha, diary)
+
+	tools := m.ToolsForServer(context.Background(), "diary")
+
+	names := make([]string, len(tools))
+	for i, tool := range tools {
+		names[i] = tool.Name
+	}
+	require.Equal(t, []string{"diary_add_entry"}, names)
+}
+
+func TestManager_ToolsForServerUnknownServerReturnsNil(t *testing.T) {
+	m := NewManager(nil, mcptest.New("ha", llm.ToolDef{Name: "get_state"}))
+	require.Nil(t, m.ToolsForServer(context.Background(), "nonexistent"))
+}
+
+// TestManager_ToolsExcludingSkipsGivenServers covers composeTools' other
+// half: every non-lazy (or not-yet-loaded) server's tools, minus whichever
+// names are still pending behind the load_tool_group stub.
+func TestManager_ToolsExcludingSkipsGivenServers(t *testing.T) {
+	ha := mcptest.New("ha", llm.ToolDef{Name: "get_state"})
+	diary := mcptest.New("diary", llm.ToolDef{Name: "add_entry"})
+	m := NewManager(nil, ha, diary)
+
+	tools := m.ToolsExcluding(context.Background(), map[string]bool{"diary": true})
+
+	names := make([]string, len(tools))
+	for i, tool := range tools {
+		names[i] = tool.Name
+	}
+	require.Equal(t, []string{"ha_get_state"}, names)
+}
+
+// TestManager_ToolsExcludingNeverCallsListToolsOnSkippedServer guards the
+// point of ToolsExcluding existing at all rather than just filtering
+// Tools()'s own output: a lazy server the model hasn't asked to load yet
+// must not cost a ListTools RPC on every single turn. diary is rigged to
+// block forever on ListTools; if ToolsExcluding ever called it despite the
+// skip, this test would run until its own context timeout instead of
+// returning immediately.
+func TestManager_ToolsExcludingNeverCallsListToolsOnSkippedServer(t *testing.T) {
+	ha := mcptest.New("ha", llm.ToolDef{Name: "get_state"})
+	block := make(chan struct{}) // deliberately never closed
+	diary := mcptest.New("diary", llm.ToolDef{Name: "add_entry"}).WithListToolsBlockingOn(block)
+	m := NewManager(nil, ha, diary)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+
+	start := time.Now()
+	tools := m.ToolsExcluding(ctx, map[string]bool{"diary": true})
+	require.Less(t, time.Since(start), 100*time.Millisecond, "must not wait on a skipped server's ListTools call")
+
+	names := make([]string, len(tools))
+	for i, tool := range tools {
+		names[i] = tool.Name
+	}
+	require.Equal(t, []string{"ha_get_state"}, names)
+}
+
 func TestManager_ServerForTool(t *testing.T) {
 	m := NewManager(nil, mcptest.New("ha", llm.ToolDef{Name: "get_state"}), mcptest.New("diary", llm.ToolDef{Name: "add_entry"}))
 

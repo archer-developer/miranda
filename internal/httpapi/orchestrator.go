@@ -48,6 +48,11 @@ const listScheduledTasksToolName = "list_scheduled_tasks"
 
 const deleteScheduledTaskToolName = "delete_scheduled_task"
 
+// loadToolGroupToolName is the shared stub tool that stands in for every
+// not-yet-loaded lazy MCP server's real tools — see
+// docs/adr/lazy-mcp-tool-loading.md.
+const loadToolGroupToolName = "load_tool_group"
+
 // ReservedToolNames returns every name Miranda's own agent loop can
 // advertise as a tool: every hardcoded built-in above, plus internal/tools'
 // fixed tavily_web_search/tavily_web_fetch names — regardless of whether
@@ -71,6 +76,7 @@ func ReservedToolNames() []string {
 		createScheduledTaskToolName,
 		listScheduledTasksToolName,
 		deleteScheduledTaskToolName,
+		loadToolGroupToolName,
 		tools.WebSearchToolName,
 		tools.WebFetchToolName,
 	}
@@ -240,6 +246,15 @@ type Orchestrator struct {
 	// see conversationMemory/clearConversationMemory
 	// (docs/adr/system-prompt-caching.md).
 	memoryCache map[string]cachedMemory
+	// lazyServerDescriptions is set via SetLazyMCPServers: every MCP server
+	// (config.MCPServer.Lazy) whose own real tool schemas are hidden behind
+	// the shared load_tool_group stub until the model calls it for that
+	// server's Name, keyed by that unprefixed Name to its one-line
+	// model-facing Description. nil/empty (the default) means every
+	// configured MCP server's tools are included directly on every turn,
+	// exactly as before this feature existed. See
+	// docs/adr/lazy-mcp-tool-loading.md.
+	lazyServerDescriptions map[string]string
 }
 
 // SetTelegram wires the optional send_telegram tool in, mirroring
@@ -298,6 +313,18 @@ func (o *Orchestrator) SetAttachmentStore(s *attachments.Store) {
 // server — see docs/encryption.md.
 func (o *Orchestrator) SetKeyring(k *keyring.Service) {
 	o.keyring = k
+}
+
+// SetLazyMCPServers wires in the config-derived one-line descriptions for
+// MCP servers whose real tool schemas should only reach the model on demand
+// (see config.MCPServer.Lazy/Description and config.Config.LazyMCPServers),
+// keyed by each such server's own unprefixed Name — mirrors SetSchedule's
+// post-construction style for an optional dependency. Leaving it uncalled
+// (the default, a nil map) makes availableTools/composeTools behave exactly
+// like before this feature existed: every enabled MCP server's tools
+// included on every turn, with no load_tool_group stub ever offered.
+func (o *Orchestrator) SetLazyMCPServers(descriptions map[string]string) {
+	o.lazyServerDescriptions = descriptions
 }
 
 // MCPServerExtension bundles the config-driven, per-MCP-server behaviors
@@ -450,9 +477,8 @@ func (o *Orchestrator) Handle(ctx context.Context, req InputRequest) (InputRespo
 	}, priorMessages...)
 	messages = append(messages, llm.Message{Role: llm.RoleUser, Content: userContent, Parts: imageParts})
 
-	tools := o.availableTools(ctx)
-
 	control := &turnControl{}
+	tools := o.availableTools(ctx, control)
 	finalText, providerUsed, err := o.runAgentLoop(ctx, userID, convID, req.Source, messages, tools, control)
 	if err != nil {
 		// An earlier tool-call iteration in this same loop may have already

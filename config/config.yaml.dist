@@ -168,6 +168,14 @@ mcp:
       # suffix) — covers the sandbox's download_file tool, no
       # server-specific wiring needed elsewhere in this config.
       expose_files: true
+      # lazy hides this server's real tool schemas from every turn's default
+      # list, replacing them with one line inside the shared
+      # load_tool_group stub tool — the model calls it to unlock this
+      # server's real tools only for turns that actually need them (see
+      # docs/adr/lazy-mcp-tool-loading.md). description is then required —
+      # it's what the model reads to decide whether to load this domain.
+      lazy: true
+      description: "Code execution sandbox (bash/python): calculations, file processing, PDF generation."
     # Example: a diary MCP server (github.com/archer-developer/miranda-diary)
     # that supports per-user encryption — encryption_key_allowed lets
     # executeTool inject the calling user's unwrapped master key (see
@@ -183,6 +191,8 @@ mcp:
     #   token_env: "DIARY_MCP_TOKEN"
     #   enabled: true
     #   encryption_key_allowed: true
+    #   lazy: true
+    #   description: "Personal diary: notes, thoughts, events — semantic search."
     # Example: a medical-records MCP server
     # (github.com/archer-developer/miranda-medical-card) whose medical.ask
     # tool supports an optional sessionId parameter so follow-up questions
@@ -202,6 +212,8 @@ mcp:
     #   enabled: true
     #   expose_files: true
     #   session_id_tools: ["medical.ask"]
+    #   lazy: true
+    #   description: "Medical records: lab results, diagnoses, medications, documents, health event timeline."
 
 # Optional file upload support for the web UI — lets users attach files before
 # sending a message. Miranda stages an uploaded file's bytes locally
