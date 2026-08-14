@@ -403,14 +403,14 @@ func run(cfg config.Config, logger *slog.Logger, eventHub *hub.Hub) error {
 	return serveUntilInterrupted(ctx, httpServer, logger)
 }
 
-// sweepIdleSessions periodically distills conversations that have sat idle
-// past cfg.SessionIdleTimeoutMinutes into their user's memory file and marks
-// them ended (see Orchestrator.SummarizeIdleSessions). It's a no-op ticker
-// when cfg.AutoSummarize is off, and exits once ctx is cancelled at shutdown.
+// sweepIdleSessions periodically marks conversations that have sat idle past
+// cfg.SessionIdleTimeoutMinutes as ended, distilling each into its user's
+// memory file first when cfg.AutoSummarize allows it (see
+// Orchestrator.SummarizeIdleSessions/summarizeConversation — that flag
+// controls only whether the LLM-based recap/memory step runs, never whether
+// the session actually closes on schedule). Exits once ctx is cancelled at
+// shutdown.
 func sweepIdleSessions(ctx context.Context, o *httpapi.Orchestrator, cfg config.MemoryConfig, logger *slog.Logger) {
-	if !cfg.AutoSummarize {
-		return
-	}
 	idleFor := time.Duration(cfg.SessionIdleTimeoutMinutes) * time.Minute
 
 	ticker := time.NewTicker(idleSweepInterval)

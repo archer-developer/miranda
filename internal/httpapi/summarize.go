@@ -63,12 +63,13 @@ already present in the existing Shared notes above.
 
 Reply with only these three sections — no extra commentary.`
 
-// SummarizeIdleSessions finds conversations that have sat idle past idleFor,
-// distills each into the user's memory (internal/memory), and marks them
-// ended so the sweeper doesn't revisit them. It's meant to be called
-// periodically by a background ticker (see cmd/miranda), not from the
-// request path — a conversation "ending" isn't a signal Home Assistant or
-// the web UI ever sends explicitly.
+// SummarizeIdleSessions finds conversations that have sat idle past idleFor
+// and marks them ended, distilling each into the user's memory
+// (internal/memory) first when memoryCfg.AutoSummarize allows it and the
+// distillation call itself succeeds (see summarizeConversation) — it's meant
+// to be called periodically by a background ticker (see cmd/miranda), not
+// from the request path, since a conversation "ending" isn't a signal Home
+// Assistant or the web UI ever sends explicitly.
 func (o *Orchestrator) SummarizeIdleSessions(ctx context.Context, idleFor time.Duration) error {
 	idle, err := o.history.IdleConversations(ctx, idleFor)
 	if err != nil {
@@ -77,8 +78,11 @@ func (o *Orchestrator) SummarizeIdleSessions(ctx context.Context, idleFor time.D
 
 	for _, conv := range idle {
 		if err := o.summarizeConversation(ctx, conv.ID, conv.UserID); err != nil {
-			// One bad conversation shouldn't block the rest of the sweep; it's
-			// left un-ended so the next sweep retries it.
+			// Only a genuine storage/IO failure reaches here — see
+			// summarizeConversation's own doc comment for why a failed LLM
+			// distillation never does. One bad conversation shouldn't block
+			// the rest of the sweep; it's left un-ended so the next sweep
+			// retries it.
 			o.hub.Publish(hub.Event{Source: "error", Message: fmt.Sprintf("summarize conversation %s: %v", conv.ID, err)})
 			continue
 		}
@@ -86,11 +90,21 @@ func (o *Orchestrator) SummarizeIdleSessions(ctx context.Context, idleFor time.D
 	return nil
 }
 
-// summarizeConversation distills convID (belonging to userID) into a short
-// recap (stored on the conversation itself) and, if anything durable came up,
-// an updated Preferences memory section — then marks the conversation ended.
-// Shared by the idle sweep and the explicit end_conversation tool, so both
-// paths close a session the same way.
+// summarizeConversation always closes convID (belonging to userID) —
+// idle-timeout closure must never depend on summarization succeeding, or
+// even being attempted. When o.memoryCfg.AutoSummarize is true and the
+// conversation has messages, it first tries to distill a short recap (stored
+// on the conversation itself) and, if anything durable came up, an updated
+// Preferences/Shared memory section. A failed distillation call (LLM error,
+// rate limit, exhausted escalation chain, ...) is logged and skipped, not
+// propagated as an error: the conversation still ends on this same pass,
+// without a recap, rather than being left open for the sweep to retry
+// forever — a persistently broken summarization provider must never keep a
+// session pinned open, since that would silently stop conversation_id from
+// ever rotating past its idle timeout. Only a genuine storage/IO failure
+// (reading/writing history or memory) is returned as an error, so the sweep
+// can legitimately retry those. Shared by the idle sweep and the explicit
+// end_conversation tool, so both paths close a session the same way.
 func (o *Orchestrator) summarizeConversation(ctx context.Context, convID, userID string) error {
 	ctx = llmtrace.WithConversationID(ctx, convID)
 
@@ -98,32 +112,56 @@ func (o *Orchestrator) summarizeConversation(ctx context.Context, convID, userID
 	if err != nil {
 		return fmt.Errorf("load messages: %w", err)
 	}
-	if len(messages) == 0 {
-		if err := o.history.EndConversation(ctx, convID); err != nil {
+
+	if len(messages) > 0 && o.memoryCfg.AutoSummarize {
+		summary, ok, err := o.tryDistillConversation(ctx, convID, userID, messages)
+		if err != nil {
 			return err
 		}
-		o.clearConversationMemory(convID)
-		o.publishConversationEnded(userID, convID)
-		return nil
+		if ok {
+			if err := o.history.EndConversationWithSummary(ctx, convID, summary); err != nil {
+				return err
+			}
+			o.clearConversationMemory(convID)
+			o.publishConversationEnded(userID, convID)
+			return nil
+		}
 	}
 
+	if err := o.history.EndConversation(ctx, convID); err != nil {
+		return err
+	}
+	o.clearConversationMemory(convID)
+	o.publishConversationEnded(userID, convID)
+	return nil
+}
+
+// tryDistillConversation attempts the LLM-based recap/memory-distillation
+// step for summarizeConversation. ok is false (with a nil error) when the
+// distillation call itself fails — logged to the hub here so the caller can
+// fall back to closing the conversation without a recap instead of treating
+// this as a retryable failure (see summarizeConversation's doc comment). A
+// non-nil error means a genuine storage/IO failure reading existing memory,
+// which the caller should propagate so the sweep retries this conversation.
+func (o *Orchestrator) tryDistillConversation(ctx context.Context, convID, userID string, messages []history.Message) (summary string, ok bool, err error) {
 	existing, err := o.memory.Read(userID)
 	if err != nil {
-		return fmt.Errorf("read memory: %w", err)
+		return "", false, fmt.Errorf("read memory: %w", err)
 	}
 	existingShared, err := o.memory.ReadShared()
 	if err != nil {
-		return fmt.Errorf("read shared memory: %w", err)
+		return "", false, fmt.Errorf("read shared memory: %w", err)
 	}
 
 	summary, preferences, sharedFacts, err := o.distillConversation(ctx, existing, existingShared, messages)
 	if err != nil {
-		return fmt.Errorf("distill: %w", err)
+		o.hub.Publish(hub.Event{Source: "error", Message: fmt.Sprintf("summarize conversation %s: distill: %v", convID, err)})
+		return "", false, nil
 	}
 
 	if strings.TrimSpace(preferences) != "" {
 		if err := o.memory.ReplaceSection(userID, preferencesSection, preferences); err != nil {
-			return fmt.Errorf("write memory: %w", err)
+			return "", false, fmt.Errorf("write memory: %w", err)
 		}
 	}
 
@@ -136,16 +174,11 @@ func (o *Orchestrator) summarizeConversation(ctx context.Context, convID, userID
 	// contributed.
 	for _, fact := range bulletLines(sharedFacts) {
 		if err := o.memory.RememberShared(fact); err != nil {
-			return fmt.Errorf("write shared memory: %w", err)
+			return "", false, fmt.Errorf("write shared memory: %w", err)
 		}
 	}
 
-	if err := o.history.EndConversationWithSummary(ctx, convID, summary); err != nil {
-		return err
-	}
-	o.clearConversationMemory(convID)
-	o.publishConversationEnded(userID, convID)
-	return nil
+	return summary, true, nil
 }
 
 // publishConversationEnded notifies the user's open GET /ws/chat/{username}

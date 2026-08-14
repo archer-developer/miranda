@@ -405,15 +405,24 @@ type LLMConfig struct {
 // MemoryConfig controls how per-user markdown memory gets updated and how
 // conversation sessions begin and end.
 type MemoryConfig struct {
+	// AutoSummarize controls only whether the idle sweep (see
+	// SessionIdleTimeoutMinutes) attempts an LLM-based recap/memory
+	// distillation (Orchestrator.summarizeConversation) when it closes a
+	// session — it never gates whether a session actually closes. A
+	// distillation call that fails (LLM error) is logged and skipped, not
+	// retried on the next sweep tick: the conversation still ends on this
+	// same pass, just without a recap/memory update, so a broken or
+	// rate-limited summarization provider can never keep a session pinned
+	// open indefinitely.
 	AutoSummarize bool `yaml:"auto_summarize"`
 	ExplicitTool  bool `yaml:"explicit_tool"`
 	// SessionIdleTimeoutMinutes is how long a conversation must sit with no
 	// new messages before the background sweeper (cmd/miranda) treats it as
-	// over, distills it into memory, and marks it ended. Only consulted when
-	// AutoSummarize is true. The server — not any conversation_id a caller
-	// echoes back — is what decides session continuity (see
-	// history.Store.OpenConversation), so this timeout is what actually
-	// governs when a session boundary happens.
+	// over and marks it ended — always consulted, regardless of
+	// AutoSummarize (see that field's doc comment). The server — not any
+	// conversation_id a caller echoes back — is what decides session
+	// continuity (see history.Store.OpenConversation), so this timeout is
+	// what actually governs when a session boundary happens.
 	SessionIdleTimeoutMinutes int `yaml:"session_idle_timeout_minutes"`
 	// SearchHistoryTool exposes a search_history tool the model can call when
 	// the user references an earlier conversation ("помнишь мы говорили о

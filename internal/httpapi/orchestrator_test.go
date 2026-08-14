@@ -179,7 +179,7 @@ func newTestOrchestrator(t *testing.T, provider *llmtest.FakeProvider, mcpClient
 		r, toolManager, h, mem, nil, hub.New(100), nil,
 		config.AgentConfig{},
 		config.MemoryConfig{
-			ExplicitTool: true, AutoSummarize: false, SearchHistoryTool: true,
+			ExplicitTool: true, AutoSummarize: true, SearchHistoryTool: true,
 			EndConversationTool: true, ForgetConversationTool: true,
 		},
 		config.TTSConfig{},
