@@ -7,6 +7,7 @@
 // installing the 401/403-redirect wrapper before any of them run is what
 // makes it apply everywhere without touching each call site.
 import "./auth-fetch.js";
+import "./pwa.js";
 import * as ws from "./ws.js";
 import * as chatWs from "./chat-ws.js";
 import * as router from "./router.js";

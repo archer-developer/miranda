@@ -192,6 +192,11 @@ func New(h History, mem Memory, webauthnSvc WebAuthnService, keyringSvc KeyringS
 	mux.HandleFunc("POST /logout", handler.handleLogout)
 	mux.HandleFunc("GET /set-lang", handler.handleSetLanguage)
 	mux.Handle("GET /static/", http.FileServerFS(staticFS)) // public: needed to render the login page itself
+	// Serve the service worker at /sw.js (root scope) rather than its actual
+	// location under /static/. A SW's default scope equals its path prefix, so
+	// serving from /static/ would restrict it to /static/ — not the whole app.
+	// no-cache so browsers re-fetch it on every page load and pick up deploys.
+	mux.HandleFunc("GET /sw.js", handler.handleServiceWorker)
 	// Registered as a more specific pattern than "/static/" above (same
 	// precedence rule the avatarsDir block below relies on), so this wins
 	// for exactly this one path — templates/manifest.webmanifest is
@@ -279,6 +284,21 @@ func cacheForever(next http.Handler) http.Handler {
 		w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
 		next.ServeHTTP(w, r)
 	})
+}
+
+// handleServiceWorker serves static/js/sw.js at the root-scope /sw.js path
+// with no-cache headers. The service worker file itself is minimal (fetch
+// passthrough) — its purpose is solely to satisfy the browser's PWA
+// installability check, not to provide offline support.
+func (h *Handler) handleServiceWorker(w http.ResponseWriter, r *http.Request) {
+	data, err := staticFS.ReadFile("static/js/sw.js")
+	if err != nil {
+		http.Error(w, "not found", http.StatusNotFound)
+		return
+	}
+	w.Header().Set("Content-Type", "application/javascript")
+	w.Header().Set("Cache-Control", "no-cache")
+	_, _ = w.Write(data)
 }
 
 // handleManifest renders the PWA manifest with the current build's

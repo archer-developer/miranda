@@ -75,5 +75,9 @@
   "login_or_divider": "або",
   "login_biometric_button": "Увайсці па біяметрыі",
   "login_biometric_error": "Не атрымалася ўвайсці па біяметрыі. Паспрабуйце пароль.",
-  "login_use_password": "Увайсці з логінам і паролем"
+  "login_use_password": "Увайсці з логінам і паролем",
+  "rotate_to_portrait": "Павярніце тэлефон",
+  "pwa_install_banner": "Дадайце Miranda на экран",
+  "pwa_install_button": "Усталяваць",
+  "pwa_install_dismiss": "Закрыць"
 }

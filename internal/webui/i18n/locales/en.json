@@ -75,5 +75,9 @@
   "login_or_divider": "or",
   "login_biometric_button": "Sign in with biometrics",
   "login_biometric_error": "Biometric sign-in failed. Try your password instead.",
-  "login_use_password": "Use username and password instead"
+  "login_use_password": "Use username and password instead",
+  "rotate_to_portrait": "Please rotate your phone",
+  "pwa_install_banner": "Add Miranda to your home screen",
+  "pwa_install_button": "Install",
+  "pwa_install_dismiss": "Dismiss"
 }

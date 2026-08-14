@@ -15,6 +15,16 @@
   <title>Miranda</title>
   <meta name="theme-color" id="theme-color-meta" content="#f8fafc" />
   <script>
+    // Capture beforeinstallprompt synchronously before any deferred module
+    // scripts run — the event can fire during page load, and ES modules execute
+    // after parsing, so without this early listener it would be missed. pwa.js
+    // reads window._pwaPrompt to pick it up.
+    window.addEventListener('beforeinstallprompt', function (e) {
+      e.preventDefault();
+      window._pwaPrompt = e;
+    });
+  </script>
+  <script>
     // Sets the .dark class on <html>, and the theme-color meta tag above,
     // synchronously before the stylesheet below even starts loading, so the
     // page (and the browser chrome's own color) never flashes the wrong
@@ -141,13 +151,55 @@
       </div>
     </header>
 
+    <!-- PWA install banner. Hidden by default; pwa.js reveals it when
+         beforeinstallprompt fires (Chrome/Edge on Android, desktop Chrome).
+         Sits between the header and the app content so it participates in
+         the flex layout and naturally pushes <main> down instead of
+         overlapping any fixed-position UI. -->
+    <div id="pwa-install-banner" hidden>
+      <img src="/static/v{{.AssetVersion}}/brand/icon.svg" alt="" class="pwa-banner-icon" />
+      <span class="pwa-banner-text">{{.Strings.pwa_install_banner}}</span>
+      <button id="pwa-install-btn" type="button" class="pwa-banner-install">
+        {{.Strings.pwa_install_button}}
+      </button>
+      <button id="pwa-install-dismiss" type="button" aria-label="{{.Strings.pwa_install_dismiss}}"
+              class="pwa-banner-dismiss">
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <path d="M18 6 6 18M6 6l12 12"/>
+        </svg>
+      </button>
+    </div>
+
     <main id="app" tabindex="-1" class="min-h-0 flex-1 overflow-hidden focus:outline-none"></main>
+  </div>
+
+  <!-- Shown by the portrait-only CSS lock (input.css) when a phone is
+       rotated to landscape. Invisible on tablets and desktops. -->
+  <div id="rotate-overlay" aria-hidden="true">
+    <!-- Phone-rotate icon: a landscape phone outline with a curved arrow -->
+    <svg xmlns="http://www.w3.org/2000/svg" width="56" height="56" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+      <rect x="2" y="7" width="20" height="14" rx="2" ry="2"/>
+      <path d="M12 3v2"/>
+      <path d="M10 3h4"/>
+      <path d="M8.5 1.5A9.5 9.5 0 0 0 3 9"/>
+      <path d="M3 6v3h3"/>
+    </svg>
+    <span style="font-size:0.9rem">{{.Strings.rotate_to_portrait}}</span>
   </div>
 
   <script>
     window.MIRANDA_I18N = {{.StringsJSON}};
     window.MIRANDA_USER = {{.UserJSON}};
     window.MIRANDA_WEBAUTHN_ENABLED = {{.WebAuthnEnabled}};
+  </script>
+  <!-- Attempt the Screen Orientation API lock for browsers that support it
+       (Chrome on Android). Silently ignored on iOS Safari and non-fullscreen
+       contexts where the API is unavailable or restricted. The CSS overlay
+       above acts as the universal fallback. -->
+  <script>
+    if (screen.orientation && screen.orientation.lock) {
+      screen.orientation.lock('portrait-primary').catch(function () {});
+    }
   </script>
   <script type="module" src="/static/v{{.AssetVersion}}/js/app.js"></script>
 </body>
