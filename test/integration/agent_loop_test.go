@@ -151,19 +151,22 @@ func TestAgentLoop_ToolCallRoundTripIsReplayedOnNextTurnInSameConversation(t *te
 	require.Equal(t, "Не за что.", second.Reply)
 
 	// The second Chat call (index 1) must have replayed the first turn's
-	// tool-call round trip, not just the plain user/assistant text.
+	// tool-call round trip, not just the plain user/assistant text. The
+	// system prompt is two messages (stable prefix, then volatile current
+	// time — see docs/adr/system-prompt-caching.md), not one.
 	require.Len(t, provider.Requests, 3)
 	replayed := provider.Requests[1].Messages
-	require.Len(t, replayed, 4, "system, user, assistant-with-tool-call, tool-result")
+	require.Len(t, replayed, 5, "system(stable), system(volatile), user, assistant-with-tool-call, tool-result")
 	require.Equal(t, llm.RoleSystem, replayed[0].Role)
-	require.Equal(t, llm.RoleUser, replayed[1].Role)
-	require.Equal(t, llm.RoleAssistant, replayed[2].Role)
-	require.Len(t, replayed[2].ToolCalls, 1)
-	require.Equal(t, "call-1", replayed[2].ToolCalls[0].ID)
-	require.Equal(t, "ha_light_turn_on", replayed[2].ToolCalls[0].Name)
-	require.Equal(t, llm.RoleTool, replayed[3].Role)
-	require.Equal(t, "call-1", replayed[3].ToolCallID)
-	require.Equal(t, "ok", replayed[3].Content)
+	require.Equal(t, llm.RoleSystem, replayed[1].Role)
+	require.Equal(t, llm.RoleUser, replayed[2].Role)
+	require.Equal(t, llm.RoleAssistant, replayed[3].Role)
+	require.Len(t, replayed[3].ToolCalls, 1)
+	require.Equal(t, "call-1", replayed[3].ToolCalls[0].ID)
+	require.Equal(t, "ha_light_turn_on", replayed[3].ToolCalls[0].Name)
+	require.Equal(t, llm.RoleTool, replayed[4].Role)
+	require.Equal(t, "call-1", replayed[4].ToolCallID)
+	require.Equal(t, "ok", replayed[4].Content)
 }
 
 func TestAgentLoop_RememberThisUpdatesMemoryFile(t *testing.T) {

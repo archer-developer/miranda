@@ -3,6 +3,7 @@ package httpapi
 import (
 	"context"
 	"fmt"
+	"sync"
 	"time"
 
 	llm "github.com/archer-developer/miranda-llm"
@@ -232,6 +233,13 @@ type Orchestrator struct {
 	// docs/file-staging-refactor.md. Empty means no URI is ever included
 	// (file_upload.enabled is false, or public_base_url isn't configured).
 	filesPublicBaseURL string
+	// memoryMu guards memoryCache.
+	memoryMu sync.Mutex
+	// memoryCache holds each open conversation's shared+personal memory
+	// snapshot, read once and reused for the rest of that conversation —
+	// see conversationMemory/clearConversationMemory
+	// (docs/adr/system-prompt-caching.md).
+	memoryCache map[string]cachedMemory
 }
 
 // SetTelegram wires the optional send_telegram tool in, mirroring
@@ -376,6 +384,7 @@ func NewOrchestrator(
 		chunkMaxChars:    chunkMaxChars,
 		defaultUserID:    defaultUserID,
 		baseSystemPrompt: agentCfg.SystemPrompt,
+		memoryCache:      make(map[string]cachedMemory),
 	}
 }
 
@@ -403,11 +412,11 @@ func (o *Orchestrator) Handle(ctx context.Context, req InputRequest) (InputRespo
 	// with a specific dialog.
 	ctx = llmtrace.WithConversationID(ctx, convID)
 
-	sharedMem, err := o.memory.ReadShared()
-	if err != nil {
-		return InputResponse{}, fmt.Errorf("orchestrator: read shared memory: %w", err)
-	}
-	memContent, err := o.memory.Read(userID)
+	// Read once per conversation, not once per turn — see
+	// conversationMemory's doc comment and docs/adr/system-prompt-caching.md
+	// for why re-reading on every turn would both hit disk needlessly and
+	// defeat the stable system-prompt block's cacheability below.
+	sharedMem, memContent, err := o.conversationMemory(userID, convID)
 	if err != nil {
 		return InputResponse{}, fmt.Errorf("orchestrator: read memory: %w", err)
 	}
@@ -425,12 +434,20 @@ func (o *Orchestrator) Handle(ctx context.Context, req InputRequest) (InputRespo
 	}
 	o.publishChatMessage(userID, convID, history.Message{ID: userMsgID, ConversationID: convID, Role: "user", Content: userContent})
 
-	systemPrompt := o.buildSystemPrompt(userID, sharedMem, memContent)
-	if err := o.history.SetSystemPrompt(ctx, convID, systemPrompt); err != nil {
+	stableSystem, volatileSystem := o.buildSystemPrompt(userID, sharedMem, memContent)
+	if err := o.history.SetSystemPrompt(ctx, convID, stableSystem+"\n\n"+volatileSystem); err != nil {
 		return InputResponse{}, fmt.Errorf("orchestrator: set system prompt: %w", err)
 	}
 
-	messages := append([]llm.Message{{Role: llm.RoleSystem, Content: systemPrompt}}, priorMessages...)
+	// Sent as two separate RoleSystem messages, stable first — see
+	// buildSystemPrompt's doc comment and docs/adr/system-prompt-caching.md:
+	// anthropic.Provider places its prompt-cache breakpoint on the FIRST
+	// system message specifically so the volatile one (current time,
+	// different on every turn) never defeats reuse of the stable one.
+	messages := append([]llm.Message{
+		{Role: llm.RoleSystem, Content: stableSystem},
+		{Role: llm.RoleSystem, Content: volatileSystem},
+	}, priorMessages...)
 	messages = append(messages, llm.Message{Role: llm.RoleUser, Content: userContent, Parts: imageParts})
 
 	tools := o.availableTools(ctx)
@@ -477,6 +494,7 @@ func (o *Orchestrator) Handle(ctx context.Context, req InputRequest) (InputRespo
 		if err := o.history.DeleteConversation(ctx, convID); err != nil {
 			o.hub.Publish(hub.Event{Source: "error", Message: "forget conversation: " + err.Error()})
 		} else {
+			o.clearConversationMemory(convID)
 			o.hub.Publish(hub.Event{Source: "chat", UserID: userID, Data: ChatEvent{Type: "conversation_deleted", ConversationID: convID}})
 		}
 	case control.endRequested:

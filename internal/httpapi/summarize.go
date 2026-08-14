@@ -102,6 +102,7 @@ func (o *Orchestrator) summarizeConversation(ctx context.Context, convID, userID
 		if err := o.history.EndConversation(ctx, convID); err != nil {
 			return err
 		}
+		o.clearConversationMemory(convID)
 		o.publishConversationEnded(userID, convID)
 		return nil
 	}
@@ -142,6 +143,7 @@ func (o *Orchestrator) summarizeConversation(ctx context.Context, convID, userID
 	if err := o.history.EndConversationWithSummary(ctx, convID, summary); err != nil {
 		return err
 	}
+	o.clearConversationMemory(convID)
 	o.publishConversationEnded(userID, convID)
 	return nil
 }
