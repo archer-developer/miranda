@@ -1,5 +1,5 @@
 <!doctype html>
-<html lang="{{.Lang}}" class="h-full">
+<html lang="{{.Lang}}" class="h-full overflow-hidden">
 <head>
   <meta charset="utf-8" />
   <!-- viewport-fit=cover: lets the page extend under the iOS notch/home-
@@ -46,6 +46,40 @@
       }
     })();
   </script>
+  <script>
+    // Mirrors the *actual* visible viewport height into --app-height, used
+    // by <body> below instead of 100dvh. 100dvh is spec'd to track
+    // browser-chrome-driven size changes (the URL bar hiding/showing), but
+    // this app also runs `display: standalone` (manifest.webmanifest) with
+    // viewport-fit=cover, which lets content draw edge-to-edge under
+    // Android's system status/gesture bars. On several Android browsers
+    // (confirmed on a Vivo device) 100dvh in that mode resolves to the full
+    // screen height *including* the area behind the gesture bar, without a
+    // working env(safe-area-inset-bottom) to compensate the way iOS Safari
+    // does — so a body sized with 100dvh rendered its last flex child (the
+    // chat composer, see screens/chat.js) partly or fully behind the
+    // gesture bar, unreachable. window.visualViewport.height is the one
+    // signal that reflects the true visible/tappable area across browsers,
+    // so it's synced here — on load, on its own resize (covers on-screen
+    // keyboard and gesture-bar show/hide), and on orientationchange — and
+    // consumed via the CSS var(), with 100dvh kept as the pre-JS/no-JS
+    // fallback. Deliberately not an ES module for the same reason as the
+    // theme script above: needs to run before first paint.
+    (function () {
+      var root = document.documentElement;
+      function sync() {
+        var vv = window.visualViewport;
+        root.style.setProperty("--app-height", (vv ? vv.height : window.innerHeight) + "px");
+      }
+      sync();
+      if (window.visualViewport) {
+        window.visualViewport.addEventListener("resize", sync);
+      } else {
+        window.addEventListener("resize", sync);
+      }
+      window.addEventListener("orientationchange", sync);
+    })();
+  </script>
   <link rel="icon" type="image/svg+xml" href="/static/v{{.AssetVersion}}/brand/icon.svg" />
   <link rel="alternate icon" type="image/png" href="/static/v{{.AssetVersion}}/brand/icon.png" />
   <link rel="stylesheet" href="/static/v{{.AssetVersion}}/css/styles.css" />
@@ -63,17 +97,55 @@
   <meta name="apple-mobile-web-app-title" content="Miranda" />
   <meta name="mobile-web-app-capable" content="yes" />
 </head>
-<!-- h-dvh (not h-full/height:100%) is load-bearing here: with
-     viewport-fit=cover, WKWebView's percentage-height chain
-     (html{height:100%} -> body{height:100%} -> the flex div below) resolves
-     against a containing block that's short by exactly the top safe-area
-     inset in standalone PWA mode — a real WebKit quirk that left the
-     composer's own bottom safe-area padding correct but sitting on top of
-     an extra unstyled gap the height of the *top* inset, since the whole
-     column of content (header+main) was that much too short. 100dvh, being
-     tied directly to the actual visual viewport rather than propagated
-     through ancestor percentages, doesn't have that gap. -->
-<body class="h-dvh bg-(--color-bg) text-(--color-text) antialiased">
+<!-- Height: var(--app-height, 100dvh), not a plain h-dvh class — see the
+     --app-height sync script in <head>. Two independent mobile quirks are
+     stacked on top of each other here, both a consequence of this app
+     running `display: standalone` (manifest.webmanifest) with
+     viewport-fit=cover, i.e. content drawing edge-to-edge under the OS
+     status/gesture bars:
+
+     1. WKWebView (iOS standalone): the percentage-height chain
+        (html{height:100%} -> body{height:100%} -> the flex div below)
+        resolves against a containing block that's short by exactly the top
+        safe-area inset — a real WebKit quirk that left the composer's own
+        bottom safe-area padding correct but sitting on top of an extra
+        unstyled gap the height of the *top* inset, since the whole column
+        of content (header+main) was that much too short. 100dvh, being
+        tied directly to the actual visual viewport rather than propagated
+        through ancestor percentages, doesn't have that gap — which is why
+        this isn't simply h-full.
+
+     2. Several Android browsers (confirmed on a Vivo device): 100dvh
+        itself resolves to the full screen height *including* the area
+        behind the bottom gesture bar, without a working
+        env(safe-area-inset-bottom) to compensate the way iOS Safari does.
+        A body sized with plain 100dvh therefore rendered its last flex
+        child — the chat composer, see screens/chat.js — partly or fully
+        behind the gesture bar: unreachable, not just visually clipped.
+        window.visualViewport.height is the one signal that reflects the
+        true visible/tappable area on that browser too, so the <head>
+        script mirrors it into --app-height live (initial load, its own
+        resize, orientationchange) and this consumes that instead, keeping
+        100dvh only as the pre-JS/no-JS fallback.
+
+     overflow-hidden (here and on <html> above) is a separate, load-bearing
+     fix for a third Android-only quirk: Chrome's dynamic toolbar (the URL
+     bar) hides and shows based on scroll of the *document*, and each
+     show/hide changes what 100dvh resolves to. Every inner pane that
+     actually needs to scroll (chat-scroll, the logs/history panes, …) is
+     already scoped with its own overflow-y-auto, so the document itself
+     never needs to scroll — but without an explicit overflow-hidden here, a
+     stray 1px of overflow (rounding, a mid-resize frame) was enough to let
+     the document scroll too. That let the toolbar hide, which grew 100dvh,
+     which shrank the previous scroll offset back into view, which let the
+     toolbar reappear — an infinite resize/scroll loop that alternately
+     covered the header and the composer with the browser's own chrome.
+     Locking the document to never scroll removes that feedback loop
+     entirely, independent of the --app-height fix above (which addresses
+     the gesture bar, not the URL bar). iOS Safari/WKWebView has neither a
+     scroll-driven toolbar nor this gesture-bar inset bug, so both of these
+     are no-ops there. -->
+<body class="overflow-hidden bg-(--color-bg) text-(--color-text) antialiased" style="height: var(--app-height, 100dvh)">
   <a href="#app" class="sr-only focus-visible:not-sr-only focus-visible:fixed focus-visible:left-4 focus-visible:top-4 focus-visible:z-50 focus-visible:rounded-lg focus-visible:bg-(--color-accent) focus-visible:px-4 focus-visible:py-2 focus-visible:text-sm focus-visible:font-medium focus-visible:text-white">
     {{.Strings.skip_to_content}}
   </a>
