@@ -18,6 +18,7 @@ import (
 	"github.com/archer-developer/miranda/internal/config"
 	"github.com/archer-developer/miranda/internal/history"
 	"github.com/archer-developer/miranda/internal/hub"
+	"github.com/archer-developer/miranda/internal/mcp"
 	"github.com/archer-developer/miranda/internal/schedule"
 	"github.com/archer-developer/miranda/internal/tts"
 	"github.com/archer-developer/miranda/internal/users"
@@ -633,7 +634,7 @@ func (o *Orchestrator) userLocation(userID string) *time.Location {
 // server's real tools for the rest of the turn. Called with a control whose
 // loadedGroups is empty/nil on a turn's first iteration (from Handle) — see
 // docs/adr/lazy-mcp-tool-loading.md.
-func (o *Orchestrator) availableTools(ctx context.Context, control *turnControl) []llm.ToolDef {
+func (o *Orchestrator) availableTools(ctx context.Context, userID string, control *turnControl) []llm.ToolDef {
 	var tools []llm.ToolDef
 	names := make(map[string]bool)
 	add := func(t llm.ToolDef) {
@@ -731,6 +732,28 @@ func (o *Orchestrator) availableTools(ctx context.Context, control *turnControl)
 				"(e.g. \"хватит\", \"замолчи\", \"stop talking\") — clears anything still queued and silences " +
 				"whatever is currently playing on the physical speaker.",
 			Parameters: map[string]any{"type": "object", "properties": map[string]any{}},
+		})
+	}
+
+	if o.oauth != nil {
+		add(llm.ToolDef{
+			Name: oauthAuthorizeToolName,
+			Description: "Start connecting a third-party account (e.g. Google Calendar) so its tools can act on the " +
+				"current user's own data — call this when the user asks to connect/link/authorize a service, or when " +
+				"a previous tool call failed because this user hasn't authorized it yet. Returns a link the user must " +
+				"open and approve; the link is also proactively sent to their Telegram when known, since a spoken " +
+				"reply can't usefully read a URL aloud.",
+			Parameters: map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"provider": map[string]any{
+						"type":        "string",
+						"enum":        o.oauth.ProviderNames(),
+						"description": "which service to connect, e.g. \"google_calendar\"",
+					},
+				},
+				"required": []string{"provider"},
+			},
 		})
 	}
 
@@ -838,14 +861,14 @@ func (o *Orchestrator) availableTools(ctx context.Context, control *turnControl)
 	for name := range o.lazyServerDescriptions {
 		skip[name] = true
 		if control.loadedGroups[name] {
-			for _, t := range o.tools.ToolsForServer(ctx, name) {
+			for _, t := range o.tools.ToolsForServerAndUser(ctx, name, userID) {
 				addMCP(t)
 			}
 		} else {
 			pending = append(pending, name)
 		}
 	}
-	for _, t := range o.tools.ToolsExcluding(ctx, skip) {
+	for _, t := range o.tools.ToolsExcludingForUser(ctx, skip, userID) {
 		addMCP(t)
 	}
 	if len(pending) > 0 {
@@ -927,7 +950,7 @@ func (o *Orchestrator) runAgentLoop(ctx context.Context, userID, conversationID,
 		// for rebuilding the list (which, unlike the built-ins half, may hit
 		// every connected MCP server) on every single turn.
 		if control.groupsChanged {
-			tools = o.availableTools(ctx, control)
+			tools = o.availableTools(ctx, userID, control)
 			control.groupsChanged = false
 		}
 	}
@@ -1088,6 +1111,32 @@ func (o *Orchestrator) executeTool(ctx context.Context, userID, conversationID s
 		if _, ok := o.lazyServerDescriptions[args.Group]; !ok {
 			return fmt.Sprintf("error: unknown tool group %q", args.Group)
 		}
+		// An OAuth-gated group (config.MCPServer.OAuthProvider != "") has no
+		// live per-user MCP session until EnsureUserSession brings one up —
+		// unlike every other lazy group, whose real tools come from the one
+		// already-connected global client. Without this, the model's first
+		// load_tool_group call for such a group would report success while
+		// the very next availableTools() call still saw zero real tools for
+		// it — see docs/adr/oauth2-layer.md.
+		if ext, ok := o.mcpExtensions[args.Group]; ok && ext.OAuthProvider != "" && o.oauth != nil {
+			authorized, err := o.oauth.HasToken(ctx, userID, ext.OAuthProvider)
+			if err != nil {
+				return fmt.Sprintf("error: %v", err)
+			}
+			if !authorized {
+				return fmt.Sprintf("the user hasn't connected %q yet — call %s with provider=%q first", args.Group, oauthAuthorizeToolName, ext.OAuthProvider)
+			}
+			o.tools.EnsureUserSession(args.Group, userID, o.oauthReconnect, o.oauthMaxReconnect, o.oauthConnectTimeout, o.oauthConnectFunc(ext, args.Group, userID))
+			// Bounded wait (not unbounded — a scoped exception to "no
+			// blocking I/O in executeTool", like Service.RefreshNow: at most
+			// once per user per process restart, not a per-call cost) so the
+			// very next availableTools() call in this same turn has a real
+			// chance of seeing a live client instead of falsely reporting
+			// success on a session that isn't up yet.
+			if !waitForUserSession(ctx, o.tools, args.Group, userID, 5*time.Second) {
+				return fmt.Sprintf("still connecting to %q — try again in a moment", args.Group)
+			}
+		}
 		if control.loadedGroups == nil {
 			control.loadedGroups = map[string]bool{}
 		}
@@ -1157,6 +1206,28 @@ func (o *Orchestrator) executeTool(ctx context.Context, userID, conversationID s
 			return fmt.Sprintf("error: %v", err)
 		}
 		return "sent"
+	}
+
+	if tc.Name == oauthAuthorizeToolName {
+		var args struct {
+			Provider string `json:"provider"`
+		}
+		if err := json.Unmarshal([]byte(tc.Arguments), &args); err != nil {
+			return fmt.Sprintf("error: invalid arguments: %v", err)
+		}
+		authorizeURL, err := o.oauth.StartAuthorization(ctx, userID, args.Provider)
+		if err != nil {
+			return fmt.Sprintf("error: %v", err)
+		}
+		// Best-effort, mirrors send_telegram's own "silently skip if no chat
+		// id known" shape — a raw URL is useless spoken aloud (ha_assist), so
+		// push it out-of-band regardless of which channel actually asked, in
+		// addition to the reply text below (which works fine for web
+		// UI/typed Telegram).
+		if o.telegram != nil {
+			_ = o.telegram.SendToUser(ctx, userID, "Follow this link to connect "+args.Provider+": "+authorizeURL)
+		}
+		return "Send the user this link to complete authorization: " + authorizeURL
 	}
 
 	if tc.Name == createScheduledTaskToolName {
@@ -1329,7 +1400,19 @@ func (o *Orchestrator) executeTool(ctx context.Context, userID, conversationID s
 		}
 	}
 
-	result, err := o.tools.Call(ctx, tc.Name, callArgs)
+	// An OAuth-gated server routes to userID's own per-user MCP session
+	// (lazily brought up here if this is the first call this process has
+	// made for this user) rather than the one globally-shared connection
+	// every other server uses — see docs/adr/oauth2-layer.md for why a
+	// shared connection with a swapped bearer token isn't safe here.
+	var result string
+	var err error
+	if toolServerOK && toolExt.OAuthProvider != "" && o.oauth != nil {
+		o.tools.EnsureUserSession(toolServer, userID, o.oauthReconnect, o.oauthMaxReconnect, o.oauthConnectTimeout, o.oauthConnectFunc(toolExt, toolServer, userID))
+		result, err = o.tools.CallForUser(ctx, tc.Name, callArgs, userID)
+	} else {
+		result, err = o.tools.Call(ctx, tc.Name, callArgs)
+	}
 	if err != nil {
 		return fmt.Sprintf("error: %v", err)
 	}
@@ -1372,6 +1455,56 @@ func (o *Orchestrator) executeTool(ctx context.Context, userID, conversationID s
 	}
 
 	return result
+}
+
+// oauthConnectFunc builds the per-user mcp.Connect closure EnsureUserSession
+// retries on its own backoff schedule — pulls a currently-valid access
+// token fresh from the in-memory cache on every invocation (never a
+// captured/stale value, so a rotated/refreshed token is always picked up on
+// the very next reconnect attempt), falling back to a synchronous
+// RefreshNow only here, inside a background goroutine, never on
+// executeTool's own call path. serverName is passed explicitly rather than
+// read off ext, since MCPServerExtension is keyed by server name in the map
+// the caller already has (toolServer/args.Group) and carries no back
+// reference to its own key.
+func (o *Orchestrator) oauthConnectFunc(ext MCPServerExtension, serverName, userID string) func(ctx context.Context) (mcp.Client, error) {
+	return func(ctx context.Context) (mcp.Client, error) {
+		token, ok := o.oauth.AccessToken(userID, ext.OAuthProvider)
+		if !ok {
+			var err error
+			token, ok, err = o.oauth.RefreshNow(ctx, userID, ext.OAuthProvider)
+			if err != nil {
+				return nil, fmt.Errorf("oauth2: refresh failed for %s/%s: %w", userID, ext.OAuthProvider, err)
+			}
+			if !ok {
+				return nil, fmt.Errorf("oauth2: %s has not authorized %s yet", userID, ext.OAuthProvider)
+			}
+		}
+		return mcp.Connect(ctx, serverName, ext.MCPServerURL, token)
+	}
+}
+
+// waitForUserSession polls mgr.HasUserClient(name, userID) until it's true
+// or timeout elapses — used by executeTool's load_tool_group handling to
+// give a freshly-started EnsureUserSession connect attempt a real chance to
+// land before the model's very next tool-listing call, see its own call
+// site for why this bounded wait is an acceptable, scoped exception to
+// executeTool otherwise never blocking on network I/O.
+func waitForUserSession(ctx context.Context, mgr *mcp.Manager, name, userID string, timeout time.Duration) bool {
+	deadline := time.Now().Add(timeout)
+	for {
+		if mgr.HasUserClient(name, userID) {
+			return true
+		}
+		if time.Now().After(deadline) || ctx.Err() != nil {
+			return false
+		}
+		select {
+		case <-ctx.Done():
+			return false
+		case <-time.After(200 * time.Millisecond):
+		}
+	}
 }
 
 // aliceToolDevice extracts the "device" string field from a tool call's JSON

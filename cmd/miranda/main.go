@@ -35,6 +35,7 @@ import (
 	"github.com/archer-developer/miranda/internal/keyring"
 	"github.com/archer-developer/miranda/internal/mcp"
 	"github.com/archer-developer/miranda/internal/memory"
+	"github.com/archer-developer/miranda/internal/oauth2"
 	"github.com/archer-developer/miranda/internal/schedule"
 	"github.com/archer-developer/miranda/internal/session"
 	"github.com/archer-developer/miranda/internal/tavily"
@@ -86,6 +87,13 @@ const mcpReconnectInterval = 30 * time.Second
 // mcpMaxReconnectInterval caps the backoff mcpReconnectInterval grows into
 // during an extended outage.
 const mcpMaxReconnectInterval = 10 * time.Minute
+
+// oauthRefreshTickInterval is how often oauth2.Service.StartRefresher polls
+// for access tokens nearing their proactive-refresh margin — cheap (a
+// single indexed SQLite query when nothing is due), so a short interval
+// just means refresh happens close to that margin rather than up to a whole
+// interval late.
+const oauthRefreshTickInterval = time.Minute
 
 // dotEnvPath is a .env file in the project root, loaded for local-dev
 // convenience (see internal/envfile) so secrets like ANTHROPIC_API_KEY or
@@ -283,6 +291,14 @@ func run(cfg config.Config, logger *slog.Logger, eventHub *hub.Hub) error {
 		return err
 	}
 
+	oauthStore, oauthSvc, err := setupOAuth(cfg.OAuth, cfg.Storage, logger)
+	if err != nil {
+		return err
+	}
+	if oauthStore != nil {
+		defer func() { _ = oauthStore.Close() }()
+	}
+
 	defaultUserID := "debug"
 	orchestrator := httpapi.NewOrchestrator(
 		llmRouter, toolManager, historyStore, memoryStore, dispatcher, eventHub, usersRegistry,
@@ -303,6 +319,10 @@ func run(cfg config.Config, logger *slog.Logger, eventHub *hub.Hub) error {
 	orchestrator.SetKeyring(keyringService)
 	if lazy := cfg.LazyMCPServers(); len(lazy) > 0 {
 		orchestrator.SetLazyMCPServers(lazy)
+	}
+	if oauthSvc != nil {
+		orchestrator.SetOAuth(oauthSvc, mcpReconnectInterval, mcpMaxReconnectInterval, mcpConnectTimeout)
+		go oauthSvc.StartRefresher(ctx, oauthRefreshTickInterval)
 	}
 
 	// mcpExtensions bundles every configured MCP server's static opt-ins
@@ -383,6 +403,12 @@ func run(cfg config.Config, logger *slog.Logger, eventHub *hub.Hub) error {
 			Secret: tgSecret,
 			Client: tgClient,
 			Chats:  tgChats,
+		})
+	}
+	if oauthSvc != nil {
+		server.SetOAuthCallback(&httpapi.OAuthCallback{
+			PathPrefix: cfg.OAuth.CallbackPath,
+			Service:    oauthSvc,
 		})
 	}
 	httpServer := &http.Server{
@@ -557,8 +583,35 @@ func buildEscalations(configs []config.LLMProvider) map[string]router.Escalation
 // picked back up with no Miranda restart needed.
 func connectMCP(ctx context.Context, servers []config.MCPServer, logger *slog.Logger) *mcp.Manager {
 	manager := mcp.NewManager(logger)
+
+	// SetBackgroundContext is harmless to set even when no server is
+	// OAuth-gated — EnsureUserSession simply never gets called in that case
+	// — and it must be set before any per-user session could possibly be
+	// requested, so doing it unconditionally here (rather than only when
+	// OAuth2 is configured) avoids a startup-ordering dependency between
+	// this function and setupOAuth.
+	manager.SetBackgroundContext(ctx)
+
+	oauthServers := make(map[string]bool)
+	for _, s := range servers {
+		if s.OAuthProvider != "" {
+			oauthServers[s.Name] = true
+		}
+	}
+	manager.SetOAuthServers(oauthServers)
+
 	for _, s := range servers {
 		if !s.Enabled {
+			continue
+		}
+		if s.OAuthProvider != "" {
+			// An OAuth-gated server gets no single shared global connection
+			// — each household member's own per-user session is instead
+			// brought up lazily by httpapi.Orchestrator.executeTool via
+			// mcp.Manager.EnsureUserSession once they've authorized (see
+			// docs/adr/oauth2-layer.md). config.validateOAuthServers already
+			// guarantees such a server is Lazy, so it never appears in a
+			// turn's default tool list before that happens.
 			continue
 		}
 		token := ""
@@ -609,6 +662,11 @@ func mcpServerExtensions(servers []config.MCPServer, logger *slog.Logger) map[st
 			}
 			ext.SessionIDArg = s.SessionIDArg()
 			ext.SessionIDTools = tools
+		}
+
+		if s.OAuthProvider != "" {
+			ext.OAuthProvider = s.OAuthProvider
+			ext.MCPServerURL = s.URL
 		}
 
 		extensions[s.Name] = ext
@@ -698,6 +756,55 @@ func setupTelegram(cfg config.TelegramConfig, storageCfg config.StorageConfig, l
 	}
 
 	return client, chats, secret, nil
+}
+
+// setupOAuth validates config and wires the optional OAuth2 authorization
+// layer (internal/oauth2, docs/adr/oauth2-layer.md): it opens the encrypted
+// token store, resolves the server-held master key and every configured
+// provider's client id/secret from the environment, and builds the one
+// oauth2.Service internal/httpapi and internal/mcp both call into. Returns
+// a nil Store/Service when cfg.Enabled is false — callers gate all other
+// OAuth2 wiring on that same flag rather than a nil check, mirroring
+// setupTelegram's shape. The Store is returned separately (rather than only
+// the Service) so run() can defer closing it, the same reason keyring.Open's
+// result is kept in run() directly instead of behind a similar helper.
+func setupOAuth(cfg config.OAuthConfig, storageCfg config.StorageConfig, logger *slog.Logger) (*oauth2.Store, *oauth2.Service, error) {
+	if !cfg.Enabled {
+		return nil, nil, nil
+	}
+
+	store, err := oauth2.Open(storageCfg.OAuthSQLitePath)
+	if err != nil {
+		return nil, nil, fmt.Errorf("main: open oauth store: %w", err)
+	}
+
+	masterKey, err := oauth2.LoadMasterKey(cfg.MasterKeyEnv)
+	if err != nil {
+		_ = store.Close()
+		return nil, nil, fmt.Errorf("main: configure oauth: %w", err)
+	}
+
+	providers := make([]oauth2.Provider, 0, len(cfg.Providers))
+	for _, p := range cfg.Providers {
+		clientSecret := ""
+		if p.ClientSecretEnv != "" {
+			clientSecret = os.Getenv(p.ClientSecretEnv)
+		}
+		providers = append(providers, oauth2.Provider{
+			Name:                 p.Name,
+			Description:          p.Description,
+			AuthorizeURL:         p.AuthorizeURL,
+			TokenURL:             p.TokenURL,
+			ClientID:             os.Getenv(p.ClientIDEnv),
+			ClientSecret:         clientSecret,
+			Scopes:               p.Scopes,
+			PKCE:                 p.PKCE,
+			ExtraAuthorizeParams: p.ExtraAuthorizeParams,
+		})
+	}
+
+	svc := oauth2.NewService(store, providers, masterKey, cfg.PublicBaseURL, cfg.CallbackPath, 0, logger)
+	return store, svc, nil
 }
 
 // buildTTSDispatcher wires up the Home Assistant REST client TTS needs, if

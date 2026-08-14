@@ -56,6 +56,20 @@ type Client interface {
 	Close() error
 }
 
+// clientKey identifies one connected MCP session: a bare server name for a
+// globally-shared server (the historical, still-default behavior), or a
+// (server, userID) pair for a server requiring per-user OAuth2 sessions
+// (see SetOAuthServers). MCP's Streamable HTTP initialize handshake binds
+// session identity to whatever bearer token was presented at connect time,
+// so swapping the token on an already-live session isn't safe — each user
+// needing their own identity against an OAuth-gated server instead gets a
+// fully independent session, lazily brought up by EnsureUserSession. See
+// docs/adr/oauth2-layer.md.
+type clientKey struct {
+	server string
+	userID string // "" for a server that isn't OAuth-gated
+}
+
 // Manager aggregates tools from multiple MCP Clients into one namespace,
 // prefixing each tool name with "<server>_" so identically named tools from
 // different servers can't collide.
@@ -69,8 +83,22 @@ type Manager struct {
 	logger *slog.Logger
 
 	mu      sync.RWMutex
-	clients map[string]Client
-	order   []string // insertion order, stable across reconnects
+	clients map[clientKey]Client
+	order   []string // server *names* only, insertion order stable across reconnects — independent of any per-user keying
+
+	// oauthServers marks which server names require per-user session
+	// multiplexing (config.MCPServer.OAuthProvider != ""), set once via
+	// SetOAuthServers before any per-user traffic starts.
+	oauthServers map[string]bool
+	// userSessionsStarted guards EnsureUserSession's goroutine-spawn
+	// idempotency — a (server, userID) pair's background keepConnectedKeyed
+	// loop is started at most once per process, even if EnsureUserSession is
+	// called again (e.g. from a later tool call) while it's already running.
+	userSessionsStarted map[clientKey]bool
+	// bgCtx is the process-lifetime context EnsureUserSession's background
+	// loops run under — see SetBackgroundContext and EnsureUserSession's own
+	// doc comment for why this must not be the caller's per-turn ctx.
+	bgCtx context.Context
 }
 
 // NewManager builds a Manager over the given Clients, if any — more can be
@@ -79,89 +107,161 @@ func NewManager(logger *slog.Logger, clients ...Client) *Manager {
 	if logger == nil {
 		logger = slog.Default()
 	}
-	m := &Manager{logger: logger, clients: make(map[string]Client, len(clients))}
+	m := &Manager{
+		logger:              logger,
+		clients:             make(map[clientKey]Client, len(clients)),
+		oauthServers:        make(map[string]bool),
+		userSessionsStarted: make(map[clientKey]bool),
+		bgCtx:               context.Background(),
+	}
 	for _, c := range clients {
-		m.clients[c.Name()] = c
+		m.clients[clientKey{server: c.Name()}] = c
 		m.order = append(m.order, c.Name())
 	}
 	return m
 }
 
+// SetOAuthServers marks which server names require per-user session
+// multiplexing instead of one globally shared connection — called once from
+// cmd/miranda after config validation, before any per-user traffic starts.
+func (m *Manager) SetOAuthServers(names map[string]bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.oauthServers = names
+}
+
+// SetBackgroundContext wires in the process-lifetime context
+// EnsureUserSession uses as a per-user session's own lifetime. Call once
+// from cmd/miranda, mirroring connectMCP's own ctx usage for the global
+// KeepConnected loops.
+func (m *Manager) SetBackgroundContext(ctx context.Context) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.bgCtx = ctx
+}
+
+// keyForLocked resolves name/userID to the clientKey currently governing
+// that server, per oauthServers. Callers must already hold at least m.mu's
+// read lock.
+func (m *Manager) keyForLocked(name, userID string) clientKey {
+	if m.oauthServers[name] {
+		return clientKey{server: name, userID: userID}
+	}
+	return clientKey{server: name}
+}
+
+// keyFor is keyForLocked for callers not already holding the lock.
+func (m *Manager) keyFor(name, userID string) clientKey {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.keyForLocked(name, userID)
+}
+
 // SetClient adds c as (or replaces) the client serving its server name,
 // keeping that name's original position in iteration order if it already
 // had one — so a reconnected server's tools reappear in the same place.
-// Membership is checked against order, not clients: a name evicted by
-// removeClient stays in order (just without a live client) precisely so a
-// later SetClient here restores it to that same slot instead of appending a
-// duplicate. If c replaces a still-live client for the same name (e.g. two
-// misconfigured servers sharing a name both connect), the one being replaced
-// is closed rather than silently dropped.
+// This is the global (non-per-user) path; see setClientAtKey for the
+// OAuth-gated per-user equivalent EnsureUserSession's background loop uses.
 func (m *Manager) SetClient(c Client) {
+	m.setClientAtKey(clientKey{server: c.Name()}, c)
+}
+
+// setClientAtKey stores c under the explicit key given, rather than
+// re-deriving it from c.Name() the way SetClient does — required for the
+// per-user path, since SDKClient.Name() only ever returns the bare server
+// name (it has no concept of userID); re-deriving the key there would
+// collapse every user's client back onto the same clientKey{server: name}
+// and defeat per-user multiplexing entirely. Membership is checked against
+// order (server names only, not per-user), not clients: a name evicted by
+// removeClientKeyed stays in order (just without a live client at that key)
+// precisely so a later call here restores it to that same slot instead of
+// appending a duplicate. If c replaces a still-live client at the same key,
+// the one being replaced is closed rather than silently dropped.
+func (m *Manager) setClientAtKey(key clientKey, c Client) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	name := c.Name()
-	if old, ok := m.clients[name]; ok && old != c {
+	if old, ok := m.clients[key]; ok && old != c {
 		_ = old.Close()
 	}
-	m.clients[name] = c
+	m.clients[key] = c
 	for _, n := range m.order {
-		if n == name {
+		if n == key.server {
 			return
 		}
 	}
-	m.order = append(m.order, name)
+	m.order = append(m.order, key.server)
 }
 
-// HasClient reports whether name currently has a connected client. The
-// background reconnect loop uses this to skip servers that are already up.
+// HasClient reports whether name currently has a connected client on the
+// global (non-per-user) path. The background reconnect loop uses this to
+// skip servers that are already up.
 func (m *Manager) HasClient(name string) bool {
+	return m.hasClientKeyed(clientKey{server: name})
+}
+
+// HasUserClient reports whether (name, userID) currently has a connected
+// per-user client — used by executeTool's load_tool_group bounded-wait
+// helper to tell whether EnsureUserSession's background connect attempt has
+// completed yet.
+func (m *Manager) HasUserClient(name, userID string) bool {
+	return m.hasClientKeyed(clientKey{server: name, userID: userID})
+}
+
+func (m *Manager) hasClientKeyed(key clientKey) bool {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
-	_, ok := m.clients[name]
+	_, ok := m.clients[key]
 	return ok
 }
 
-// removeClient closes c and drops it from name's slot, so a later
-// HasClient(name) tells the reconnect loop to bring it back — but only if c
-// is still the client actually registered there. A caller only ever learns
-// a client is dead after an RPC on it (ListTools/CallTool) returns, and
-// that call can be in flight for as long as its own timeout while a
-// concurrent KeepConnected tick independently detects the same death,
-// evicts, and successfully reconnects — installing a brand new, healthy
-// client under the same name before the first caller's stale error comes
-// back. Deleting unconditionally by name (as this used to) would then let
-// that stale caller tear down the fresh reconnect instead of the client it
-// actually observed fail. Comparing identity first (mirroring SetClient's
-// own old != c guard) makes a name-only match a no-op instead.
-func (m *Manager) removeClient(name string, c Client) {
+// removeClientKeyed closes c and drops it from key's slot, so a later
+// hasClientKeyed(key) tells the reconnect loop to bring it back — but only
+// if c is still the client actually registered there. A caller only ever
+// learns a client is dead after an RPC on it (ListTools/CallTool) returns,
+// and that call can be in flight for as long as its own timeout while a
+// concurrent KeepConnected/keepConnectedKeyed tick independently detects the
+// same death, evicts, and successfully reconnects — installing a brand new,
+// healthy client under the same key before the first caller's stale error
+// comes back. Deleting unconditionally by key (as this used to, by name
+// only) would then let that stale caller tear down the fresh reconnect
+// instead of the client it actually observed fail. Comparing identity first
+// (mirroring setClientAtKey's own old != c guard) makes a key-only match a
+// no-op instead.
+func (m *Manager) removeClientKeyed(key clientKey, c Client) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if cur, ok := m.clients[name]; ok && cur == c {
+	if cur, ok := m.clients[key]; ok && cur == c {
 		_ = cur.Close()
-		delete(m.clients, name)
+		delete(m.clients, key)
 	}
 }
 
-// client returns name's currently connected client, if any, under a read
-// lock — the single-client counterpart to snapshot() for callers (currently
-// just checkHealth) that don't need a full copy of the client set.
-func (m *Manager) client(name string) (Client, bool) {
+// clientAtKey returns key's currently connected client, if any, under a
+// read lock — the single-client counterpart to snapshot() for callers
+// (currently just checkHealth) that don't need a full copy of the client
+// set.
+func (m *Manager) clientAtKey(key clientKey) (Client, bool) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
-	c, ok := m.clients[name]
+	c, ok := m.clients[key]
 	return c, ok
 }
 
-// snapshot copies the current client set and iteration order under a read
-// lock, so Tools/Call can walk them without holding the lock across
-// potentially slow network calls.
-func (m *Manager) snapshot() ([]string, map[string]Client) {
+// snapshot copies the current iteration order under a read lock and narrows
+// the client set down to userID's view (bare server name -> Client,
+// resolved per keyForLocked), so Tools/Call can walk them without holding
+// the lock across potentially slow network calls. userID == "" is the
+// historical, still-default behavior: every server not marked OAuth-gated
+// resolves the same way regardless of who's asking.
+func (m *Manager) snapshot(userID string) ([]string, map[string]Client) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	order := append([]string(nil), m.order...)
-	clients := make(map[string]Client, len(m.clients))
-	for name, c := range m.clients {
-		clients[name] = c
+	clients := make(map[string]Client, len(order))
+	for _, name := range order {
+		if c, ok := m.clients[m.keyForLocked(name, userID)]; ok {
+			clients[name] = c
+		}
 	}
 	return order, clients
 }
@@ -169,9 +269,14 @@ func (m *Manager) snapshot() ([]string, map[string]Client) {
 // Tools lists every tool across all configured servers, with names prefixed
 // by their owning server so Call can route back to the right one. See
 // listTools for per-server failure handling.
-func (m *Manager) Tools(ctx context.Context) []llm.ToolDef {
-	order, clients := m.snapshot()
-	return m.listTools(ctx, order, clients)
+func (m *Manager) Tools(ctx context.Context) []llm.ToolDef { return m.ToolsForUser(ctx, "") }
+
+// ToolsForUser is Tools, narrowed to userID's view of any OAuth-gated
+// server (see SetOAuthServers) — servers that aren't OAuth-gated resolve
+// identically regardless of userID.
+func (m *Manager) ToolsForUser(ctx context.Context, userID string) []llm.ToolDef {
+	order, clients := m.snapshot(userID)
+	return m.listTools(ctx, userID, order, clients)
 }
 
 // ToolsForServer returns just one server's own tools, prefixed exactly like
@@ -182,11 +287,16 @@ func (m *Manager) Tools(ctx context.Context) []llm.ToolDef {
 // server to include rather than every server to skip. Returns nil if name
 // has no currently connected client.
 func (m *Manager) ToolsForServer(ctx context.Context, name string) []llm.ToolDef {
-	_, clients := m.snapshot()
+	return m.ToolsForServerAndUser(ctx, name, "")
+}
+
+// ToolsForServerAndUser is ToolsForServer, narrowed to userID's view.
+func (m *Manager) ToolsForServerAndUser(ctx context.Context, name, userID string) []llm.ToolDef {
+	_, clients := m.snapshot(userID)
 	if _, ok := clients[name]; !ok {
 		return nil
 	}
-	return m.listTools(ctx, []string{name}, clients)
+	return m.listTools(ctx, userID, []string{name}, clients)
 }
 
 // ToolsExcluding lists tools from every connected server except those named
@@ -196,9 +306,14 @@ func (m *Manager) ToolsForServer(ctx context.Context, name string) []llm.ToolDef
 // MCP server that hasn't been requested this turn (see
 // docs/adr/lazy-mcp-tool-loading.md).
 func (m *Manager) ToolsExcluding(ctx context.Context, skip map[string]bool) []llm.ToolDef {
-	order, clients := m.snapshot()
+	return m.ToolsExcludingForUser(ctx, skip, "")
+}
+
+// ToolsExcludingForUser is ToolsExcluding, narrowed to userID's view.
+func (m *Manager) ToolsExcludingForUser(ctx context.Context, skip map[string]bool, userID string) []llm.ToolDef {
+	order, clients := m.snapshot(userID)
 	if len(skip) == 0 {
-		return m.listTools(ctx, order, clients)
+		return m.listTools(ctx, userID, order, clients)
 	}
 	filtered := make([]string, 0, len(order))
 	for _, name := range order {
@@ -206,7 +321,7 @@ func (m *Manager) ToolsExcluding(ctx context.Context, skip map[string]bool) []ll
 			filtered = append(filtered, name)
 		}
 	}
-	return m.listTools(ctx, filtered, clients)
+	return m.listTools(ctx, userID, filtered, clients)
 }
 
 // listTools is Tools/ToolsForServer/ToolsExcluding's shared implementation:
@@ -219,8 +334,9 @@ func (m *Manager) ToolsExcluding(ctx context.Context, skip map[string]bool) []ll
 // the background reconnect loop picks it back up; a plain application-level
 // error leaves the client in place to retry next turn, since tearing down a
 // healthy session over one transient error would cost up to a full
-// reconnect cycle for no reason.
-func (m *Manager) listTools(ctx context.Context, order []string, clients map[string]Client) []llm.ToolDef {
+// reconnect cycle for no reason. userID resolves eviction back to the right
+// clientKey for an OAuth-gated server.
+func (m *Manager) listTools(ctx context.Context, userID string, order []string, clients map[string]Client) []llm.ToolDef {
 	var out []llm.ToolDef
 	for _, name := range order {
 		c, ok := clients[name]
@@ -231,7 +347,7 @@ func (m *Manager) listTools(ctx context.Context, order []string, clients map[str
 		if err != nil {
 			if errors.Is(err, ErrDisconnected) {
 				m.logger.Warn("mcp: server disconnected, dropping it until it reconnects", "server", name, "error", err)
-				m.removeClient(name, c)
+				m.removeClientKeyed(m.keyFor(name, userID), c)
 			} else {
 				m.logger.Warn("mcp: failed to list tools, will retry next turn", "server", name, "error", err)
 			}
@@ -251,7 +367,14 @@ func (m *Manager) listTools(ctx context.Context, order []string, clients map[str
 // waiting for the next Tools() call to notice, so the background reconnect
 // loop can start working on it right away.
 func (m *Manager) Call(ctx context.Context, prefixedName, argumentsJSON string) (string, error) {
-	order, clients := m.snapshot()
+	return m.CallForUser(ctx, prefixedName, argumentsJSON, "")
+}
+
+// CallForUser is Call, routed against userID's own session for an
+// OAuth-gated server — see EnsureUserSession, which the caller (executeTool)
+// must have already invoked so that session exists.
+func (m *Manager) CallForUser(ctx context.Context, prefixedName, argumentsJSON, userID string) (string, error) {
+	order, clients := m.snapshot(userID)
 
 	name, ok := serverForTool(order, prefixedName)
 	if !ok {
@@ -264,7 +387,7 @@ func (m *Manager) Call(ctx context.Context, prefixedName, argumentsJSON string) 
 	result, err := c.CallTool(ctx, strings.TrimPrefix(prefixedName, prefixedToolName(name, "")), argumentsJSON)
 	if err != nil && errors.Is(err, ErrDisconnected) {
 		m.logger.Warn("mcp: server disconnected, dropping it until it reconnects", "server", name, "error", err)
-		m.removeClient(name, c)
+		m.removeClientKeyed(m.keyFor(name, userID), c)
 	}
 	return result, err
 }
@@ -357,8 +480,8 @@ func serverForTool(order []string, prefixedName string) (string, bool) {
 // the two apart even though the wrapped error can't: only a failure that
 // arrives before checkCtx's own deadline is a genuine transport-level
 // signal worth evicting on.
-func (m *Manager) checkHealth(ctx context.Context, name string, timeout time.Duration) {
-	c, ok := m.client(name)
+func (m *Manager) checkHealth(ctx context.Context, key clientKey, timeout time.Duration) {
+	c, ok := m.clientAtKey(key)
 	if !ok {
 		return
 	}
@@ -370,12 +493,12 @@ func (m *Manager) checkHealth(ctx context.Context, name string, timeout time.Dur
 		return
 	}
 	if timedOut {
-		m.logger.Debug("mcp: health check timed out, leaving client in place", "server", name, "timeout", timeout)
+		m.logger.Debug("mcp: health check timed out, leaving client in place", "server", key.server, "user", key.userID, "timeout", timeout)
 		return
 	}
 	if errors.Is(err, ErrDisconnected) {
-		m.logger.Warn("mcp: health check found server disconnected, dropping until it reconnects", "server", name, "error", err)
-		m.removeClient(name, c)
+		m.logger.Warn("mcp: health check found server disconnected, dropping until it reconnects", "server", key.server, "user", key.userID, "error", err)
+		m.removeClientKeyed(key, c)
 	}
 }
 
@@ -390,22 +513,31 @@ func (m *Manager) checkHealth(ctx context.Context, name string, timeout time.Dur
 // already connected, each tick also runs checkHealth so a session that dies
 // with no live agent turn to notice it still gets reconnected. Callers
 // should launch this in its own goroutine — it only returns once ctx is
-// cancelled.
+// cancelled. This is the global (non-per-user) path; see EnsureUserSession
+// for the OAuth-gated per-user equivalent.
 func (m *Manager) KeepConnected(ctx context.Context, name string, baseInterval, maxInterval, attemptTimeout time.Duration, connect func(ctx context.Context) (Client, error)) {
+	m.keepConnectedKeyed(ctx, clientKey{server: name}, baseInterval, maxInterval, attemptTimeout, connect)
+}
+
+// keepConnectedKeyed is KeepConnected's shared implementation, generalized
+// to an arbitrary clientKey so both the global path (KeepConnected) and the
+// per-user path (EnsureUserSession) share one reconnect/backoff/health-check
+// loop body.
+func (m *Manager) keepConnectedKeyed(ctx context.Context, key clientKey, baseInterval, maxInterval, attemptTimeout time.Duration, connect func(ctx context.Context) (Client, error)) {
 	wait := baseInterval
 	for {
-		if m.HasClient(name) {
-			m.checkHealth(ctx, name, attemptTimeout)
+		if m.hasClientKeyed(key) {
+			m.checkHealth(ctx, key, attemptTimeout)
 		}
-		if !m.HasClient(name) {
+		if !m.hasClientKeyed(key) {
 			attemptCtx, cancel := context.WithTimeout(ctx, attemptTimeout)
 			client, err := connect(attemptCtx)
 			cancel()
 			if err != nil {
-				m.logger.Warn("mcp: failed to connect, will retry", "server", name, "error", err, "retry_in", wait)
+				m.logger.Warn("mcp: failed to connect, will retry", "server", key.server, "user", key.userID, "error", err, "retry_in", wait)
 			} else {
-				m.logger.Info("mcp: connected", "server", name)
-				m.SetClient(client)
+				m.logger.Info("mcp: connected", "server", key.server, "user", key.userID)
+				m.setClientAtKey(key, client)
 				wait = baseInterval
 			}
 		}
@@ -423,7 +555,7 @@ func (m *Manager) KeepConnected(ctx context.Context, name string, baseInterval, 
 		// forever; a healthy (or newly reconnected) server stays polled at
 		// baseInterval so eviction is noticed promptly, not after a stale
 		// multi-minute backoff left over from a previous outage.
-		if m.HasClient(name) {
+		if m.hasClientKeyed(key) {
 			wait = baseInterval
 		} else if next := wait * 2; next <= maxInterval {
 			wait = next
@@ -431,4 +563,28 @@ func (m *Manager) KeepConnected(ctx context.Context, name string, baseInterval, 
 			wait = maxInterval
 		}
 	}
+}
+
+// EnsureUserSession idempotently starts a per-user keepConnectedKeyed
+// background loop for an OAuth-gated server the first time userID's tool
+// call (or load_tool_group request, see internal/httpapi's executeTool)
+// routes to it. Uses m.bgCtx (SetBackgroundContext), NOT the caller's ctx —
+// the caller's ctx is only this one turn's/request's and would cancel a
+// freshly-started session's keepalive goroutine the moment the HTTP request
+// finishes, which must not happen: the session should outlive the turn that
+// created it. A session already running for (name, userID) is a fast no-op
+// (map lookup under the lock).
+func (m *Manager) EnsureUserSession(name, userID string, baseInterval, maxInterval, attemptTimeout time.Duration, connect func(ctx context.Context) (Client, error)) {
+	key := clientKey{server: name, userID: userID}
+
+	m.mu.Lock()
+	if m.userSessionsStarted[key] {
+		m.mu.Unlock()
+		return
+	}
+	m.userSessionsStarted[key] = true
+	bgCtx := m.bgCtx
+	m.mu.Unlock()
+
+	go m.keepConnectedKeyed(bgCtx, key, baseInterval, maxInterval, attemptTimeout, connect)
 }

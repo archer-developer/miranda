@@ -137,3 +137,17 @@ func unwrap(key, ciphertext, nonce, aad []byte) ([]byte, error) {
 	}
 	return plaintext, nil
 }
+
+// Wrap and Unwrap are the exported form of wrap/unwrap above — the same
+// AES-256-GCM primitives, usable by any package that needs the identical
+// encrypt-at-rest shape without duplicating crypto code (e.g. internal/oauth2's
+// refresh-token encryption — see docs/adr/oauth2-layer.md). Kept as thin
+// exported wrappers rather than renaming wrap/unwrap themselves, so every
+// existing call site inside this package is untouched.
+func Wrap(key, plaintext, aad []byte) (ciphertext, nonce []byte, err error) {
+	return wrap(key, plaintext, aad)
+}
+
+func Unwrap(key, ciphertext, nonce, aad []byte) ([]byte, error) {
+	return unwrap(key, ciphertext, nonce, aad)
+}

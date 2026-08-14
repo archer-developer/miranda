@@ -16,6 +16,7 @@ import (
 	"github.com/archer-developer/miranda/internal/keyring"
 	"github.com/archer-developer/miranda/internal/mcp"
 	"github.com/archer-developer/miranda/internal/memory"
+	"github.com/archer-developer/miranda/internal/oauth2"
 	"github.com/archer-developer/miranda/internal/schedule"
 	"github.com/archer-developer/miranda/internal/telegram"
 	"github.com/archer-developer/miranda/internal/tools"
@@ -53,6 +54,11 @@ const deleteScheduledTaskToolName = "delete_scheduled_task"
 // docs/adr/lazy-mcp-tool-loading.md.
 const loadToolGroupToolName = "load_tool_group"
 
+// oauthAuthorizeToolName is the generic (provider-agnostic) tool that starts
+// a household member's OAuth2 authorization for a third-party MCP server —
+// see docs/adr/oauth2-layer.md.
+const oauthAuthorizeToolName = "oauth_authorize"
+
 // ReservedToolNames returns every name Miranda's own agent loop can
 // advertise as a tool: every hardcoded built-in above, plus internal/tools'
 // fixed tavily_web_search/tavily_web_fetch names — regardless of whether
@@ -77,6 +83,7 @@ func ReservedToolNames() []string {
 		listScheduledTasksToolName,
 		deleteScheduledTaskToolName,
 		loadToolGroupToolName,
+		oauthAuthorizeToolName,
 		tools.WebSearchToolName,
 		tools.WebFetchToolName,
 	}
@@ -255,6 +262,29 @@ type Orchestrator struct {
 	// exactly as before this feature existed. See
 	// docs/adr/lazy-mcp-tool-loading.md.
 	lazyServerDescriptions map[string]string
+	// oauth is set via SetOAuth; nil means no MCP server can be OAuth-gated —
+	// the oauth_authorize tool is never offered and executeTool's
+	// OAuthProvider branch (see MCPServerExtension) is always skipped. See
+	// docs/adr/oauth2-layer.md.
+	oauth *oauth2.Service
+	// oauthReconnect/oauthMaxReconnect/oauthConnectTimeout tune
+	// EnsureUserSession's per-user background reconnect loop — set together
+	// with oauth via SetOAuth, mirroring the same three knobs cmd/miranda
+	// already uses for the global MCP KeepConnected loops.
+	oauthReconnect, oauthMaxReconnect, oauthConnectTimeout time.Duration
+}
+
+// SetOAuth wires in the optional OAuth2 authorization layer (see
+// internal/oauth2, docs/adr/oauth2-layer.md), mirroring SetKeyring/
+// SetSchedule's post-construction style — call once from cmd/miranda, only
+// when config.OAuthConfig.Enabled. Leaving it uncalled (the default) means
+// the oauth_authorize tool is never offered and no MCP server can be
+// OAuth-gated, regardless of what MCPServerExtension.OAuthProvider says.
+func (o *Orchestrator) SetOAuth(svc *oauth2.Service, reconnectInterval, maxReconnectInterval, connectTimeout time.Duration) {
+	o.oauth = svc
+	o.oauthReconnect = reconnectInterval
+	o.oauthMaxReconnect = maxReconnectInterval
+	o.oauthConnectTimeout = connectTimeout
 }
 
 // SetTelegram wires the optional send_telegram tool in, mirroring
@@ -357,6 +387,20 @@ type MCPServerExtension struct {
 	// file-serving MCP server (the sandbox's download_file included) share
 	// this one mechanism.
 	FilesEndpoint *config.FileServerEndpoint
+	// OAuthProvider names the oauth2.Provider (config.OAuthConfig.Providers
+	// entry) this server's tool calls must be authorized against, per
+	// household member independently — "" (the default) means this server
+	// is unaffected by the OAuth2 layer, and its existing static TokenEnv
+	// bearer token (or no auth at all) behaves exactly as before. See
+	// config.MCPServer.OAuthProvider, docs/adr/oauth2-layer.md.
+	OAuthProvider string
+	// MCPServerURL duplicates config.MCPServer.URL for an OAuth-gated server
+	// only, so executeTool can build a fresh per-user mcp.Connect call
+	// without Orchestrator holding the full config.MCPServer slice just for
+	// this one field — meaningless (and unused) for any non-OAuth-gated
+	// server, whose single global connection mcp.Manager already owns from
+	// cmd/miranda's connectMCP.
+	MCPServerURL string
 }
 
 // SetMCPServerExtensions wires in the static, config-derived set of
@@ -478,7 +522,7 @@ func (o *Orchestrator) Handle(ctx context.Context, req InputRequest) (InputRespo
 	messages = append(messages, llm.Message{Role: llm.RoleUser, Content: userContent, Parts: imageParts})
 
 	control := &turnControl{}
-	tools := o.availableTools(ctx, control)
+	tools := o.availableTools(ctx, userID, control)
 	finalText, providerUsed, err := o.runAgentLoop(ctx, userID, convID, req.Source, messages, tools, control)
 	if err != nil {
 		// An earlier tool-call iteration in this same loop may have already

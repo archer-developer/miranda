@@ -265,7 +265,7 @@ func TestOrchestrator_MCPToolCollidingWithWebToolNameIsDroppedNotShadowed(t *tes
 	o, _, _ := newTestOrchestrator(t, provider, collidingMCP)
 	o.SetWebTools([]tools.Tool{&fakeWebTool{name: "web_search"}})
 
-	defs := o.availableTools(context.Background(), &turnControl{})
+	defs := o.availableTools(context.Background(), "", &turnControl{})
 
 	var names []string
 	for _, d := range defs {
@@ -307,7 +307,7 @@ func TestOrchestrator_LazyMCPServerToolsHiddenBehindStub(t *testing.T) {
 	o, _, _ := newTestOrchestrator(t, provider, diary)
 	o.SetLazyMCPServers(map[string]string{"diary": "Personal diary: notes, thoughts, events."})
 
-	names := toolDefNames(o.availableTools(context.Background(), &turnControl{}))
+	names := toolDefNames(o.availableTools(context.Background(), "", &turnControl{}))
 
 	require.Contains(t, names, loadToolGroupToolName)
 	require.NotContains(t, names, "diary_add_entry")
@@ -333,7 +333,7 @@ func TestOrchestrator_LoadedLazyGroupIsNotFetchedTwice(t *testing.T) {
 	_, replay, unsubscribe := h.Subscribe(nil)
 	defer unsubscribe()
 
-	defs := o.availableTools(context.Background(), &turnControl{loadedGroups: map[string]bool{"diary": true}})
+	defs := o.availableTools(context.Background(), "", &turnControl{loadedGroups: map[string]bool{"diary": true}})
 
 	count := 0
 	for _, d := range defs {

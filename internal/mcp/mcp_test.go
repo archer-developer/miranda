@@ -223,7 +223,7 @@ func TestManager_RemoveClientOnlyEvictsMatchingInstance(t *testing.T) {
 
 	// A caller that only ever observed `original` — not the replacement —
 	// finally notices it failed and tries to evict it by name.
-	m.removeClient("ha", original)
+	m.removeClientKeyed(clientKey{server: "ha"}, original)
 
 	require.True(t, m.HasClient("ha"), "removeClient must not evict a different client instance registered under the same name")
 	require.False(t, replacement.IsClosed(), "the live replacement must survive a stale caller's eviction of a different instance")
@@ -250,7 +250,7 @@ func TestManager_CheckHealthDoesNotEvictOnBareTimeout(t *testing.T) {
 		WithListToolsBlockingOn(block)
 	m.SetClient(slow)
 
-	m.checkHealth(context.Background(), "ha", 20*time.Millisecond)
+	m.checkHealth(context.Background(), clientKey{server: "ha"}, 20*time.Millisecond)
 
 	require.True(t, m.HasClient("ha"), "a health check that merely timed out must not evict an otherwise-healthy client")
 	require.False(t, slow.IsClosed())

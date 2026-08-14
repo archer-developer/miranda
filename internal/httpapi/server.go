@@ -55,15 +55,16 @@ func detachedTurnContext(parent context.Context) (context.Context, context.Cance
 // Server is Miranda's HTTP server: the unified command interface, the
 // WebSocket log stream, and (if provided) the embedded web UI.
 type Server struct {
-	mux          *http.ServeMux
-	orchestrator *Orchestrator
-	hub          *hub.Hub
-	authToken    string
-	users        *users.Registry
-	sessions     *session.Store
-	logger       *slog.Logger
-	telegram     *TelegramWebhook // set via SetTelegramWebhook; nil means the channel is disabled
-	upload       *uploadConfig    // set via SetUploadHandler; nil means POST /api/upload, GET /files/{id}, and GET /api/files/{file_id} are not registered
+	mux           *http.ServeMux
+	orchestrator  *Orchestrator
+	hub           *hub.Hub
+	authToken     string
+	users         *users.Registry
+	sessions      *session.Store
+	logger        *slog.Logger
+	telegram      *TelegramWebhook // set via SetTelegramWebhook; nil means the channel is disabled
+	upload        *uploadConfig    // set via SetUploadHandler; nil means POST /api/upload, GET /files/{id}, and GET /api/files/{file_id} are not registered
+	oauthCallback *OAuthCallback   // set via SetOAuthCallback; nil means the OAuth2 callback route is not registered
 }
 
 // uploadConfig holds the static configuration for the upload/download

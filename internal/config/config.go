@@ -29,6 +29,7 @@ type Config struct {
 	Telegram   TelegramConfig   `yaml:"telegram"`
 	Schedule   ScheduleConfig   `yaml:"schedule"`
 	FileUpload FileUploadConfig `yaml:"file_upload"`
+	OAuth      OAuthConfig      `yaml:"oauth"`
 	Users      []UserConfig     `yaml:"users"`
 }
 
@@ -111,6 +112,12 @@ type StorageConfig struct {
 	// latency. Only relevant when gemini_tts is the configured primary or
 	// fallback TTS provider.
 	TTSCacheDir string `yaml:"tts_cache_dir"`
+	// OAuthSQLitePath is a separate SQLite file for encrypted OAuth2
+	// access/refresh tokens (internal/oauth2) — kept apart from other stores
+	// for the same isolation reasoning as KeyringSQLitePath: losing it is
+	// data-loss-equivalent to every household member having to re-authorize
+	// every OAuth-gated MCP server. Only used when OAuthConfig.Enabled.
+	OAuthSQLitePath string `yaml:"oauth_sqlite_path"`
 }
 
 // WebAuthnConfig controls optional FIDO2/passkey ("biometric") login,
@@ -512,6 +519,21 @@ type MCPServer struct {
 	// description when Lazy is true. Required when Lazy is true (checked at
 	// config-load time by validateLazyMCPServers); meaningless otherwise.
 	Description string `yaml:"description,omitempty"`
+	// OAuthProvider names the OAuthConfig.Providers entry this server's tool
+	// calls must be authorized against, per household member independently
+	// — each user connects their own account (see internal/oauth2,
+	// docs/adr/oauth2-layer.md), rather than one shared TokenEnv bearer
+	// token for the whole server. "" (the default) means this server is
+	// unaffected — its existing TokenEnv (or no auth) behaves exactly as
+	// before. Mutually exclusive with TokenEnv, and requires Lazy: true —
+	// both enforced by validateOAuthServers. The reason for the Lazy
+	// requirement: an OAuth-gated server's per-user MCP session is only
+	// ever brought up in response to the model calling load_tool_group for
+	// it, which is the one place httpapi.Orchestrator.executeTool knows
+	// which user is asking before any of that server's real tools could be
+	// called — a server whose tools were always shown up front would have
+	// no such trigger point.
+	OAuthProvider string `yaml:"oauth_provider,omitempty"`
 }
 
 // defaultEncryptionKeyArgName is the tool-call argument name used for a
@@ -577,6 +599,68 @@ func (s MCPServer) FilesEndpoint() (filesURL, token string, err error) {
 // MCPConfig lists the MCP servers (HA + others) available as tool sources.
 type MCPConfig struct {
 	Servers []MCPServer `yaml:"servers"`
+}
+
+// OAuthConfig controls the optional, generic OAuth2 authorization layer
+// (internal/oauth2, docs/adr/oauth2-layer.md) — the oauth_authorize tool,
+// the GET {public_base_url}{callback_path}/{provider} callback route, and
+// every configured Provider. Reusable, unmodified, by any future OAuth2-
+// gated MCP server: adding one entry here plus one
+// MCPServer.OAuthProvider reference is all a new integration needs, no new
+// Go code. Opt-in (Enabled defaults false), same posture as
+// Telegram/WebAuthn — PublicBaseURL is inherently deployment-specific.
+type OAuthConfig struct {
+	Enabled bool `yaml:"enabled"`
+	// PublicBaseURL is the public HTTPS origin the OAuth provider redirects
+	// the user's browser back to after consent — Miranda does not
+	// terminate TLS itself, front it with a reverse proxy (same posture as
+	// Telegram/FileUpload/GeminiTTS's own PublicBaseURL fields).
+	PublicBaseURL string `yaml:"public_base_url"`
+	// CallbackPath is the path prefix the provider's own name is appended
+	// to, e.g. "/oauth/callback" -> "/oauth/callback/google_calendar".
+	// Must match the redirect URI registered with the provider exactly.
+	CallbackPath string `yaml:"callback_path"`
+	// MasterKeyEnv names the environment variable holding the
+	// base64-encoded 32-byte AES-256 key refresh/access tokens are
+	// encrypted at rest under (see internal/oauth2.LoadMasterKey) — never
+	// in config.yaml, same *_env convention as every other secret in this
+	// codebase. Generate one with `openssl rand -base64 32`.
+	MasterKeyEnv string          `yaml:"master_key_env"`
+	Providers    []OAuthProvider `yaml:"providers"`
+}
+
+// OAuthProvider is one third-party identity provider a household member can
+// authorize Miranda against — Google first, more later without any new Go
+// code (see OAuthConfig's doc comment).
+type OAuthProvider struct {
+	// Name identifies this provider, e.g. "google_calendar" — referenced by
+	// MCPServer.OAuthProvider and by the oauth_authorize tool's provider
+	// argument.
+	Name string `yaml:"name"`
+	// Description is shown to the model/user, e.g. "Google Calendar".
+	Description string `yaml:"description"`
+	// AuthorizeURL is the provider's authorization endpoint, e.g.
+	// https://accounts.google.com/o/oauth2/v2/auth.
+	AuthorizeURL string `yaml:"authorize_url"`
+	// TokenURL is the provider's token endpoint, e.g.
+	// https://oauth2.googleapis.com/token.
+	TokenURL string `yaml:"token_url"`
+	// ClientIDEnv/ClientSecretEnv name the environment variables holding
+	// this provider's OAuth2 client credentials — never in config.yaml,
+	// same *_env convention as every other secret. ClientSecretEnv may be
+	// left empty for a public/PKCE-only client.
+	ClientIDEnv     string   `yaml:"client_id_env"`
+	ClientSecretEnv string   `yaml:"client_secret_env,omitempty"`
+	Scopes          []string `yaml:"scopes"`
+	// PKCE enables RFC 7636 code_verifier/code_challenge on the authorize
+	// and token-exchange requests. Google's Calendar MCP server requires
+	// this (OAuth 2.1).
+	PKCE bool `yaml:"pkce"`
+	// ExtraAuthorizeParams are appended to the authorize URL verbatim,
+	// e.g. {"access_type": "offline", "prompt": "consent"} — required for
+	// Google to issue a refresh_token on every consent, not just the first
+	// ever.
+	ExtraAuthorizeParams map[string]string `yaml:"extra_authorize_params,omitempty"`
 }
 
 // TavilyConfig configures Miranda's own web_search/web_fetch tools
@@ -758,6 +842,7 @@ func Default() Config {
 			ScheduleSQLitePath: "./data/schedule.db",
 			KeyringSQLitePath:  "./data/keyring.db",
 			TTSCacheDir:        "./data/storage",
+			OAuthSQLitePath:    "./data/oauth.db",
 		},
 		Logging: LoggingConfig{
 			Dir:        "./logs",
@@ -913,6 +998,13 @@ func Default() Config {
 			MaxFileSizeBytes:       50 * 1024 * 1024, // 50 MB
 			DownloadRecordTTLHours: 720,              // 30 days
 		},
+		// Disabled by default — see OAuthConfig's doc comment for why
+		// there's no safe auto-detected PublicBaseURL, same posture as
+		// Telegram/WebAuthn.
+		OAuth: OAuthConfig{
+			Enabled:      false,
+			CallbackPath: "/oauth/callback",
+		},
 		// No default Users: web UI login is mandatory and fails closed until
 		// config.yaml lists at least one account (see internal/users).
 		Users: nil,
@@ -1014,6 +1106,9 @@ func Load(paths ...string) (Config, error) {
 	if err := validateLazyMCPServers(cfg.MCP.Servers); err != nil {
 		return cfg, err
 	}
+	if err := validateOAuthServers(cfg); err != nil {
+		return cfg, err
+	}
 	return cfg, nil
 }
 
@@ -1081,6 +1176,56 @@ func validateLazyMCPServers(servers []MCPServer) error {
 		if s.Lazy && s.Description == "" {
 			return fmt.Errorf("config: mcp.servers %q has lazy=true but description is empty", s.Name)
 		}
+	}
+	return nil
+}
+
+// validateOAuthServers checks every consistency requirement between
+// mcp.servers[].oauth_provider and oauth.providers (see MCPServer.OAuthProvider,
+// OAuthConfig's doc comments):
+//   - an OAuth-gated server must not also set TokenEnv — the two auth
+//     mechanisms are mutually exclusive, and a config that sets both is
+//     almost certainly a leftover from converting one to the other.
+//   - an OAuth-gated server must be Lazy — see OAuthProvider's doc comment
+//     for why a non-lazy server would have no listing-time trigger point to
+//     bring up its per-user session before the model needs its schema.
+//   - an OAuth-gated server's OAuthProvider must name a real oauth.providers
+//     entry.
+//   - oauth.providers entries must have unique names, and each must supply
+//     the fields ExchangeCode/RefreshAccessToken need (AuthorizeURL,
+//     TokenURL, ClientIDEnv, at least one Scope).
+//   - oauth.enabled requires PublicBaseURL, CallbackPath, and MasterKeyEnv
+//     to all be set — the three inputs internal/oauth2.NewService/
+//     LoadMasterKey need to actually run.
+func validateOAuthServers(cfg Config) error {
+	providerNames := make(map[string]bool, len(cfg.OAuth.Providers))
+	for _, p := range cfg.OAuth.Providers {
+		if providerNames[p.Name] {
+			return fmt.Errorf("config: oauth.providers has more than one entry named %q", p.Name)
+		}
+		providerNames[p.Name] = true
+		if p.AuthorizeURL == "" || p.TokenURL == "" || p.ClientIDEnv == "" || len(p.Scopes) == 0 {
+			return fmt.Errorf("config: oauth.providers %q must set authorize_url, token_url, client_id_env, and at least one scope", p.Name)
+		}
+	}
+
+	for _, s := range cfg.MCP.Servers {
+		if s.OAuthProvider == "" {
+			continue
+		}
+		if s.TokenEnv != "" {
+			return fmt.Errorf("config: mcp.servers %q sets both token_env and oauth_provider — these are mutually exclusive", s.Name)
+		}
+		if !s.Lazy {
+			return fmt.Errorf("config: mcp.servers %q has oauth_provider set but lazy is not true — an OAuth-gated server must be lazy", s.Name)
+		}
+		if !providerNames[s.OAuthProvider] {
+			return fmt.Errorf("config: mcp.servers %q references unknown oauth_provider %q", s.Name, s.OAuthProvider)
+		}
+	}
+
+	if cfg.OAuth.Enabled && (cfg.OAuth.PublicBaseURL == "" || cfg.OAuth.CallbackPath == "" || cfg.OAuth.MasterKeyEnv == "") {
+		return fmt.Errorf("config: oauth.enabled is true but public_base_url, callback_path, or master_key_env is empty")
 	}
 	return nil
 }

@@ -15,6 +15,8 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
+	"strings"
 )
 
 // DefaultMaxResponseBytes bounds how much of a response body PostJSON reads
@@ -42,6 +44,34 @@ func PostJSON(ctx context.Context, client *http.Client, url string, headers map[
 		return 0, nil, fmt.Errorf("httpx: build request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
+	for k, v := range headers {
+		req.Header.Set(k, v)
+	}
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return 0, nil, fmt.Errorf("httpx: do request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	body, err = io.ReadAll(io.LimitReader(resp.Body, maxBytes))
+	if err != nil {
+		return resp.StatusCode, nil, fmt.Errorf("httpx: read response body: %w", err)
+	}
+	return resp.StatusCode, body, nil
+}
+
+// PostForm is PostJSON's application/x-www-form-urlencoded counterpart —
+// OAuth2 token endpoints (RFC 6749 §4.1.3/§6, including Google's) reject a
+// JSON body for the authorization_code/refresh_token grants, unlike every
+// other outbound call this codebase otherwise makes. Same size-capped
+// response read as PostJSON.
+func PostForm(ctx context.Context, client *http.Client, url_ string, headers map[string]string, values url.Values, maxBytes int64) (status int, body []byte, err error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url_, strings.NewReader(values.Encode()))
+	if err != nil {
+		return 0, nil, fmt.Errorf("httpx: build request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	for k, v := range headers {
 		req.Header.Set(k, v)
 	}
