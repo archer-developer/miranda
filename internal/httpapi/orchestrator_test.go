@@ -731,6 +731,35 @@ func TestOrchestrator_HAAssistTurnAlwaysStopsWhateverWasPlayingFirst(t *testing.
 	require.NoError(t, err)
 }
 
+// newTestOrchestratorWithUsers is like newTestOrchestrator but also wires up
+// a users.Registry from configs, for tests that need speaker-identity or
+// household-roster resolution (see buildSystemPrompt) without the rest of
+// newTestOrchestratorWithTelegram's Telegram-specific setup.
+func newTestOrchestratorWithUsers(t *testing.T, provider *llmtest.FakeProvider, configs []config.UserConfig) *Orchestrator {
+	t.Helper()
+
+	registry, err := users.NewRegistry(configs)
+	require.NoError(t, err)
+
+	r, err := router.New([]llm.Provider{provider}, selfEscalation(provider.Name()), "")
+	require.NoError(t, err)
+
+	h, err := history.Open(filepath.Join(t.TempDir(), "miranda.db"))
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = h.Close() })
+
+	mem, err := memory.New(t.TempDir())
+	require.NoError(t, err)
+
+	return NewOrchestrator(
+		r, mcp.NewManager(nil), h, mem, nil, hub.New(100), registry,
+		config.AgentConfig{},
+		config.MemoryConfig{ExplicitTool: true},
+		config.TTSConfig{},
+		100, "debug",
+	)
+}
+
 // newTestOrchestratorWithTelegram is like newTestOrchestrator but also wires
 // up a users.Registry and a telegram.Sender backed by a fake Bot API server,
 // so tests can exercise the send_telegram tool end to end. sentTo records

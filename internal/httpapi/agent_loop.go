@@ -435,6 +435,17 @@ func (o *Orchestrator) resolveConversation(ctx context.Context, userID, source s
 // session, never as a model-supplied argument — this is only for
 // external/MCP tools whose schema asks the model for one explicitly.
 //
+// The rest of the household is spelled out too, not just the speaker: some
+// MCP tools take a *target* user id distinct from the caller — e.g.
+// miranda-medical-card's medical.ask "subjectId" ("whose data the question
+// is about, if not the caller's own"). Asked about a third party by name
+// ("what's Sasha's cholesterol?"), the model has nothing but that name to
+// go on if the mapping isn't in context, and has been observed inventing a
+// plausible-looking userID instead of leaving the field unset or asking —
+// e.g. subjectId: "sasha" for a household where the actual username is
+// "archer" (full_name "Саша"). Listing every configured user's username
+// and display name up front removes the need to guess.
+//
 // The return value is split into two pieces instead of one concatenated
 // string — stable (persona, speaker identity, shared+personal memory) and
 // volatile (the current time, which changes on essentially every turn — see
@@ -451,8 +462,14 @@ func (o *Orchestrator) buildSystemPrompt(userID, sharedMemory, userMemory string
 	stable = o.baseSystemPrompt
 	if name := o.currentUserName(userID); name != "" {
 		stable += "\n\nСейчас с тобой разговаривает: " + name + " (технический userID: \"" + userID + "\"). " +
-			"Если вызываешь MCP-тул с параметром user или user_id (yazio, diary и любой другой multi-tenant тул) — " +
+			"Если вызываешь MCP-тул с параметром user или userId (yazio, diary и любой другой multi-tenant тул) — " +
 			"передавай туда именно эту строку, \"" + userID + "\", а не имя " + name + " и не чьё-либо ещё имя из контекста."
+	}
+	if roster := o.householdRoster(); roster != "" {
+		stable += "\n\nВсе пользователи Miranda в этом доме (userID — имя):\n" + roster +
+			"\nЕсли тул просит указать другого человека, а не тебя самого (например, \"subjectId\" у medical.ask — " +
+			"\"чьи это данные, если не самого вызывающего\"), используй userID из этого списка, а не имя " +
+			"и не выдумывай значение сам. Если человек, о котором спрашивают, не входит в список — уточни у собеседника."
 	}
 	if sharedMemory != "" {
 		stable += "\n\nShared household memory:\n" + sharedMemory
@@ -469,7 +486,7 @@ func (o *Orchestrator) buildSystemPrompt(userID, sharedMemory, userMemory string
 	// defeat that cache's reuse on every single turn — see this function's
 	// own doc comment above.
 	now := time.Now().In(o.userLocation(userID))
-	volatile = "Текущее время пользователя: " + now.Format("2006-01-02 15:04 MST") + "."
+	volatile = "Current local time: " + now.Format("2006-01-02 15:04 MST") + "."
 
 	return stable, volatile
 }
@@ -547,6 +564,31 @@ func (o *Orchestrator) currentUserName(userID string) string {
 		return u.DisplayName()
 	}
 	return userID
+}
+
+// householdRoster renders every configured user as one "username — name"
+// line per Registry.All (already sorted by username, so the block is
+// identical across turns and doesn't defeat the stable block's prompt-cache
+// reuse — see buildSystemPrompt). Returns "" when there's no registry or no
+// configured users, so callers can skip the surrounding paragraph entirely
+// instead of emitting an empty list.
+func (o *Orchestrator) householdRoster() string {
+	if o.users == nil {
+		return ""
+	}
+	all := o.users.All()
+	if len(all) == 0 {
+		return ""
+	}
+	var b strings.Builder
+	for _, u := range all {
+		b.WriteString("- ")
+		b.WriteString(u.Username)
+		b.WriteString(" — ")
+		b.WriteString(u.DisplayName())
+		b.WriteString("\n")
+	}
+	return b.String()
 }
 
 // userLocation returns the configured IANA timezone for userID, or time.Local

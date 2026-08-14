@@ -90,6 +90,19 @@ func TestResolveByTelegramName_MatchesRegardlessOfAtPrefixOrCase(t *testing.T) {
 	require.False(t, ok)
 }
 
+func TestAll_SortedByUsernameRegardlessOfConfigOrder(t *testing.T) {
+	r, err := NewRegistry([]config.UserConfig{
+		{Username: "sasha", PasswordHash: "x", FullName: "Саша"},
+		{Username: "anna", PasswordHash: "x", FullName: "Аня"},
+	})
+	require.NoError(t, err)
+
+	all := r.All()
+	require.Len(t, all, 2)
+	require.Equal(t, "anna", all[0].Username)
+	require.Equal(t, "sasha", all[1].Username)
+}
+
 func TestResolveByDisplayName_MatchesUsernameOrFullName(t *testing.T) {
 	r, err := NewRegistry([]config.UserConfig{
 		{Username: "alex", PasswordHash: mustHash(t, "555"), FullName: "Alex Smith"},

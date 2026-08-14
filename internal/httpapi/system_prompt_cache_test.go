@@ -7,12 +7,15 @@ package httpapi
 
 import (
 	"context"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/require"
 
 	llm "github.com/archer-developer/miranda-llm"
 	"github.com/archer-developer/miranda-llm/llmtest"
+
+	"github.com/archer-developer/miranda/internal/config"
 )
 
 // TestOrchestrator_SystemPromptSentAsTwoMessagesStableFirst guards the
@@ -41,6 +44,30 @@ func TestOrchestrator_SystemPromptSentAsTwoMessagesStableFirst(t *testing.T) {
 		"the stable (first) block must never contain the per-turn-volatile time")
 	require.Contains(t, messages[0].Content, "alex",
 		"the stable block still carries speaker identity")
+}
+
+// TestOrchestrator_SystemPromptListsHouseholdRoster guards the fix for the
+// medical.ask "subjectId" hallucination: asked about a third household
+// member by name, the model has no way to know that member's username
+// unless the full roster (not just the current speaker) is spelled out in
+// the stable system block. Sorted by username, not config order, so the
+// block — and its cacheability — doesn't depend on config.yaml's list order.
+func TestOrchestrator_SystemPromptListsHouseholdRoster(t *testing.T) {
+	provider := llmtest.New("local", llmtest.Response{Text: "Привет!"})
+	o := newTestOrchestratorWithUsers(t, provider, []config.UserConfig{
+		{Username: "archer", PasswordHash: "x", FullName: "Саша"},
+		{Username: "anna", PasswordHash: "x", FullName: "Аня"},
+	})
+
+	_, err := o.Handle(context.Background(), InputRequest{Source: "cli", UserID: "archer", Text: "привет"})
+	require.NoError(t, err)
+
+	require.Len(t, provider.Requests, 1)
+	stable := provider.Requests[0].Messages[0].Content
+	require.Contains(t, stable, "anna — Аня")
+	require.Contains(t, stable, "archer — Саша")
+	require.Less(t, strings.Index(stable, "anna — Аня"), strings.Index(stable, "archer — Саша"),
+		"roster must be sorted by username (anna before archer), not config order")
 }
 
 // TestOrchestrator_MemoryReadOncePerConversation guards conversationMemory:

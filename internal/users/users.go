@@ -7,6 +7,7 @@ package users
 
 import (
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 
@@ -135,6 +136,20 @@ func (r *Registry) Empty() bool {
 func (r *Registry) Get(username string) (User, bool) {
 	u, ok := r.byUsername[username]
 	return u, ok
+}
+
+// All returns every configured user, sorted by Username for a stable,
+// deterministic order — used to list the household in the system prompt
+// (see httpapi.Orchestrator.buildSystemPrompt), where a non-deterministic
+// order (map iteration is randomized in Go) would defeat the stable block's
+// prompt-cache reuse across turns for no benefit.
+func (r *Registry) All() []User {
+	all := make([]User, 0, len(r.byUsername))
+	for _, u := range r.byUsername {
+		all = append(all, u)
+	}
+	sort.Slice(all, func(i, j int) bool { return all[i].Username < all[j].Username })
+	return all
 }
 
 // Authenticate checks a login attempt against the configured password hash.
