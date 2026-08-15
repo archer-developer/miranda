@@ -616,16 +616,11 @@ export function mount(container) {
              beside it, so it stays glued to the bottom of the scrolling
              thread no matter how far up the user has scrolled through
              history — the standard pattern for an always-visible chat
-             input bar. Note this placement does NOT, on its own, fix the
-             on-screen-keyboard gap (a prior version of this comment claimed
-             it did): the real cause of that bug turned out to be iOS
-             forcing a genuine window.scrollY change to reveal the focused
-             textarea, bypassing overflow:hidden entirely — fixed here via
-             the 'resetScroll' listener in index.html's <head> script, not
-             via anything about the composer's own positioning. See that
-             script's comment for the full story. backdrop-blur matches the
-             header (see index.html) since this bar genuinely overlaps
-             scrolled message content instead of sitting beside it. -->
+             input bar. The on-screen-keyboard gap fix lives elsewhere
+             (index.html's <head> script, 'resetScroll') and is unrelated to
+             this placement. backdrop-blur matches the header (see
+             index.html) since this bar genuinely overlaps scrolled message
+             content instead of sitting beside it. -->
         <div class="sticky bottom-0 border-t border-(--color-border) bg-(--color-bg)/80 backdrop-blur supports-[backdrop-filter]:bg-(--color-bg)/60" id="chat-composer">
           <!-- pb-[max(0.75rem,env(safe-area-inset-bottom))]: on an installed
                iOS PWA (viewport-fit=cover in index.html's <head>) the inset

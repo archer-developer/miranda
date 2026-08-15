@@ -90,12 +90,10 @@
 
       // Cancels the actual document scroll iOS forces when a focused input
       // (the chat composer's textarea) would otherwise sit under the
-      // keyboard: confirmed on-device that this is a real window.scrollY
-      // change, not just visual-viewport panning (a position:fixed debug
-      // marker scrolled off the top of the screen when the keyboard
-      // opened), and html/body's overflow-hidden (see <body>'s own
-      // comment) does nothing to stop it — that CSS lock only blocks
-      // user-gesture/programmatic scrolling, not this native
+      // keyboard: this is a real window.scrollY change, not just
+      // visual-viewport panning, and html/body's overflow-hidden (see
+      // <body>'s own comment) does nothing to stop it — that CSS lock only
+      // blocks user-gesture/programmatic scrolling, not this native
       // scroll-into-view behavior, which operates beneath it. Once
       // window.scrollY is forced back to 0, the shell (sized to
       // --app-height, i.e. the actual visible area above the keyboard)
@@ -190,28 +188,19 @@
      scroll-driven toolbar nor this gesture-bar inset bug, so both of these
      are no-ops there.
 
-     A third, on-screen-keyboard gap took two wrong turns before landing on
-     the real cause. First tried as a body-level fix (position: fixed;
-     inset: 0 on <body>): made it worse on real iOS, since fixed
-     positioning doesn't reliably track whatever WebKit was doing there.
-     Second, suspecting the composer just needed a local scrollable
-     ancestor to satisfy the keyboard's "scroll into view" with (see
-     screens/chat.js's #chat-composer history — it's sticky inside
-     #chat-scroll for unrelated, still-valid reasons: it's the standard way
-     to keep a composer glued to the bottom of a scrolling thread), but the
-     gap persisted identically — proof this was never about the composer's
-     position at all. An on-device debug overlay (a position: fixed marker
-     that visibly scrolled off the top of the screen when the keyboard
-     opened) confirmed the actual cause: iOS was forcing a real
-     window.scrollY change to bring the focused textarea into view, and
-     this overflow-hidden lock does nothing to stop it — it only blocks
-     user-gesture/programmatic scrolling, not this native
-     scroll-into-view behavior, which operates beneath it. The real fix is
-     the 'resetScroll' listener in the <head> script above, which forces
-     window.scrollY back to 0 on every scroll/resize/focusin — once
-     nothing is left to scroll the page, the shell (already correctly
-     sized to --app-height, the true visible area above the keyboard)
-     just stays where it was laid out. -->
+     A third, on-screen-keyboard gap is fixed by the 'resetScroll' listener
+     in the <head> script above, not by anything at this body level (fixed
+     positioning was tried here first and made things worse on real iOS).
+     The actual cause: focusing the composer's textarea makes iOS force a
+     real window.scrollY change to bring it above the keyboard, and this
+     overflow-hidden lock does nothing to stop it — it only blocks
+     user-gesture/programmatic scrolling, not this native scroll-into-view
+     behavior, which operates beneath it. resetScroll forces window.scrollY
+     back to 0 on every scroll/resize/focusin; once nothing is left to
+     scroll the page, the shell (already correctly sized to --app-height,
+     the true visible area above the keyboard) just stays where it was
+     laid out. See screens/chat.js's #chat-composer comment for why it's
+     sticky inside #chat-scroll — unrelated to this fix. -->
 <body class="overflow-hidden bg-(--color-bg) text-(--color-text) antialiased" style="height: var(--app-height, 100dvh)">
   <a href="#app" class="sr-only focus-visible:not-sr-only focus-visible:fixed focus-visible:left-4 focus-visible:top-4 focus-visible:z-50 focus-visible:rounded-lg focus-visible:bg-(--color-accent) focus-visible:px-4 focus-visible:py-2 focus-visible:text-sm focus-visible:font-medium focus-visible:text-white">
     {{.Strings.skip_to_content}}
