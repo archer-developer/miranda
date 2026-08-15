@@ -11,7 +11,16 @@
        pinch-zoom — a deliberate accessibility trade-off (some users rely on
        pinch-zoom for readability), requested because it kept getting
        triggered by accident on a touch UI this dense. -->
-  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover" />
+  <!-- interactive-widget=resizes-content (Chrome/Firefox; ignored elsewhere):
+       makes the *layout* viewport itself shrink when the on-screen keyboard
+       opens, instead of only the visual viewport (the default
+       resizes-visual). Where it's honored, 100dvh and the --app-height sync
+       below end up agreeing already, so this doesn't change behavior there
+       — it's a no-JS head start for browsers that support it. Safari
+       doesn't implement this property at all (WebKit bug 259770, still
+       open); screens/chat.js's sticky #chat-composer is what makes the
+       keyboard case work correctly there. -->
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover, interactive-widget=resizes-content" />
   <title>Miranda</title>
   <meta name="theme-color" id="theme-color-meta" content="#f8fafc" />
   <script>
@@ -78,6 +87,41 @@
         window.addEventListener("resize", sync);
       }
       window.addEventListener("orientationchange", sync);
+
+      // Cancels the actual document scroll iOS forces when a focused input
+      // (the chat composer's textarea) would otherwise sit under the
+      // keyboard: confirmed on-device that this is a real window.scrollY
+      // change, not just visual-viewport panning (a position:fixed debug
+      // marker scrolled off the top of the screen when the keyboard
+      // opened), and html/body's overflow-hidden (see <body>'s own
+      // comment) does nothing to stop it — that CSS lock only blocks
+      // user-gesture/programmatic scrolling, not this native
+      // scroll-into-view behavior, which operates beneath it. Once
+      // window.scrollY is forced back to 0, the shell (sized to
+      // --app-height, i.e. the actual visible area above the keyboard)
+      // stays exactly where it was laid out, with nothing left to scroll
+      // it out from under itself.
+      function resetScroll() {
+        if (window.scrollX !== 0 || window.scrollY !== 0) window.scrollTo(0, 0);
+      }
+      window.addEventListener("scroll", resetScroll, { passive: true });
+      if (window.visualViewport) {
+        window.visualViewport.addEventListener("resize", resetScroll);
+        window.visualViewport.addEventListener("scroll", resetScroll);
+      }
+      // The forced scroll can happen a moment after focus (keyboard
+      // open animation), so a single synchronous reset on the focus event
+      // itself isn't enough — these catch it once iOS has actually settled.
+      document.addEventListener(
+        "focusin",
+        function () {
+          resetScroll();
+          setTimeout(resetScroll, 50);
+          setTimeout(resetScroll, 150);
+          setTimeout(resetScroll, 350);
+        },
+        true,
+      );
     })();
   </script>
   <link rel="icon" type="image/svg+xml" href="/static/v{{.AssetVersion}}/brand/icon.svg" />
@@ -144,7 +188,30 @@
      entirely, independent of the --app-height fix above (which addresses
      the gesture bar, not the URL bar). iOS Safari/WKWebView has neither a
      scroll-driven toolbar nor this gesture-bar inset bug, so both of these
-     are no-ops there. -->
+     are no-ops there.
+
+     A third, on-screen-keyboard gap took two wrong turns before landing on
+     the real cause. First tried as a body-level fix (position: fixed;
+     inset: 0 on <body>): made it worse on real iOS, since fixed
+     positioning doesn't reliably track whatever WebKit was doing there.
+     Second, suspecting the composer just needed a local scrollable
+     ancestor to satisfy the keyboard's "scroll into view" with (see
+     screens/chat.js's #chat-composer history — it's sticky inside
+     #chat-scroll for unrelated, still-valid reasons: it's the standard way
+     to keep a composer glued to the bottom of a scrolling thread), but the
+     gap persisted identically — proof this was never about the composer's
+     position at all. An on-device debug overlay (a position: fixed marker
+     that visibly scrolled off the top of the screen when the keyboard
+     opened) confirmed the actual cause: iOS was forcing a real
+     window.scrollY change to bring the focused textarea into view, and
+     this overflow-hidden lock does nothing to stop it — it only blocks
+     user-gesture/programmatic scrolling, not this native
+     scroll-into-view behavior, which operates beneath it. The real fix is
+     the 'resetScroll' listener in the <head> script above, which forces
+     window.scrollY back to 0 on every scroll/resize/focusin — once
+     nothing is left to scroll the page, the shell (already correctly
+     sized to --app-height, the true visible area above the keyboard)
+     just stays where it was laid out. -->
 <body class="overflow-hidden bg-(--color-bg) text-(--color-text) antialiased" style="height: var(--app-height, 100dvh)">
   <a href="#app" class="sr-only focus-visible:not-sr-only focus-visible:fixed focus-visible:left-4 focus-visible:top-4 focus-visible:z-50 focus-visible:rounded-lg focus-visible:bg-(--color-accent) focus-visible:px-4 focus-visible:py-2 focus-visible:text-sm focus-visible:font-medium focus-visible:text-white">
     {{.Strings.skip_to_content}}
