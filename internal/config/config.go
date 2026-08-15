@@ -1192,6 +1192,11 @@ func validateLazyMCPServers(servers []MCPServer) error {
 // validateOAuthServers checks every consistency requirement between
 // mcp.servers[].oauth_provider and oauth.providers (see MCPServer.OAuthProvider,
 // OAuthConfig's doc comments):
+//   - an OAuth-gated server requires oauth.enabled — cmd/miranda's connectMCP
+//     unconditionally skips connecting any server with OAuthProvider set
+//     (see its own doc comment) regardless of this flag, so leaving it false
+//     would otherwise leave the server silently, permanently unreachable
+//     with no error at startup.
 //   - an OAuth-gated server must not also set TokenEnv — the two auth
 //     mechanisms are mutually exclusive, and a config that sets both is
 //     almost certainly a leftover from converting one to the other.
@@ -1221,6 +1226,9 @@ func validateOAuthServers(cfg Config) error {
 	for _, s := range cfg.MCP.Servers {
 		if s.OAuthProvider == "" {
 			continue
+		}
+		if !cfg.OAuth.Enabled {
+			return fmt.Errorf("config: mcp.servers %q has oauth_provider set but oauth.enabled is not true — the server would never connect", s.Name)
 		}
 		if s.TokenEnv != "" {
 			return fmt.Errorf("config: mcp.servers %q sets both token_env and oauth_provider — these are mutually exclusive", s.Name)

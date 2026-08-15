@@ -60,6 +60,28 @@ mcp:
 	require.Error(t, err)
 }
 
+func TestLoad_OAuthGatedServerWithoutOAuthEnabledReturnsError(t *testing.T) {
+	path := writeConfig(t, `
+oauth:
+  providers:
+    - name: google_calendar
+      authorize_url: "https://accounts.google.com/o/oauth2/v2/auth"
+      token_url: "https://oauth2.googleapis.com/token"
+      client_id_env: "GOOGLE_OAUTH_CLIENT_ID"
+      scopes: ["calendar"]
+mcp:
+  servers:
+    - name: google_calendar
+      url: "https://calendar.example.com/mcp"
+      enabled: true
+      lazy: true
+      description: "Google Calendar"
+      oauth_provider: google_calendar
+`)
+	_, err := Load(path)
+	require.Error(t, err, "oauth.enabled defaults to false, so this server would otherwise never connect")
+}
+
 func TestLoad_OAuthGatedServerUnknownProviderReturnsError(t *testing.T) {
 	path := writeConfig(t, `
 mcp:
