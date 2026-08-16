@@ -612,33 +612,42 @@ export function mount(container) {
         <div class="mx-auto flex min-h-full max-w-3xl flex-col justify-end px-4 py-6 sm:px-6">
           <div id="chat-messages" class="flex flex-col gap-4" aria-live="polite" aria-relevant="additions"></div>
         </div>
-      </div>
-      <div class="border-t border-(--color-border) bg-(--color-bg)/70" id="chat-composer">
-        <!-- pb-[max(0.75rem,env(safe-area-inset-bottom))]: on an installed
-             iOS PWA (viewport-fit=cover in index.html's <head>) the inset
-             resolves to the home-indicator height instead of 0, so the
-             composer never sits flush against it. max() rather than adding
-             the inset on top of the form's own py-3 — summing the two would
-             double up the gap on notched devices (~46px) instead of just
-             using the larger of "the normal resting padding" and "the
-             physical inset", which is all that's actually needed; in a
-             regular browser tab (inset 0) this is identical to plain py-3. -->
-        <form id="chat-form" class="mx-auto flex max-w-3xl items-end gap-2 px-4 pt-3 pb-[max(0.75rem,env(safe-area-inset-bottom))] sm:px-6">
-          <!-- Hidden file input — triggered by the attach button or drag-and-drop. -->
-          <input type="file" id="chat-file" class="sr-only" accept="*/*" tabindex="-1" aria-hidden="true" />
-          <label for="chat-text" class="sr-only">${t("chat_placeholder", "Message Miranda…")}</label>
-          <textarea id="chat-text" rows="1" placeholder="${t("chat_placeholder", "Message Miranda…")}"
-            class="scrollbar-thin max-h-40 flex-1 resize-none rounded-xl border border-(--color-border-strong) bg-(--color-surface)/60 px-4 py-2.5 text-sm text-(--color-text) transition-colors placeholder:text-(--color-text-faint) hover:border-(--color-text-faint) focus:border-(--color-accent-emphasis) focus:outline-none focus-visible:outline-none"></textarea>
-          <button type="button" id="chat-attach" aria-label="${t("attach_button", "Attach file")}"
-            class="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl border border-(--color-border-strong) bg-(--color-surface)/60 text-(--color-text-muted) transition-colors hover:border-(--color-text-faint) hover:text-(--color-text) focus-visible:outline-none disabled:cursor-not-allowed disabled:opacity-60">
-            ${icon("paperclip", "h-4 w-4")}
-          </button>
-          <button type="submit" id="chat-send" aria-label="${t("send_button", "Send")}"
-            class="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl bg-(--color-accent) text-white transition-colors hover:bg-(--color-accent-hover) focus-visible:outline-none active:bg-(--color-accent-active) disabled:cursor-not-allowed disabled:opacity-60">
-            ${icon("send", "h-4 w-4")}
-          </button>
-        </form>
-        <p class="mx-auto hidden max-w-3xl px-4 pb-3 text-xs text-(--color-text-faint) sm:block sm:px-6">${t("chat_hint", "Enter to send · Shift+Enter for a new line")}</p>
+        <!-- #chat-composer lives *inside* #chat-scroll (sticky bottom-0), not
+             beside it, so it stays glued to the bottom of the scrolling
+             thread no matter how far up the user has scrolled through
+             history — the standard pattern for an always-visible chat
+             input bar. The on-screen-keyboard gap fix lives elsewhere
+             (index.html's <head> script, 'resetScroll') and is unrelated to
+             this placement. backdrop-blur matches the header (see
+             index.html) since this bar genuinely overlaps scrolled message
+             content instead of sitting beside it. -->
+        <div class="sticky bottom-0 border-t border-(--color-border) bg-(--color-bg)/80 backdrop-blur supports-[backdrop-filter]:bg-(--color-bg)/60" id="chat-composer">
+          <!-- pb-[max(0.75rem,env(safe-area-inset-bottom))]: on an installed
+               iOS PWA (viewport-fit=cover in index.html's <head>) the inset
+               resolves to the home-indicator height instead of 0, so the
+               composer never sits flush against it. max() rather than adding
+               the inset on top of the form's own py-3 — summing the two would
+               double up the gap on notched devices (~46px) instead of just
+               using the larger of "the normal resting padding" and "the
+               physical inset", which is all that's actually needed; in a
+               regular browser tab (inset 0) this is identical to plain py-3. -->
+          <form id="chat-form" class="mx-auto flex max-w-3xl items-end gap-2 px-4 pt-3 pb-[max(0.75rem,env(safe-area-inset-bottom))] sm:px-6">
+            <!-- Hidden file input — triggered by the attach button or drag-and-drop. -->
+            <input type="file" id="chat-file" class="sr-only" accept="*/*" tabindex="-1" aria-hidden="true" />
+            <label for="chat-text" class="sr-only">${t("chat_placeholder", "Message Miranda…")}</label>
+            <textarea id="chat-text" rows="1" placeholder="${t("chat_placeholder", "Message Miranda…")}"
+              class="scrollbar-thin max-h-40 flex-1 resize-none rounded-xl border border-(--color-border-strong) bg-(--color-surface)/60 px-4 py-2.5 text-sm text-(--color-text) transition-colors placeholder:text-(--color-text-faint) hover:border-(--color-text-faint) focus:border-(--color-accent-emphasis) focus:outline-none focus-visible:outline-none"></textarea>
+            <button type="button" id="chat-attach" aria-label="${t("attach_button", "Attach file")}"
+              class="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl border border-(--color-border-strong) bg-(--color-surface)/60 text-(--color-text-muted) transition-colors hover:border-(--color-text-faint) hover:text-(--color-text) focus-visible:outline-none disabled:cursor-not-allowed disabled:opacity-60">
+              ${icon("paperclip", "h-4 w-4")}
+            </button>
+            <button type="submit" id="chat-send" aria-label="${t("send_button", "Send")}"
+              class="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl bg-(--color-accent) text-white transition-colors hover:bg-(--color-accent-hover) focus-visible:outline-none active:bg-(--color-accent-active) disabled:cursor-not-allowed disabled:opacity-60">
+              ${icon("send", "h-4 w-4")}
+            </button>
+          </form>
+          <p class="mx-auto hidden max-w-3xl px-4 pb-3 text-xs text-(--color-text-faint) sm:block sm:px-6">${t("chat_hint", "Enter to send · Shift+Enter for a new line")}</p>
+        </div>
       </div>
     </div>`;
 
