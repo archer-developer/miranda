@@ -35,6 +35,10 @@ storage:
   # encrypted under it — back it up at least as carefully as sqlite_path,
   # not as an afterthought.
   keyring_sqlite_path: "./data/keyring.db"
+  # Separate SQLite file holding encrypted OAuth2 access/refresh tokens
+  # (internal/oauth2, docs/adr/oauth2-layer.md) — one row per (username,
+  # provider). Only used when oauth.enabled below is true.
+  oauth_sqlite_path: "./data/oauth.db"
 
 logging:
   # Mirrors everything on stdout into logging.dir/miranda.log, plus a
@@ -151,6 +155,44 @@ schedule:
   # to call. No deployment-specific secret needed, so this defaults to true.
   enabled: true
 
+# Optional generic OAuth2 authorization layer (internal/oauth2,
+# docs/adr/oauth2-layer.md) — off by default, same reasoning as webauthn/
+# telegram above: there's no safe auto-detected public_base_url. Lets
+# household members connect their own third-party account (Google Calendar
+# first) to an mcp.servers[] entry that sets oauth_provider below, via the
+# oauth_authorize tool + a callback route, instead of one shared token_env
+# bearer token for the whole server. Needs HTTPS for the callback redirect;
+# front Miranda with a reverse proxy and point public_base_url at that
+# hostname, same as telegram.public_base_url.
+oauth:
+  enabled: false
+  public_base_url: "https://miranda.example.com"
+  # Provider name is appended: "/oauth/callback" -> "/oauth/callback/google_calendar".
+  # Must match the redirect URI registered with each provider exactly.
+  callback_path: "/oauth/callback"
+  # Env var holding the base64-encoded 32-byte AES-256 key refresh/access
+  # tokens are encrypted at rest under (internal/oauth2.LoadMasterKey) —
+  # never in this file. Generate one with `openssl rand -base64 32`.
+  master_key_env: "OAUTH_MASTER_KEY"
+  providers:
+    - name: google_calendar
+      description: "Google Calendar"
+      authorize_url: "https://accounts.google.com/o/oauth2/v2/auth"
+      token_url: "https://oauth2.googleapis.com/token"
+      client_id_env: "GOOGLE_OAUTH_CLIENT_ID"
+      client_secret_env: "GOOGLE_OAUTH_CLIENT_SECRET"
+      scopes:
+        - "https://www.googleapis.com/auth/calendar.calendarlist.readonly"
+        - "https://www.googleapis.com/auth/calendar.events.freebusy"
+        - "https://www.googleapis.com/auth/calendar.events.readonly"
+      pkce: true
+      # access_type=offline + prompt=consent is what makes Google actually
+      # issue a refresh_token: without it, re-consenting an already-connected
+      # user silently omits one.
+      extra_authorize_params:
+        access_type: offline
+        prompt: consent
+
 mcp:
   servers:
     - name: ha
@@ -214,6 +256,23 @@ mcp:
     #   session_id_tools: ["medical.ask"]
     #   lazy: true
     #   description: "Medical records: lab results, diagnoses, medications, documents, health event timeline."
+    # Example: Google's own hosted Calendar MCP server
+    # (https://developers.google.com/workspace/calendar/api/guides/configure-mcp-server).
+    # oauth_provider references the oauth.providers entry above instead of
+    # token_env — each household member authorizes their own Google account
+    # via the oauth_authorize tool (see docs/adr/oauth2-layer.md), rather
+    # than one shared bearer token for the whole server. Mutually exclusive
+    # with token_env, and lazy: true is required (enforced at config-load
+    # time by config.validateOAuthServers) — an OAuth-gated server's
+    # per-user session is only brought up once the model calls
+    # load_tool_group for it, which is the first point Miranda knows which
+    # user is asking. Uncomment and set oauth.enabled: true above to use it.
+    # - name: google_calendar
+    #   url: "https://calendarmcp.googleapis.com/mcp/v1" # verify against Google's current guide before use
+    #   enabled: true
+    #   lazy: true
+    #   description: "Google Calendar — просмотр и управление событиями текущего пользователя."
+    #   oauth_provider: google_calendar
 
 # Optional file upload support for the web UI — lets users attach files before
 # sending a message. Miranda stages an uploaded file's bytes locally
