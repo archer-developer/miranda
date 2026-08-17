@@ -34,16 +34,31 @@ const DefaultMaxResponseBytes = 2 << 20 // 2 MiB
 // this only owns the transport round trip, not any particular response
 // envelope.
 func PostJSON(ctx context.Context, client *http.Client, url string, headers map[string]string, payload any, maxBytes int64) (status int, body []byte, err error) {
-	encoded, err := json.Marshal(payload)
-	if err != nil {
-		return 0, nil, fmt.Errorf("httpx: marshal request body: %w", err)
+	return DoJSON(ctx, client, http.MethodPost, url, headers, payload, maxBytes)
+}
+
+// DoJSON is PostJSON generalized to an arbitrary HTTP method — added for
+// internal/calendar, which needs GET (no body — pass payload as nil) and
+// PATCH/DELETE alongside POST against the same JSON REST convention.
+// payload == nil sends no request body at all (not "null"), so a GET/DELETE
+// call doesn't have to fake an empty struct just to satisfy this signature.
+func DoJSON(ctx context.Context, client *http.Client, method, url string, headers map[string]string, payload any, maxBytes int64) (status int, body []byte, err error) {
+	var reqBody io.Reader
+	if payload != nil {
+		encoded, err := json.Marshal(payload)
+		if err != nil {
+			return 0, nil, fmt.Errorf("httpx: marshal request body: %w", err)
+		}
+		reqBody = bytes.NewReader(encoded)
 	}
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(encoded))
+	req, err := http.NewRequestWithContext(ctx, method, url, reqBody)
 	if err != nil {
 		return 0, nil, fmt.Errorf("httpx: build request: %w", err)
 	}
-	req.Header.Set("Content-Type", "application/json")
+	if payload != nil {
+		req.Header.Set("Content-Type", "application/json")
+	}
 	for k, v := range headers {
 		req.Header.Set(k, v)
 	}

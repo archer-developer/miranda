@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"slices"
 	"sync"
 	"time"
 
@@ -11,6 +12,7 @@ import (
 	"github.com/archer-developer/miranda-llm/llmtrace"
 	"github.com/archer-developer/miranda-llm/router"
 	"github.com/archer-developer/miranda/internal/attachments"
+	"github.com/archer-developer/miranda/internal/calendar"
 	"github.com/archer-developer/miranda/internal/config"
 	"github.com/archer-developer/miranda/internal/history"
 	"github.com/archer-developer/miranda/internal/hub"
@@ -24,6 +26,14 @@ import (
 	"github.com/archer-developer/miranda/internal/tts"
 	"github.com/archer-developer/miranda/internal/users"
 )
+
+// googleCalendarProvider is the oauth.providers name internal/calendar's
+// tools are gated on — matches config.yaml.dist's example and
+// docs/adr/oauth2-layer.md, not a user-configurable setting: there's only
+// one calendar integration today, so there's nothing to make generic yet
+// (see internal/calendar's own package doc comment for why this bypasses
+// Google's hosted Calendar MCP server entirely).
+const googleCalendarProvider = "google_calendar"
 
 // maxToolIterations bounds the agent loop (model calls a tool, gets a
 // result, decides what to do next) so a misbehaving model can't loop forever
@@ -72,7 +82,7 @@ const oauthAuthorizeToolName = "oauth_authorize"
 // would silently swallow every real call to that tool instead of running
 // it, with nothing to explain why.
 func ReservedToolNames() []string {
-	return []string{
+	names := []string{
 		rememberToolName,
 		searchHistoryToolName,
 		endConversationToolName,
@@ -88,6 +98,7 @@ func ReservedToolNames() []string {
 		tools.WebSearchToolName,
 		tools.WebFetchToolName,
 	}
+	return append(names, calendarToolNames()...)
 }
 
 // Attachment describes one file already uploaded via POST /api/upload and
@@ -279,6 +290,22 @@ type Orchestrator struct {
 	// with oauth via SetOAuth, mirroring the same three knobs cmd/miranda
 	// already uses for the global MCP KeepConnected loops.
 	oauthReconnect, oauthMaxReconnect, oauthConnectTimeout time.Duration
+	// calendar is internal/calendar's stateless REST client — always
+	// non-nil (holds no credentials, costs nothing to construct), unlike
+	// every other optional dependency on this struct. Its tools are only
+	// advertised/dispatched when calendarEnabled() is true (oauth is wired
+	// AND googleCalendarProvider is one of its configured providers) — see
+	// availableTools/executeTool's calendar_* branches.
+	calendar *calendar.Client
+}
+
+// calendarEnabled reports whether the calendar_* tools should be offered:
+// the OAuth2 layer must be wired in at all (o.oauth != nil, see SetOAuth)
+// AND googleCalendarProvider must be one of its configured providers —
+// otherwise oauth_authorize would offer a provider name calendar tools then
+// can't actually get a token for.
+func (o *Orchestrator) calendarEnabled() bool {
+	return o.oauth != nil && slices.Contains(o.oauth.ProviderNames(), googleCalendarProvider)
 }
 
 // SetOAuth wires in the optional OAuth2 authorization layer (see
@@ -471,6 +498,7 @@ func NewOrchestrator(
 		defaultUserID:    defaultUserID,
 		baseSystemPrompt: agentCfg.SystemPrompt,
 		memoryCache:      make(map[string]cachedMemory),
+		calendar:         calendar.New(),
 	}
 }
 

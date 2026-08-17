@@ -757,6 +757,12 @@ func (o *Orchestrator) availableTools(ctx context.Context, userID string, contro
 		})
 	}
 
+	if o.calendarEnabled() {
+		for _, t := range calendarToolDefs() {
+			add(t)
+		}
+	}
+
 	for _, t := range o.webTools {
 		add(t.Def())
 	}
@@ -1228,6 +1234,10 @@ func (o *Orchestrator) executeTool(ctx context.Context, userID, conversationID s
 			_ = o.telegram.SendToUser(ctx, userID, "Follow this link to connect "+args.Provider+": "+authorizeURL)
 		}
 		return "Send the user this link to complete authorization: " + authorizeURL
+	}
+
+	if result, handled := o.executeCalendarTool(ctx, userID, tc); handled {
+		return result
 	}
 
 	if tc.Name == createScheduledTaskToolName {

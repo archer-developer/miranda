@@ -1,12 +1,34 @@
-# Универсальный слой OAuth2-авторизации для MCP-серверов
+# Универсальный слой OAuth2-авторизации
 
 > Статус: реализовано (`../../internal/oauth2`, `../../internal/mcp`, `../../internal/httpapi`,
 > `../../internal/config`, `../../internal/keyring`, `../../internal/httpx`, `../../cmd/miranda`).
-> Первый потребитель — Google Calendar MCP
-> (https://developers.google.com/workspace/calendar/api/guides/configure-mcp-server),
-> но слой не завязан на Google: подключение нового OAuth2-провайдера — это
-> одна запись `oauth.providers` в конфиге плюс `oauth_provider: <name>` на
-> нужном `mcp.servers[]`, без нового Go-кода.
+> Первый потребитель — Google Calendar, но слой не завязан на Google:
+> подключение нового OAuth2-провайдера — это одна запись `oauth.providers` в
+> конфиге, без нового Go-кода для самого слоя авторизации (потребитель
+> токена — MCP-сервер или нативный тул — своего кода по-прежнему требует).
+
+> **Обновление после реализации:** секции 4-5 ниже (`oauth_authorize`,
+> `MCPServerExtension.OAuthProvider`) описывают то, как этот слой
+> задумывался и до сих пор устроен для MCP-серверов в целом — механизм
+> рабочий и используется. Но для Google Calendar конкретно выяснилось, что
+> официальный хостящийся Calendar MCP-сервер
+> (`calendarmcp.googleapis.com`, из
+> https://developers.google.com/workspace/calendar/api/guides/configure-mcp-server)
+> требует отдельного enrollment в Google Workspace Developer Preview
+> Program — обычный `enabled: true` в Cloud Console этого не даёт, и
+> реальный вызов тула стабильно возвращал `403 The caller does not have
+> permission`, при том что тот же самый access-токен тем же самым
+> заголовком `Authorization: Bearer` прекрасно работал против обычного,
+> общедоступного Calendar API v3 REST (`www.googleapis.com/calendar/v3`,
+> проверено напрямую curl'ом). Поэтому Google Calendar в итоге подключён
+> **не** как `mcp.servers[]`-запись, а как нативные тулы Miranda
+> (`internal/calendar`, `internal/httpapi/calendar_tools.go`,
+> `calendar_list_calendars`/`calendar_list_events`/`calendar_freebusy`/
+> `calendar_create_event`/`calendar_update_event`/`calendar_delete_event`) —
+> `oauth.providers.google_calendar` (авторизация, хранение, refresh токена)
+> используется как есть, без изменений, просто "потребитель" токена теперь
+> не MCP-сессия, а прямой HTTP-вызов Calendar API. См. `internal/calendar`'s
+> собственный doc-comment.
 
 ---
 
@@ -185,16 +207,13 @@ oauth:
       scopes: ["https://www.googleapis.com/auth/calendar"]
       pkce: true
       extra_authorize_params: { access_type: offline, prompt: consent }
-
-mcp:
-  servers:
-    - name: google_calendar
-      url: "<URL MCP-сервера из гайда Google>"
-      enabled: true
-      lazy: true
-      description: "Google Calendar — просмотр и управление событиями текущего пользователя."
-      oauth_provider: google_calendar
 ```
+
+Никакой `mcp.servers[]`-записи для `google_calendar` нет и не нужно (см.
+обновление в начале документа) — этот `oauth.providers` вход потребляется
+напрямую нативными `calendar_*`-тулами (`internal/calendar`,
+`internal/httpapi/calendar_tools.go`), включённые уже одним
+`oauth.enabled: true`.
 
 `extra_authorize_params.access_type=offline` + `prompt=consent` — то, что
 заставляет Google реально выдавать `refresh_token`: без этого повторное

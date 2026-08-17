@@ -172,6 +172,8 @@ Config flags live on `config.MemoryConfig` unless noted.
 | `create_scheduled_task` / `list_scheduled_tasks` / `delete_scheduled_task` | `config.ScheduleConfig.Enabled` | Schedule/list/cancel a prompt to replay through the agent loop. See `internal/schedule/CLAUDE.md`. |
 | `web_search` | `config.TavilyConfig.WebSearch.Enabled` | Live web search via Tavily. See `internal/config/CLAUDE.md`. |
 | `web_fetch` | `config.TavilyConfig.WebFetch.Enabled` | Fetch a URL's readable text via Tavily. See `internal/config/CLAUDE.md`. |
+| `oauth_authorize` | `config.OAuthConfig.Enabled` | Start connecting a third-party account (Google Calendar) — sends the user an authorization link. See `docs/adr/oauth2-layer.md`. |
+| `calendar_list_calendars` / `calendar_list_events` / `calendar_freebusy` / `calendar_create_event` / `calendar_update_event` / `calendar_delete_event` | `oauth.providers` includes `google_calendar` | Google Calendar via the plain Calendar API v3 REST endpoints (`internal/calendar`) — deliberately NOT Google's hosted Calendar MCP server, which requires Developer Preview Program enrollment. See `docs/adr/oauth2-layer.md`'s post-implementation update. |
 | Escalation tool (name configurable per provider) | `config.LLMProvider.Escalation.Enabled` | Hand a hard turn to that provider's configured target. See `internal/config/CLAUDE.md`. |
 | MCP tools (e.g. `ha_*`) | `config.MCPConfig.Servers[].Enabled` | HA and other MCP-exposed actions. See `internal/mcp/CLAUDE.md`. |
 

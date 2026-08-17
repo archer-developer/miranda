@@ -159,11 +159,13 @@ schedule:
 # docs/adr/oauth2-layer.md) — off by default, same reasoning as webauthn/
 # telegram above: there's no safe auto-detected public_base_url. Lets
 # household members connect their own third-party account (Google Calendar
-# first) to an mcp.servers[] entry that sets oauth_provider below, via the
-# oauth_authorize tool + a callback route, instead of one shared token_env
-# bearer token for the whole server. Needs HTTPS for the callback redirect;
-# front Miranda with a reverse proxy and point public_base_url at that
-# hostname, same as telegram.public_base_url.
+# first) via the oauth_authorize tool + a callback route. The google_calendar
+# provider below is consumed by Miranda's own native calendar_* tools
+# (internal/calendar, internal/httpapi/calendar_tools.go) — a plain Calendar
+# API v3 REST client, NOT Google's hosted Calendar MCP server
+# (calendarmcp.googleapis.com): that product turned out to be gated behind
+# enrollment in the Google Workspace Developer Preview Program, while this
+# REST API is generally available and works with the exact same token.
 oauth:
   enabled: false
   public_base_url: "https://miranda.example.com"
@@ -181,10 +183,15 @@ oauth:
       token_url: "https://oauth2.googleapis.com/token"
       client_id_env: "GOOGLE_OAUTH_CLIENT_ID"
       client_secret_env: "GOOGLE_OAUTH_CLIENT_SECRET"
+      # calendar.events (not the narrower .events.readonly) is what lets
+      # calendar_create_event/update_event/delete_event write, not just
+      # read — calendarlist.readonly/events.freebusy stay read-only since
+      # nothing needs to create/delete whole calendars or change calendar
+      # settings.
       scopes:
         - "https://www.googleapis.com/auth/calendar.calendarlist.readonly"
         - "https://www.googleapis.com/auth/calendar.events.freebusy"
-        - "https://www.googleapis.com/auth/calendar.events.readonly"
+        - "https://www.googleapis.com/auth/calendar.events"
       pkce: true
       # access_type=offline + prompt=consent is what makes Google actually
       # issue a refresh_token: without it, re-consenting an already-connected
@@ -256,23 +263,15 @@ mcp:
     #   session_id_tools: ["medical.ask"]
     #   lazy: true
     #   description: "Medical records: lab results, diagnoses, medications, documents, health event timeline."
-    # Example: Google's own hosted Calendar MCP server
-    # (https://developers.google.com/workspace/calendar/api/guides/configure-mcp-server).
-    # oauth_provider references the oauth.providers entry above instead of
-    # token_env — each household member authorizes their own Google account
-    # via the oauth_authorize tool (see docs/adr/oauth2-layer.md), rather
-    # than one shared bearer token for the whole server. Mutually exclusive
-    # with token_env, and lazy: true is required (enforced at config-load
-    # time by config.validateOAuthServers) — an OAuth-gated server's
-    # per-user session is only brought up once the model calls
-    # load_tool_group for it, which is the first point Miranda knows which
-    # user is asking. Uncomment and set oauth.enabled: true above to use it.
-    # - name: google_calendar
-    #   url: "https://calendarmcp.googleapis.com/mcp/v1"
-    #   enabled: true
-    #   lazy: true
-    #   description: "Google Calendar — просмотр и управление событиями текущего пользователя."
-    #   oauth_provider: google_calendar
+    # Google Calendar is NOT an MCP server entry here — Google's own hosted
+    # Calendar MCP server (calendarmcp.googleapis.com) turned out to be
+    # gated behind enrollment in the Google Workspace Developer Preview
+    # Program, so Miranda instead ships its own native calendar_* tools
+    # (internal/calendar, internal/httpapi/calendar_tools.go) against the
+    # plain, generally-available Calendar API v3 REST endpoints, using the
+    # same oauth.providers google_calendar entry above for per-user tokens.
+    # Nothing to configure here beyond oauth.enabled: true — see that
+    # section's own comments.
 
 # Optional file upload support for the web UI — lets users attach files before
 # sending a message. Miranda stages an uploaded file's bytes locally
