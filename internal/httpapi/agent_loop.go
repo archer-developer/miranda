@@ -487,7 +487,7 @@ func (o *Orchestrator) buildSystemPrompt(userID, sharedMemory, userMemory string
 	// defeat that cache's reuse on every single turn — see this function's
 	// own doc comment above.
 	now := time.Now().In(o.userLocation(userID))
-	volatile = "Current local time: " + now.Format("2006-01-02 15:04 MST") + "."
+	volatile = "Текущее время пользователя: " + now.Format("2006-01-02 15:04 MST") + "."
 
 	return stable, volatile
 }
