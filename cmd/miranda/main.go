@@ -304,6 +304,7 @@ func run(cfg config.Config, logger *slog.Logger, eventHub *hub.Hub) error {
 		llmRouter, toolManager, historyStore, memoryStore, dispatcher, eventHub, usersRegistry,
 		cfg.Agent, cfg.Memory, cfg.TTS, ttsChunkMaxChars(cfg.TTS), defaultUserID,
 	)
+	orchestrator.SetLogger(logger)
 	if cfg.Telegram.Enabled {
 		orchestrator.SetTelegram(telegram.NewSender(tgClient, tgChats), cfg.Telegram)
 	}

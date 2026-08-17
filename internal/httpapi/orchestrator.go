@@ -3,6 +3,7 @@ package httpapi
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"sync"
 	"time"
 
@@ -178,6 +179,12 @@ type Orchestrator struct {
 	memory           *memory.Store
 	tts              *tts.Dispatcher // may be nil: TTS dispatch is best-effort and optional
 	hub              *hub.Hub
+	// logger is set via SetLogger; nil means tool-call failures (e.g. an
+	// MCP server rejecting a call) are only visible in logs/llm.log's full
+	// request/response trace, not in the app log/journal or the web UI's
+	// live Logs screen (this logger is wired to mirror into both — see
+	// cmd/miranda.setupLogging).
+	logger           *slog.Logger
 	users            *users.Registry // may be nil: falls back to the raw user id in the system prompt
 	memoryCfg        config.MemoryConfig
 	ttsCfg           config.TTSConfig
@@ -355,6 +362,14 @@ func (o *Orchestrator) SetKeyring(k *keyring.Service) {
 // included on every turn, with no load_tool_group stub ever offered.
 func (o *Orchestrator) SetLazyMCPServers(descriptions map[string]string) {
 	o.lazyServerDescriptions = descriptions
+}
+
+// SetLogger wires in the app's slog logger — mirrors SetSchedule's
+// post-construction style for an optional dependency. Leaving it uncalled
+// (the default, nil) just means executeTool's tool-call-failure logging is
+// skipped, same nil-safe posture as every other optional Set*.
+func (o *Orchestrator) SetLogger(logger *slog.Logger) {
+	o.logger = logger
 }
 
 // MCPServerExtension bundles the config-driven, per-MCP-server behaviors

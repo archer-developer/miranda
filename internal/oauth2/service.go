@@ -192,6 +192,7 @@ func (s *Service) RefreshNow(ctx context.Context, username, provider string) (st
 
 	resp, err := RefreshAccessToken(ctx, s.httpClient, p, stored.RefreshToken)
 	if err != nil {
+		s.logger.Warn("oauth2: refresh failed", "user", username, "provider", provider, "error", err)
 		return "", false, fmt.Errorf("oauth2: refresh token for %s/%s: %w", username, provider, err)
 	}
 
@@ -212,6 +213,7 @@ func (s *Service) RefreshNow(ctx context.Context, username, provider string) (st
 	}
 
 	s.cache.Set(username, provider, resp.AccessToken, expiry)
+	s.logger.Info("oauth2: token refreshed", "user", username, "provider", provider, "scope", resp.Scope, "expiry", expiry)
 	return resp.AccessToken, true, nil
 }
 
@@ -248,9 +250,10 @@ func (s *Service) refreshDue(ctx context.Context) {
 		return
 	}
 	for _, t := range due {
-		if _, _, err := s.RefreshNow(ctx, t.Username, t.Provider); err != nil {
-			s.logger.Warn("oauth2: background refresh failed", "user", t.Username, "provider", t.Provider, "error", err)
-		}
+		// Success/failure are both already logged inside RefreshNow itself
+		// (covers this call site and the per-user MCP connect closure's
+		// on-demand one identically), so nothing more to do with err here.
+		_, _, _ = s.RefreshNow(ctx, t.Username, t.Provider)
 	}
 }
 

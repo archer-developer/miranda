@@ -1414,6 +1414,9 @@ func (o *Orchestrator) executeTool(ctx context.Context, userID, conversationID s
 		result, err = o.tools.Call(ctx, tc.Name, callArgs)
 	}
 	if err != nil {
+		if o.logger != nil {
+			o.logger.Warn("mcp: tool call failed", "tool", tc.Name, "server", toolServer, "user", userID, "error", err)
+		}
 		return fmt.Sprintf("error: %v", err)
 	}
 

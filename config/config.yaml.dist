@@ -268,7 +268,7 @@ mcp:
     # load_tool_group for it, which is the first point Miranda knows which
     # user is asking. Uncomment and set oauth.enabled: true above to use it.
     # - name: google_calendar
-    #   url: "https://calendarmcp.googleapis.com/mcp/v1" # verify against Google's current guide before use
+    #   url: "https://calendarmcp.googleapis.com/mcp/v1"
     #   enabled: true
     #   lazy: true
     #   description: "Google Calendar — просмотр и управление событиями текущего пользователя."
