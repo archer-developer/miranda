@@ -56,6 +56,36 @@ func TestRemember_AppendsUnderRememberedSection(t *testing.T) {
 	require.Less(t, firstIdx, secondIdx)
 }
 
+// TestRemember_StripsFactsOwnLeadingDateToAvoidDoubleTimestamp guards a real
+// bug: a summarization pass shown existing dated "(YYYY-MM-DD) ..." bullets
+// as context sometimes echoes that style back into a new fact it proposes,
+// which used to produce a visibly broken entry like
+// "- (2026-08-15) (2026-08-16) fact" once Remember/RememberShared prepended
+// their own timestamp on top of the model's.
+func TestRemember_StripsFactsOwnLeadingDateToAvoidDoubleTimestamp(t *testing.T) {
+	s, err := New(t.TempDir())
+	require.NoError(t, err)
+
+	require.NoError(t, s.Remember("alex", "(2026-08-16) went to the dacha"))
+
+	content, err := s.Read("alex")
+	require.NoError(t, err)
+	require.Contains(t, content, "went to the dacha")
+	require.NotContains(t, content, "2026-08-16")
+}
+
+func TestRememberShared_StripsFactsOwnLeadingDateToAvoidDoubleTimestamp(t *testing.T) {
+	s, err := New(t.TempDir())
+	require.NoError(t, err)
+
+	require.NoError(t, s.RememberShared("(2026-08-16) went to the dacha"))
+
+	content, err := s.ReadShared()
+	require.NoError(t, err)
+	require.Contains(t, content, "went to the dacha")
+	require.NotContains(t, content, "2026-08-16")
+}
+
 func TestReplaceSection_OverwritesOnlyThatSectionAndKeepsOthers(t *testing.T) {
 	s, err := New(t.TempDir())
 	require.NoError(t, err)

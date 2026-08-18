@@ -146,6 +146,37 @@ func TestOrchestrator_SummarizeIdleSessionsSkipsMemoryWriteOnEmptyDistillation(t
 // silently, stopped every conversation from ever closing on the idle
 // timeout. AutoSummarize must control only the LLM-based recap/memory step;
 // idle-timeout closure must always happen.
+// TestOrchestrator_SummarizeIdleSessionsSkipsPlaceholderNoneReply guards a
+// real bug: despite summarizeSystemPrompt instructing "leave this section
+// empty", the model sometimes replies with placeholder filler like
+// "*(none)*" or a bare "-" bullet instead of an actually-empty body. Before
+// isNoneSentinel/hasContent existed, that filler passed the
+// TrimSpace(...) != "" check and got written verbatim — e.g. shared.md
+// ending up with "## Remembered\n- (2026-08-17) *(none)*".
+func TestOrchestrator_SummarizeIdleSessionsSkipsPlaceholderNoneReply(t *testing.T) {
+	provider := llmtest.New("local",
+		llmtest.Response{Text: "Хорошо, буду знать."},
+		llmtest.Response{Text: "## Summary\nJust chit-chat, nothing durable.\n" +
+			"## Preferences\n*(none)*\n" +
+			"## Shared\n-"},
+	)
+	o, _, mem := newTestOrchestrator(t, provider)
+	ctx := context.Background()
+
+	_, err := o.Handle(ctx, InputRequest{Source: "cli", UserID: "alex", Text: "какая сейчас погода?"})
+	require.NoError(t, err)
+
+	require.NoError(t, o.SummarizeIdleSessions(ctx, 0))
+
+	content, err := mem.Read("alex")
+	require.NoError(t, err)
+	require.NotContains(t, content, "none")
+
+	shared, err := mem.ReadShared()
+	require.NoError(t, err)
+	require.Empty(t, shared)
+}
+
 func TestOrchestrator_SummarizeIdleSessionsSkipsDistillationWhenAutoSummarizeDisabled(t *testing.T) {
 	// Only one scripted response: if summarizeConversation attempted
 	// distillation anyway, the FakeProvider would panic on the unscripted

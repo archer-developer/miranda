@@ -12,10 +12,26 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
 )
+
+// leadingDateRe strips a "(YYYY-MM-DD) " a caller-supplied fact sometimes
+// already starts with — e.g. a summarization pass echoing the dated
+// "(2026-07-27) ..." bullet style it was shown as existing memory context
+// back into a *new* fact it's proposing. Left alone, that fact would get a
+// second, real timestamp prepended by Remember/RememberShared below,
+// producing a visibly broken "- (2026-08-15) (2026-08-16) ..." entry.
+var leadingDateRe = regexp.MustCompile(`^\(\d{4}-\d{2}-\d{2}\)\s*`)
+
+// stripLeadingDate removes a leading "(YYYY-MM-DD) " from fact, if present,
+// so Remember/RememberShared's own timestamp is never doubled up — see
+// leadingDateRe.
+func stripLeadingDate(fact string) string {
+	return leadingDateRe.ReplaceAllString(fact, "")
+}
 
 // Store reads and writes per-user memory files under a root directory.
 type Store struct {
@@ -84,7 +100,7 @@ func (s *Store) Remember(userID, fact string) error {
 		return err
 	}
 
-	entry := fmt.Sprintf("- (%s) %s\n", time.Now().Format("2006-01-02"), strings.TrimSpace(fact))
+	entry := fmt.Sprintf("- (%s) %s\n", time.Now().Format("2006-01-02"), stripLeadingDate(strings.TrimSpace(fact)))
 	updated := appendUnderSection(current, "## Remembered", entry)
 	return s.writeLocked(userID, updated)
 }
@@ -102,7 +118,7 @@ func (s *Store) RememberShared(fact string) error {
 		return err
 	}
 
-	entry := fmt.Sprintf("- (%s) %s\n", time.Now().Format("2006-01-02"), strings.TrimSpace(fact))
+	entry := fmt.Sprintf("- (%s) %s\n", time.Now().Format("2006-01-02"), stripLeadingDate(strings.TrimSpace(fact)))
 	updated := appendUnderSection(current, "## Remembered", entry)
 	return s.writeFile(s.sharedPath(), updated)
 }

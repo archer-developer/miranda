@@ -52,14 +52,16 @@ worth remembering in future conversations.
 - Do not repeat facts already covered by the existing notes unless they changed.
 - Do not repeat a fact that's already covered by the household's existing Shared notes below —
   that's this user's own information, not something new to remember about them specifically.
-- If nothing in the transcript is worth remembering long-term about this user, leave this section empty.
+- If nothing in the transcript is worth remembering long-term about this user, this section's body
+  must be exactly the single word NONE — no bullet, no placeholder sentence, no explanation.
 
 ## Shared
 A bullet list of NEW facts from this conversation that belong to the whole household rather than
 this one user (e.g. a pet's name, a wifi password, a recurring household routine) — only facts not
 already present in the existing Shared notes above.
-- Leave this section empty if nothing in the transcript is household-wide, or everything worth
-  keeping is already in the existing Shared notes.
+- If nothing in the transcript is household-wide, or everything worth keeping is already in the
+  existing Shared notes, this section's body must be exactly the single word NONE — no bullet, no
+  placeholder sentence, no explanation.
 
 Reply with only these three sections — no extra commentary.`
 
@@ -159,7 +161,7 @@ func (o *Orchestrator) tryDistillConversation(ctx context.Context, convID, userI
 		return "", false, nil
 	}
 
-	if strings.TrimSpace(preferences) != "" {
+	if hasContent(preferences) {
 		if err := o.memory.ReplaceSection(userID, preferencesSection, preferences); err != nil {
 			return "", false, fmt.Errorf("write memory: %w", err)
 		}
@@ -273,18 +275,41 @@ func splitSummaryPreferencesShared(text string) (summary, preferences, sharedFac
 
 // bulletLines splits a "- fact" bullet list (as sharedFacts comes back from
 // splitSummaryPreferencesShared) into individual fact strings, one per
-// RememberShared call — stripping the leading "- " and skipping blank
-// lines, so a model reply with stray blank lines between bullets doesn't
-// produce an empty RememberShared entry.
+// RememberShared call — stripping the leading "-" and skipping blank lines
+// (so a model reply with stray blank lines between bullets doesn't produce
+// an empty RememberShared entry) and the NONE sentinel (so "- NONE" or a
+// bare "NONE" line never gets written as if it were a real fact — see
+// isNoneSentinel).
 func bulletLines(list string) []string {
 	var out []string
 	for _, line := range strings.Split(list, "\n") {
 		line = strings.TrimSpace(line)
-		line = strings.TrimPrefix(line, "- ")
+		line = strings.TrimPrefix(line, "-")
 		line = strings.TrimSpace(line)
-		if line != "" {
-			out = append(out, line)
+		if line == "" || isNoneSentinel(line) {
+			continue
 		}
+		out = append(out, line)
 	}
 	return out
+}
+
+// hasContent reports whether s is worth writing to memory: non-blank and
+// not just the model's NONE sentinel (see summarizeSystemPrompt).
+func hasContent(s string) bool {
+	s = strings.TrimSpace(s)
+	return s != "" && !isNoneSentinel(s)
+}
+
+// isNoneSentinel reports whether s is the model's explicit "nothing to add"
+// signal after stripping incidental markdown wrapping (*emphasis*,
+// (parens), a leading bullet dash, trailing punctuation, ...) that a model
+// sometimes adds despite the plain-text instruction to reply with exactly
+// NONE. This deliberately matches only that literal sentinel, not free-form
+// phrases like "nothing new to report" in whatever language the model
+// picks — a loose match on words like "none"/"no" could discard a real fact
+// that happens to start with one.
+func isNoneSentinel(s string) bool {
+	s = strings.Trim(s, " \t\n*_()[]`\"'.-")
+	return strings.EqualFold(s, "none")
 }
