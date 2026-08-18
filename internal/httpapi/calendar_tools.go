@@ -41,6 +41,12 @@ const calendarCreateEventToolName = "calendar_create_event"
 const calendarUpdateEventToolName = "calendar_update_event"
 const calendarDeleteEventToolName = "calendar_delete_event"
 
+// calendarToolGroupDescription is google_calendar's one-line entry inside
+// load_tool_group's stub (see availableTools) — shown to the model instead
+// of the six calendar_* tools' real schemas until it decides the domain is
+// actually relevant to the current turn.
+const calendarToolGroupDescription = "Google Calendar: list calendars, list/search events, check free/busy, create/update/delete events."
+
 // calendarToolNames is every tool name calendarToolDefs can advertise — its
 // own copy (not shared with ReservedToolNames' return value) since the two
 // lists are built for different purposes and there's no reason to couple

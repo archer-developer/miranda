@@ -28,7 +28,9 @@
 > `oauth.providers.google_calendar` (авторизация, хранение, refresh токена)
 > используется как есть, без изменений, просто "потребитель" токена теперь
 > не MCP-сессия, а прямой HTTP-вызов Calendar API. См. `internal/calendar`'s
-> собственный doc-comment.
+> собственный doc-comment. Все шесть `calendar_*`-тулов при этом так же
+> скрыты за `load_tool_group`, как MCP-серверы с `lazy: true` (`diary`/
+> `yazio`/`medical_card`) — см. обновление в `docs/adr/lazy-mcp-tool-loading.md`.
 
 ---
 

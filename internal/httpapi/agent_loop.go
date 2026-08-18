@@ -757,12 +757,6 @@ func (o *Orchestrator) availableTools(ctx context.Context, userID string, contro
 		})
 	}
 
-	if o.calendarEnabled() {
-		for _, t := range calendarToolDefs() {
-			add(t)
-		}
-	}
-
 	for _, t := range o.webTools {
 		add(t.Def())
 	}
@@ -849,22 +843,29 @@ func (o *Orchestrator) availableTools(ctx context.Context, userID string, contro
 		names[t.Name] = true
 	}
 
-	// pending collects every lazy server not yet loaded this turn — each
-	// contributes only a one-line entry inside the shared load_tool_group
-	// stub below, not its own real tool schemas, until the model asks for
-	// it. A server absent from o.lazyServerDescriptions (the common case:
+	// pending collects every lazy group not yet loaded this turn — MCP
+	// servers marked config.MCPServer.Lazy, plus the native (non-MCP)
+	// google_calendar group below — each contributing only a one-line entry
+	// inside the shared load_tool_group stub, not its own real tool
+	// schemas, until the model asks for it. A group absent from
+	// o.lazyServerDescriptions and not google_calendar (the common case:
 	// lazy loading unconfigured, or this particular server isn't lazy) is
 	// unaffected and always included via ToolsExcluding.
 	//
-	// Every lazy server's name goes into skip regardless of loaded state —
-	// a loaded one is added explicitly via ToolsForServer just below, so it
-	// must NOT also come back through ToolsExcluding's own listing, or it
-	// would be fetched (and ListTools-RPC'd) twice, with the second
-	// occurrence of each tool tripping addMCP's same-name collision guard
-	// and logging a spurious "collides with a built-in tool" error.
+	// Every lazy MCP server's name goes into skip regardless of loaded
+	// state — a loaded one is added explicitly via ToolsForServer just
+	// below, so it must NOT also come back through ToolsExcluding's own
+	// listing, or it would be fetched (and ListTools-RPC'd) twice, with the
+	// second occurrence of each tool tripping addMCP's same-name collision
+	// guard and logging a spurious "collides with a built-in tool" error.
+	// google_calendar has no entry in o.tools at all (it isn't an MCP
+	// server — see internal/calendar's package doc comment), so it never
+	// needs to be in skip.
 	var pending []string
+	groupDescriptions := make(map[string]string, len(o.lazyServerDescriptions)+1)
 	skip := make(map[string]bool, len(o.lazyServerDescriptions))
-	for name := range o.lazyServerDescriptions {
+	for name, desc := range o.lazyServerDescriptions {
+		groupDescriptions[name] = desc
 		skip[name] = true
 		if control.loadedGroups[name] {
 			for _, t := range o.tools.ToolsForServerAndUser(ctx, name, userID) {
@@ -874,27 +875,45 @@ func (o *Orchestrator) availableTools(ctx context.Context, userID string, contro
 			pending = append(pending, name)
 		}
 	}
+	// google_calendar is always lazy, unconditionally, when enabled at
+	// all — no config.MCPServer.Lazy-style toggle exists (or is needed) for
+	// it, since there's no MCP server to mark lazy; six tool schemas
+	// (including two multi-field EventDateTime objects) for a domain that's
+	// relevant to a small minority of turns is exactly the case
+	// docs/adr/lazy-mcp-tool-loading.md's Lazy field targets for MCP
+	// servers like diary/yazio/medical_card.
+	if o.calendarEnabled() {
+		groupDescriptions[googleCalendarProvider] = calendarToolGroupDescription
+		if control.loadedGroups[googleCalendarProvider] {
+			for _, t := range calendarToolDefs() {
+				addMCP(t)
+			}
+		} else {
+			pending = append(pending, googleCalendarProvider)
+		}
+	}
 	for _, t := range o.tools.ToolsExcludingForUser(ctx, skip, userID) {
 		addMCP(t)
 	}
 	if len(pending) > 0 {
-		addMCP(o.loadToolGroupStub(pending))
+		addMCP(o.loadToolGroupStub(pending, groupDescriptions))
 	}
 
 	return tools
 }
 
 // loadToolGroupStub builds the single load_tool_group ToolDef standing in
-// for every not-yet-loaded lazy MCP server in pending — one line per domain,
-// drawn from that server's config Description, so the model can decide
-// which (if any) is worth loading before it ever sees that domain's real
-// tool schemas. See docs/adr/lazy-mcp-tool-loading.md §2.6.
-func (o *Orchestrator) loadToolGroupStub(pending []string) llm.ToolDef {
+// for every not-yet-loaded lazy group in pending (MCP server or native
+// group — see availableTools) — one line per domain, drawn from
+// descriptions, so the model can decide which (if any) is worth loading
+// before it ever sees that domain's real tool schemas. See
+// docs/adr/lazy-mcp-tool-loading.md §2.6.
+func (o *Orchestrator) loadToolGroupStub(pending []string, descriptions map[string]string) llm.ToolDef {
 	sort.Strings(pending) // deterministic order across calls — stable prompt for identical state
 	var desc strings.Builder
 	desc.WriteString("Load the real tools for one of these domains before calling anything in it — you currently only see this one-line summary, not their actual tool schemas:\n")
 	for _, name := range pending {
-		fmt.Fprintf(&desc, "- %s: %s\n", name, o.lazyServerDescriptions[name])
+		fmt.Fprintf(&desc, "- %s: %s\n", name, descriptions[name])
 	}
 	return llm.ToolDef{
 		Name:        loadToolGroupToolName,
@@ -1114,7 +1133,9 @@ func (o *Orchestrator) executeTool(ctx context.Context, userID, conversationID s
 		if err := json.Unmarshal([]byte(tc.Arguments), &args); err != nil {
 			return fmt.Sprintf("error: invalid arguments: %v", err)
 		}
-		if _, ok := o.lazyServerDescriptions[args.Group]; !ok {
+		_, isLazyMCPGroup := o.lazyServerDescriptions[args.Group]
+		isCalendarGroup := args.Group == googleCalendarProvider && o.calendarEnabled()
+		if !isLazyMCPGroup && !isCalendarGroup {
 			return fmt.Sprintf("error: unknown tool group %q", args.Group)
 		}
 		// An OAuth-gated group (config.MCPServer.OAuthProvider != "") has no
@@ -1141,6 +1162,22 @@ func (o *Orchestrator) executeTool(ctx context.Context, userID, conversationID s
 			// success on a session that isn't up yet.
 			if !waitForUserSession(ctx, o.tools, args.Group, userID, 5*time.Second) {
 				return fmt.Sprintf("still connecting to %q — try again in a moment", args.Group)
+			}
+		}
+		// google_calendar is native, not MCP-routed — no session to bring
+		// up (calendar_* tools fetch their access token per-call, see
+		// calendarAccessToken), just the same "authorized yet?" pre-check
+		// as the OAuth-gated MCP branch above, so a missing connection
+		// fails at load_tool_group time with a clear message instead of
+		// loading six real schemas that would all fail identically on
+		// their first actual call.
+		if isCalendarGroup {
+			authorized, err := o.oauth.HasToken(ctx, userID, googleCalendarProvider)
+			if err != nil {
+				return fmt.Sprintf("error: %v", err)
+			}
+			if !authorized {
+				return fmt.Sprintf("the user hasn't connected %q yet — call %s with provider=%q first", args.Group, oauthAuthorizeToolName, googleCalendarProvider)
 			}
 		}
 		if control.loadedGroups == nil {

@@ -66,6 +66,95 @@ func TestOrchestrator_CalendarTools_NotOfferedWhenProviderIsSomethingElse(t *tes
 	require.True(t, oauthOffered)
 }
 
+// TestOrchestrator_CalendarTools_HiddenBehindLoadToolGroup guards the fix
+// for calendar_* tools always being advertised in full: google_calendar is
+// always a lazy group (no config toggle needed, unlike MCP servers'
+// config.MCPServer.Lazy — see availableTools' own comment on why), so the
+// six real schemas must stay hidden behind load_tool_group's one-line stub
+// until the model actually asks for the domain.
+func TestOrchestrator_CalendarTools_HiddenBehindLoadToolGroup(t *testing.T) {
+	fakeProvider := llmtest.New("local", llmtest.Response{Text: "Привет!"})
+	o, _, _ := newTestOrchestratorWithOAuth(t, fakeProvider, []config.UserConfig{
+		{Username: "alex", PasswordHash: "x", FullName: "Alex"},
+	})
+
+	_, err := o.Handle(context.Background(), InputRequest{Source: "cli", UserID: "alex", Text: "привет"})
+	require.NoError(t, err)
+
+	require.Len(t, fakeProvider.Requests, 1)
+	var sawCalendarSchema, sawLoadToolGroup bool
+	for _, tool := range fakeProvider.Requests[0].Tools {
+		if tool.Name == calendarListEventsToolName {
+			sawCalendarSchema = true
+		}
+		if tool.Name == loadToolGroupToolName {
+			sawLoadToolGroup = true
+			require.Contains(t, tool.Description, "google_calendar")
+		}
+	}
+	require.False(t, sawCalendarSchema, "calendar_* schemas must be hidden until load_tool_group is called")
+	require.True(t, sawLoadToolGroup, "load_tool_group must be offered with a google_calendar entry")
+}
+
+// TestOrchestrator_CalendarTools_AppearAfterLoadToolGroup covers the other
+// half: once the model calls load_tool_group("google_calendar"), the real
+// calendar_* schemas must appear on the very next iteration of the same
+// turn.
+func TestOrchestrator_CalendarTools_AppearAfterLoadToolGroup(t *testing.T) {
+	fakeProvider := llmtest.New("local",
+		llmtest.Response{ToolCall: &llm.ToolCall{ID: "call-1", Name: loadToolGroupToolName, Arguments: `{"group":"google_calendar"}`}},
+		llmtest.Response{Text: "ok"},
+	)
+	o, _, _ := newTestOrchestratorWithOAuth(t, fakeProvider, []config.UserConfig{
+		{Username: "alex", PasswordHash: "x", FullName: "Alex"},
+	})
+	authorizeTestUser(t, o, "alex")
+
+	_, err := o.Handle(context.Background(), InputRequest{Source: "cli", UserID: "alex", Text: "что у меня в календаре?"})
+	require.NoError(t, err)
+
+	require.Len(t, fakeProvider.Requests, 2)
+	var found bool
+	for _, tool := range fakeProvider.Requests[1].Tools {
+		if tool.Name == calendarListEventsToolName {
+			found = true
+		}
+	}
+	require.True(t, found, "calendar_* schemas should appear on the next iteration after load_tool_group")
+}
+
+// TestOrchestrator_CalendarLoadToolGroup_RequiresAuthorizationFirst mirrors
+// TestOrchestrator_LoadToolGroup_OAuthGatedServer_RequiresAuthorizationFirst
+// (agent_loop_oauth_test.go) for the native google_calendar group: calling
+// load_tool_group before authorizing must fail with a clear,
+// model-relayable message and must NOT mark the group loaded.
+func TestOrchestrator_CalendarLoadToolGroup_RequiresAuthorizationFirst(t *testing.T) {
+	fakeProvider := llmtest.New("local",
+		llmtest.Response{ToolCall: &llm.ToolCall{ID: "call-1", Name: loadToolGroupToolName, Arguments: `{"group":"google_calendar"}`}},
+		llmtest.Response{Text: "Сначала нужно подключить календарь."},
+	)
+	o, _, _ := newTestOrchestratorWithOAuth(t, fakeProvider, []config.UserConfig{
+		{Username: "alex", PasswordHash: "x", FullName: "Alex"},
+	})
+	// no authorization performed
+
+	resp, err := o.Handle(context.Background(), InputRequest{Source: "cli", UserID: "alex", Text: "что у меня в календаре?"})
+	require.NoError(t, err)
+	require.Equal(t, "Сначала нужно подключить календарь.", resp.Reply)
+
+	toolResultMsg := fakeProvider.Requests[1].Messages[len(fakeProvider.Requests[1].Messages)-1]
+	require.Contains(t, toolResultMsg.Content, "hasn't connected")
+	require.Contains(t, toolResultMsg.Content, oauthAuthorizeToolName)
+
+	var found bool
+	for _, tool := range fakeProvider.Requests[1].Tools {
+		if tool.Name == calendarListEventsToolName {
+			found = true
+		}
+	}
+	require.False(t, found, "load_tool_group must not mark the group loaded when authorization fails")
+}
+
 func TestOrchestrator_CalendarListCalendars_NotConnectedYet(t *testing.T) {
 	fakeProvider := llmtest.New("local",
 		llmtest.Response{ToolCall: &llm.ToolCall{ID: "call-1", Name: calendarListCalendarsToolName, Arguments: `{}`}},
