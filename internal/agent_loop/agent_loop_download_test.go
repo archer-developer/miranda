@@ -1,4 +1,4 @@
-package httpapi
+package agentloop
 
 import (
 	"encoding/json"
@@ -29,7 +29,7 @@ func TestToDownloadRefs_NilForNoFiles(t *testing.T) {
 
 func TestAppendDownloadFootnotes_WebUIUntouched(t *testing.T) {
 	text := "Here you go."
-	got := appendDownloadFootnotes(text, []downloadedFile{{fileID: "f1", filename: "a.txt", sizeBytes: 10}}, webUISource)
+	got := appendDownloadFootnotes(text, []downloadedFile{{fileID: "f1", filename: "a.txt", sizeBytes: 10}}, WebUISource)
 	require.Equal(t, text, got, "the web UI renders chips from InputResponse.Downloads, not from Reply's text")
 }
 

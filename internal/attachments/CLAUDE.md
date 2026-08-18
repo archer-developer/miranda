@@ -61,7 +61,7 @@ bearer auth), rather than a single hardcoded target.
 `FilesEndpoint()` lands in `Orchestrator`'s `mcpExtensions` map
 (`SetMCPServerExtensions`). `executeTool` scans every tool call result
 from an opted-in server via `detectRemoteFileLinks`
-(`internal/httpapi/agent_loop.go`) for a URL matching that prefix:
+(`internal/agent_loop/downloads.go`) for a URL matching that prefix:
 
 - **JSON results** — sibling fields (`title`/`filename`/`name`/
   `size_bytes`/`mime_type`) are read via `findSiblingObject` +

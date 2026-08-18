@@ -1,4 +1,4 @@
-package httpapi
+package agentloop
 
 import (
 	"context"

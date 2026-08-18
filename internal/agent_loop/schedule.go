@@ -1,4 +1,4 @@
-package httpapi
+package agentloop
 
 import (
 	"context"
@@ -47,10 +47,10 @@ func (o *Orchestrator) RunScheduledTasks(ctx context.Context, logger *slog.Logge
 	}
 
 	for _, task := range due {
-		// detachedTurnContext keeps this turn alive past the sweep tick that
+		// DetachedTurnContext keeps this turn alive past the sweep tick that
 		// triggered it, the same way it keeps a Telegram-triggered turn alive
 		// past the inbound webhook connection closing — see server.go.
-		turnCtx, cancel := detachedTurnContext(ctx)
+		turnCtx, cancel := DetachedTurnContext(ctx)
 		_, err := o.Handle(turnCtx, InputRequest{
 			Source: users.SourceScheduled,
 			UserID: task.UserID,

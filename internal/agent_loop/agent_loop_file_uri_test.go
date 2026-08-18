@@ -1,4 +1,4 @@
-package httpapi
+package agentloop
 
 import (
 	"context"
@@ -99,7 +99,7 @@ func TestExecuteTool_GenericFileURIDetection_ProxiesMedicalCardDocument(t *testi
 		"medical_card": {FilesEndpoint: &medicalEndpoint},
 	}, time.Hour)
 
-	resp, err := o.Handle(context.Background(), InputRequest{Source: webUISource, UserID: "archer", Text: "покажи файл МРТ"})
+	resp, err := o.Handle(context.Background(), InputRequest{Source: WebUISource, UserID: "archer", Text: "покажи файл МРТ"})
 	require.NoError(t, err)
 	require.NotContains(t, resp.Reply, "<download>", "downloads are never folded into the reply text — see InputResponse.Downloads")
 	require.NotContains(t, resp.Reply, "127.0.0.1:8791", "the internal MCP server address must never reach the reply text")
@@ -141,7 +141,7 @@ func TestExecuteTool_GenericFileURIDetection_SkipsNonOptedInServer(t *testing.T)
 		"medical_card": {FilesEndpoint: &medicalEndpoint},
 	}, time.Hour)
 
-	resp, err := o.Handle(context.Background(), InputRequest{Source: webUISource, UserID: "archer", Text: "get the document"})
+	resp, err := o.Handle(context.Background(), InputRequest{Source: WebUISource, UserID: "archer", Text: "get the document"})
 	require.NoError(t, err)
 	require.Empty(t, resp.Downloads, "a non-opted-in server's result must never be scanned for a file URI")
 }

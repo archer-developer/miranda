@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 
+	agentloop "github.com/archer-developer/miranda/internal/agent_loop"
 	"github.com/archer-developer/miranda/internal/hub"
 	"github.com/archer-developer/miranda/internal/telegram"
 	"github.com/archer-developer/miranda/internal/users"
@@ -98,10 +99,10 @@ func (s *Server) handleTelegramWebhook(w http.ResponseWriter, r *http.Request) {
 	// TTS dispatch inside Handle can run well past however long the
 	// connection Telegram used to deliver this update stays around — see
 	// turnTimeout.
-	turnCtx, cancel := detachedTurnContext(r.Context())
+	turnCtx, cancel := agentloop.DetachedTurnContext(r.Context())
 	defer cancel()
 
-	resp, err := s.orchestrator.Handle(turnCtx, InputRequest{
+	resp, err := s.orchestrator.Handle(turnCtx, agentloop.InputRequest{
 		Source: users.SourceTelegram,
 		UserID: user.Username,
 		Text:   msg.Text,

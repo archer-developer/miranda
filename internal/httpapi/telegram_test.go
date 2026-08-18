@@ -70,7 +70,7 @@ func postTelegramUpdate(t *testing.T, ts *httptest.Server, secret string, update
 func TestTelegramWebhook_RejectsRequestWithWrongOrMissingSecret(t *testing.T) {
 	provider := llmtest.New("local", llmtest.Response{Text: "hello"})
 	o, _, _ := newTestOrchestrator(t, provider)
-	server := NewServer(o, o.hub, "", nil, nil, nil, nil)
+	server := NewServer(o, o.Hub(), "", nil, nil, nil, nil)
 	tw, sent := newTestTelegramWebhook(t)
 	server.SetTelegramWebhook(tw)
 
@@ -103,7 +103,7 @@ func TestTelegramWebhook_UnrecognizedTelegramUserIsDroppedAndLogged(t *testing.T
 
 	var logBuf bytes.Buffer
 	logger := slog.New(slog.NewTextHandler(&logBuf, nil))
-	server := NewServer(o, o.hub, "", nil, logger, registry, nil)
+	server := NewServer(o, o.Hub(), "", nil, logger, registry, nil)
 	tw, sent := newTestTelegramWebhook(t)
 	server.SetTelegramWebhook(tw)
 
@@ -135,7 +135,7 @@ func TestTelegramWebhook_KnownUserReachesOrchestratorAndGetsReplyViaBotAPI(t *te
 	})
 	require.NoError(t, err)
 
-	server := NewServer(o, o.hub, "", nil, nil, registry, nil)
+	server := NewServer(o, o.Hub(), "", nil, nil, registry, nil)
 	tw, sent := newTestTelegramWebhook(t)
 	server.SetTelegramWebhook(tw)
 
@@ -167,7 +167,7 @@ func TestTelegramWebhook_KnownUserReachesOrchestratorAndGetsReplyViaBotAPI(t *te
 func TestTelegramWebhook_IgnoresNonMessageUpdates(t *testing.T) {
 	provider := llmtest.New("local")
 	o, _, _ := newTestOrchestrator(t, provider)
-	server := NewServer(o, o.hub, "", nil, nil, nil, nil)
+	server := NewServer(o, o.Hub(), "", nil, nil, nil, nil)
 	tw, sent := newTestTelegramWebhook(t)
 	server.SetTelegramWebhook(tw)
 

@@ -25,6 +25,7 @@ import (
 	"github.com/archer-developer/miranda-llm/llmtrace"
 	"github.com/archer-developer/miranda-llm/openaicompat"
 	"github.com/archer-developer/miranda-llm/router"
+	agentloop "github.com/archer-developer/miranda/internal/agent_loop"
 	"github.com/archer-developer/miranda/internal/attachments"
 	"github.com/archer-developer/miranda/internal/config"
 	"github.com/archer-developer/miranda/internal/envfile"
@@ -300,7 +301,7 @@ func run(cfg config.Config, logger *slog.Logger, eventHub *hub.Hub) error {
 	}
 
 	defaultUserID := "debug"
-	orchestrator := httpapi.NewOrchestrator(
+	orchestrator := agentloop.NewOrchestrator(
 		llmRouter, toolManager, historyStore, memoryStore, dispatcher, eventHub, usersRegistry,
 		cfg.Agent, cfg.Memory, cfg.TTS, ttsChunkMaxChars(cfg.TTS), defaultUserID,
 	)
@@ -329,7 +330,7 @@ func run(cfg config.Config, logger *slog.Logger, eventHub *hub.Hub) error {
 	// mcpExtensions bundles every configured MCP server's static opt-ins
 	// (encryption-key/session-id injection now, file-URI download detection
 	// merged in below once it's known) into the one map
-	// SetMCPServerExtensions takes — see httpapi.MCPServerExtension.
+	// SetMCPServerExtensions takes — see agentloop.MCPServerExtension.
 	mcpExtensions := mcpServerExtensions(cfg.MCP.Servers, logger)
 	var downloadRecordTTL time.Duration
 
@@ -437,7 +438,7 @@ func run(cfg config.Config, logger *slog.Logger, eventHub *hub.Hub) error {
 // controls only whether the LLM-based recap/memory step runs, never whether
 // the session actually closes on schedule). Exits once ctx is cancelled at
 // shutdown.
-func sweepIdleSessions(ctx context.Context, o *httpapi.Orchestrator, cfg config.MemoryConfig, logger *slog.Logger) {
+func sweepIdleSessions(ctx context.Context, o *agentloop.Orchestrator, cfg config.MemoryConfig, logger *slog.Logger) {
 	idleFor := time.Duration(cfg.SessionIdleTimeoutMinutes) * time.Minute
 
 	ticker := time.NewTicker(idleSweepInterval)
@@ -458,7 +459,7 @@ func sweepIdleSessions(ctx context.Context, o *httpapi.Orchestrator, cfg config.
 // sweepScheduledTasks periodically fires any scheduled tasks that are due
 // (see Orchestrator.RunScheduledTasks). It's a no-op ticker when
 // cfg.Enabled is off, and exits once ctx is cancelled at shutdown.
-func sweepScheduledTasks(ctx context.Context, o *httpapi.Orchestrator, cfg config.ScheduleConfig, logger *slog.Logger) {
+func sweepScheduledTasks(ctx context.Context, o *agentloop.Orchestrator, cfg config.ScheduleConfig, logger *slog.Logger) {
 	if !cfg.Enabled {
 		return
 	}
@@ -543,7 +544,7 @@ func firstAPIKey(envs []string) string {
 }
 
 // validateEscalationToolNames rejects a config where any provider's
-// escalation.tool_name collides with one of httpapi.ReservedToolNames() —
+// escalation.tool_name collides with one of agentloop.ReservedToolNames() —
 // see that function's doc comment for why a collision would silently
 // swallow real tool calls instead of erroring loudly. Checked once at
 // startup, before any provider/router construction, so a config mistake
@@ -552,7 +553,7 @@ func firstAPIKey(envs []string) string {
 // collisions (internal/config.Load).
 func validateEscalationToolNames(providers []config.LLMProvider) error {
 	reserved := make(map[string]bool)
-	for _, name := range httpapi.ReservedToolNames() {
+	for _, name := range agentloop.ReservedToolNames() {
 		reserved[name] = true
 	}
 	for _, p := range providers {
@@ -608,7 +609,7 @@ func connectMCP(ctx context.Context, servers []config.MCPServer, logger *slog.Lo
 		if s.OAuthProvider != "" {
 			// An OAuth-gated server gets no single shared global connection
 			// — each household member's own per-user session is instead
-			// brought up lazily by httpapi.Orchestrator.executeTool via
+			// brought up lazily by agentloop.Orchestrator.executeTool via
 			// mcp.Manager.EnsureUserSession once they've authorized (see
 			// docs/adr/oauth2-layer.md). config.validateOAuthServers already
 			// guarantees such a server is Lazy, so it never appears in a
@@ -634,7 +635,7 @@ func connectMCP(ctx context.Context, servers []config.MCPServer, logger *slog.Lo
 // separately by the caller, since it's only resolved when
 // config.FileUploadConfig.Enabled and can fail config validation — see
 // config.Config.FileExposingServers) — keyed by server name, ready to hand
-// to httpapi.Orchestrator.SetMCPServerExtensions. Entirely independent of
+// to agentloop.Orchestrator.SetMCPServerExtensions. Entirely independent of
 // connection lifecycle, so this is deliberately its own function rather than
 // folded into connectMCP: Manager's job is connection bookkeeping over
 // live/reconnecting clients, not a static permission store. Logs loudly on
@@ -643,10 +644,10 @@ func connectMCP(ctx context.Context, servers []config.MCPServer, logger *slog.Lo
 // at load time — defense in depth, not a substitute for that validation. A
 // server absent from the returned map (or present with zero-value fields)
 // simply has none of these behaviors.
-func mcpServerExtensions(servers []config.MCPServer, logger *slog.Logger) map[string]httpapi.MCPServerExtension {
-	extensions := make(map[string]httpapi.MCPServerExtension, len(servers))
+func mcpServerExtensions(servers []config.MCPServer, logger *slog.Logger) map[string]agentloop.MCPServerExtension {
+	extensions := make(map[string]agentloop.MCPServerExtension, len(servers))
 	for _, s := range servers {
-		var ext httpapi.MCPServerExtension
+		var ext agentloop.MCPServerExtension
 
 		permitted := s.EncryptionKeyPermitted()
 		if s.EncryptionKeyAllowed && !permitted {

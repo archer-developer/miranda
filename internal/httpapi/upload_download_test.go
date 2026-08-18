@@ -42,7 +42,7 @@ func newDownloadTestServer(t *testing.T, registry *users.Registry, sessions *ses
 	sandbox := fakeSandboxFiles(t, "file contents")
 	t.Cleanup(sandbox.Close)
 
-	server := NewServer(o, o.hub, authToken, nil, nil, registry, sessions)
+	server := NewServer(o, o.Hub(), authToken, nil, nil, registry, sessions)
 	server.SetUploadHandler(0)
 
 	return server, store, sandbox.URL
@@ -156,7 +156,7 @@ func TestHandleDownload_NilAttachStoreFailsClosed(t *testing.T) {
 	o, _, _ := newTestOrchestrator(t, provider)
 	// Deliberately never call o.SetAttachmentStore.
 
-	server := NewServer(o, o.hub, "", nil, nil, nil, nil)
+	server := NewServer(o, o.Hub(), "", nil, nil, nil, nil)
 	server.SetUploadHandler(0)
 
 	ts := httptest.NewServer(server)
@@ -181,7 +181,7 @@ func TestHandleFilesServe_ServesKnownFile(t *testing.T) {
 	o.SetAttachmentStore(store)
 	store.Put(attachments.Record{FileID: "abc123", Filename: "scan.pdf", MIMEType: "application/pdf", Data: []byte("%PDF-bytes")})
 
-	server := NewServer(o, o.hub, "", nil, nil, nil, nil)
+	server := NewServer(o, o.Hub(), "", nil, nil, nil, nil)
 	server.SetUploadHandler(0)
 	ts := httptest.NewServer(server)
 	defer ts.Close()
@@ -202,7 +202,7 @@ func TestHandleFilesServe_UnknownIDReturns404(t *testing.T) {
 	t.Cleanup(store.Close)
 	o.SetAttachmentStore(store)
 
-	server := NewServer(o, o.hub, "", nil, nil, nil, nil)
+	server := NewServer(o, o.Hub(), "", nil, nil, nil, nil)
 	server.SetUploadHandler(0)
 	ts := httptest.NewServer(server)
 	defer ts.Close()
@@ -225,7 +225,7 @@ func TestHandleUpload_StagesLocallyWithoutForwardingAnywhere(t *testing.T) {
 	t.Cleanup(store.Close)
 	o.SetAttachmentStore(store)
 
-	server := NewServer(o, o.hub, "", nil, nil, nil, nil)
+	server := NewServer(o, o.Hub(), "", nil, nil, nil, nil)
 	server.SetUploadHandler(10 << 20)
 	ts := httptest.NewServer(server)
 	defer ts.Close()

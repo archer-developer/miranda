@@ -1,4 +1,4 @@
-package httpapi
+package agentloop
 
 import (
 	"context"
@@ -184,12 +184,12 @@ type speakerHA interface {
 // dispatches assistant text to TTS as it streams, and persists the turn to
 // history.
 type Orchestrator struct {
-	router           *router.Router
-	tools            *mcp.Manager
-	history          *history.Store
-	memory           *memory.Store
-	tts              *tts.Dispatcher // may be nil: TTS dispatch is best-effort and optional
-	hub              *hub.Hub
+	router  *router.Router
+	tools   *mcp.Manager
+	history *history.Store
+	memory  *memory.Store
+	tts     *tts.Dispatcher // may be nil: TTS dispatch is best-effort and optional
+	hub     *hub.Hub
 	// logger is set via SetLogger; nil means tool-call failures (e.g. an
 	// MCP server rejecting a call) are only visible in logs/llm.log's full
 	// request/response trace, not in the app log/journal or the web UI's
@@ -366,6 +366,22 @@ func (o *Orchestrator) SetSpeakerHA(ha speakerHA) {
 // any Attachments field in an InputRequest is ignored silently.
 func (o *Orchestrator) SetAttachmentStore(s *attachments.Store) {
 	o.attachStore = s
+}
+
+// AttachStore returns the attachment store wired in via SetAttachmentStore,
+// or nil if file_upload is disabled — used by httpapi's upload/download
+// handlers, which live in a separate package from Orchestrator and so need
+// an exported accessor rather than direct field access.
+func (o *Orchestrator) AttachStore() *attachments.Store {
+	return o.attachStore
+}
+
+// Hub returns the event hub passed to NewOrchestrator — used by httpapi's
+// tests (and NewServer call sites generally) to share the same hub between
+// Server and Orchestrator without Server needing direct field access across
+// the package boundary.
+func (o *Orchestrator) Hub() *hub.Hub {
+	return o.hub
 }
 
 // SetKeyring wires the per-user data-encryption keyring in, mirroring

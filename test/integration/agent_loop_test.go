@@ -19,6 +19,7 @@ import (
 	llm "github.com/archer-developer/miranda-llm"
 	"github.com/archer-developer/miranda-llm/llmtest"
 	"github.com/archer-developer/miranda-llm/router"
+	agentloop "github.com/archer-developer/miranda/internal/agent_loop"
 	"github.com/archer-developer/miranda/internal/config"
 	"github.com/archer-developer/miranda/internal/history"
 	"github.com/archer-developer/miranda/internal/httpapi"
@@ -61,7 +62,7 @@ func newHarness(t *testing.T, provider *llmtest.FakeProvider, mcpClients ...mcp.
 	toolManager := mcp.NewManager(nil, mcpClients...)
 	eventHub := hub.New(200)
 
-	orchestrator := httpapi.NewOrchestrator(
+	orchestrator := agentloop.NewOrchestrator(
 		r, toolManager, historyStore, memoryStore, nil, eventHub, nil,
 		config.AgentConfig{},
 		config.MemoryConfig{
@@ -79,7 +80,7 @@ func newHarness(t *testing.T, provider *llmtest.FakeProvider, mcpClients ...mcp.
 	return &harness{server: ts, history: historyStore, memory: memoryStore}
 }
 
-func (h *harness) post(t *testing.T, req httpapi.InputRequest) httpapi.InputResponse {
+func (h *harness) post(t *testing.T, req agentloop.InputRequest) agentloop.InputResponse {
 	t.Helper()
 	body, err := json.Marshal(req)
 	require.NoError(t, err)
@@ -89,7 +90,7 @@ func (h *harness) post(t *testing.T, req httpapi.InputRequest) httpapi.InputResp
 	defer resp.Body.Close()
 	require.Equal(t, http.StatusOK, resp.StatusCode)
 
-	var out httpapi.InputResponse
+	var out agentloop.InputResponse
 	require.NoError(t, json.NewDecoder(resp.Body).Decode(&out))
 	return out
 }
@@ -98,7 +99,7 @@ func TestAgentLoop_TextOnlyTurnPersistsToHistory(t *testing.T) {
 	provider := llmtest.New("local", llmtest.Response{Text: "Свет включён."})
 	h := newHarness(t, provider)
 
-	resp := h.post(t, httpapi.InputRequest{Source: "cli", UserID: "alex", Text: "включи свет"})
+	resp := h.post(t, agentloop.InputRequest{Source: "cli", UserID: "alex", Text: "включи свет"})
 	require.Equal(t, "Свет включён.", resp.Reply)
 	require.NotEmpty(t, resp.ConversationID)
 
@@ -117,7 +118,7 @@ func TestAgentLoop_MCPToolCallRoundTrip(t *testing.T) {
 	)
 	h := newHarness(t, provider, ha)
 
-	resp := h.post(t, httpapi.InputRequest{Source: "ha_assist", UserID: "alex", Text: "включи свет в зале"})
+	resp := h.post(t, agentloop.InputRequest{Source: "ha_assist", UserID: "alex", Text: "включи свет в зале"})
 	require.Equal(t, "Готово, включил свет в зале.", resp.Reply)
 
 	require.Len(t, ha.Calls, 1)
@@ -143,10 +144,10 @@ func TestAgentLoop_ToolCallRoundTripIsReplayedOnNextTurnInSameConversation(t *te
 	)
 	h := newHarness(t, provider, ha)
 
-	first := h.post(t, httpapi.InputRequest{Source: "cli", UserID: "alex", Text: "включи свет в зале"})
+	first := h.post(t, agentloop.InputRequest{Source: "cli", UserID: "alex", Text: "включи свет в зале"})
 	require.Equal(t, "Готово, включил свет в зале.", first.Reply)
 
-	second := h.post(t, httpapi.InputRequest{Source: "cli", UserID: "alex", Text: "спасибо"})
+	second := h.post(t, agentloop.InputRequest{Source: "cli", UserID: "alex", Text: "спасибо"})
 	require.Equal(t, first.ConversationID, second.ConversationID)
 	require.Equal(t, "Не за что.", second.Reply)
 
@@ -176,7 +177,7 @@ func TestAgentLoop_RememberThisUpdatesMemoryFile(t *testing.T) {
 	)
 	h := newHarness(t, provider)
 
-	resp := h.post(t, httpapi.InputRequest{Source: "cli", UserID: "alex", Text: "у меня аллергия на кошек"})
+	resp := h.post(t, agentloop.InputRequest{Source: "cli", UserID: "alex", Text: "у меня аллергия на кошек"})
 	require.Equal(t, "Запомнил.", resp.Reply)
 
 	content, err := h.memory.Read("alex")
@@ -191,9 +192,9 @@ func TestAgentLoop_ContinuesSameConversationAcrossSeparateRequestsForSameUser(t 
 	)
 	h := newHarness(t, provider)
 
-	first := h.post(t, httpapi.InputRequest{Source: "cli", UserID: "alex", Text: "первое сообщение"})
+	first := h.post(t, agentloop.InputRequest{Source: "cli", UserID: "alex", Text: "первое сообщение"})
 	// No conversation_id sent — session continuity is server-owned per user.
-	second := h.post(t, httpapi.InputRequest{Source: "cli", UserID: "alex", Text: "второе сообщение"})
+	second := h.post(t, agentloop.InputRequest{Source: "cli", UserID: "alex", Text: "второе сообщение"})
 
 	require.Equal(t, first.ConversationID, second.ConversationID)
 }
@@ -207,7 +208,7 @@ func TestAgentLoop_EndConversationToolClosesSessionThroughRealHTTPPath(t *testin
 	)
 	h := newHarness(t, provider)
 
-	first := h.post(t, httpapi.InputRequest{Source: "cli", UserID: "alex", Text: "давай начнём новую беседу"})
+	first := h.post(t, agentloop.InputRequest{Source: "cli", UserID: "alex", Text: "давай начнём новую беседу"})
 	require.Equal(t, "Начинаем сначала.", first.Reply)
 
 	convos, err := h.history.RecentConversations(t.Context(), "alex", 10)
@@ -215,7 +216,7 @@ func TestAgentLoop_EndConversationToolClosesSessionThroughRealHTTPPath(t *testin
 	require.Len(t, convos, 1)
 	require.NotNil(t, convos[0].EndedAt)
 
-	second := h.post(t, httpapi.InputRequest{Source: "cli", UserID: "alex", Text: "привет"})
+	second := h.post(t, agentloop.InputRequest{Source: "cli", UserID: "alex", Text: "привет"})
 	require.NotEqual(t, first.ConversationID, second.ConversationID)
 }
 
@@ -227,8 +228,8 @@ func TestAgentLoop_ForgetConversationToolDeletesConversationThroughRealHTTPPath(
 	)
 	h := newHarness(t, provider)
 
-	first := h.post(t, httpapi.InputRequest{Source: "cli", UserID: "alex", Text: "секрет"})
-	second := h.post(t, httpapi.InputRequest{Source: "cli", UserID: "alex", Text: "забудь этот диалог"})
+	first := h.post(t, agentloop.InputRequest{Source: "cli", UserID: "alex", Text: "секрет"})
+	second := h.post(t, agentloop.InputRequest{Source: "cli", UserID: "alex", Text: "забудь этот диалог"})
 	require.Equal(t, first.ConversationID, second.ConversationID)
 
 	msgs, err := h.history.ConversationMessages(t.Context(), second.ConversationID)

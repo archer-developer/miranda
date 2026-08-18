@@ -13,6 +13,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/archer-developer/miranda-llm/llmtest"
+	agentloop "github.com/archer-developer/miranda/internal/agent_loop"
 	"github.com/archer-developer/miranda/internal/session"
 )
 
@@ -35,7 +36,7 @@ func dialChatWS(t *testing.T, wsURL, sessionToken string) *websocket.Conn {
 func TestServer_HandleWSChat_RejectsUnauthenticated(t *testing.T) {
 	provider := llmtest.New("local")
 	o, _, _ := newTestOrchestrator(t, provider)
-	server := NewServer(o, o.hub, "secret", nil, nil, nil, nil)
+	server := NewServer(o, o.Hub(), "secret", nil, nil, nil, nil)
 
 	ts := httptest.NewServer(server)
 	defer ts.Close()
@@ -53,7 +54,7 @@ func TestServer_HandleWSChat_RejectsCrossUserAccess(t *testing.T) {
 	token, err := sessions.Create("alice")
 	require.NoError(t, err)
 
-	server := NewServer(o, o.hub, "", nil, nil, nil, sessions)
+	server := NewServer(o, o.Hub(), "", nil, nil, nil, sessions)
 	ts := httptest.NewServer(server)
 	defer ts.Close()
 
@@ -68,7 +69,7 @@ func TestServer_HandleWSChat_RejectsCrossUserAccess(t *testing.T) {
 func TestServer_HandleWSChat_RejectsBearerOnlyAuth(t *testing.T) {
 	provider := llmtest.New("local")
 	o, _, _ := newTestOrchestrator(t, provider)
-	server := NewServer(o, o.hub, "", nil, nil, nil, nil) // no session store: only the "LAN dev mode" bearer path is available
+	server := NewServer(o, o.Hub(), "", nil, nil, nil, nil) // no session store: only the "LAN dev mode" bearer path is available
 
 	ts := httptest.NewServer(server)
 	defer ts.Close()
@@ -86,14 +87,14 @@ func TestServer_HandleWSChat_ReceivesOwnConversationEvents(t *testing.T) {
 	token, err := sessions.Create("alice")
 	require.NoError(t, err)
 
-	server := NewServer(o, o.hub, "", nil, nil, nil, sessions)
+	server := NewServer(o, o.Hub(), "", nil, nil, nil, sessions)
 	ts := httptest.NewServer(server)
 	defer ts.Close()
 
 	wsURL := "ws" + strings.TrimPrefix(ts.URL, "http") + "/ws/chat/alice"
 	conn := dialChatWS(t, wsURL, token)
 
-	resp, err := o.Handle(context.Background(), InputRequest{Source: "ha_assist", UserID: "alice", Text: "привет"})
+	resp, err := o.Handle(context.Background(), agentloop.InputRequest{Source: "ha_assist", UserID: "alice", Text: "привет"})
 	require.NoError(t, err)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
@@ -122,14 +123,14 @@ func TestServer_HandleWSChat_DoesNotLeakOtherUsersEvents(t *testing.T) {
 	bobToken, err := sessions.Create("bob")
 	require.NoError(t, err)
 
-	server := NewServer(o, o.hub, "", nil, nil, nil, sessions)
+	server := NewServer(o, o.Hub(), "", nil, nil, nil, sessions)
 	ts := httptest.NewServer(server)
 	defer ts.Close()
 
 	bobURL := "ws" + strings.TrimPrefix(ts.URL, "http") + "/ws/chat/bob"
 	bobConn := dialChatWS(t, bobURL, bobToken)
 
-	_, err = o.Handle(context.Background(), InputRequest{Source: "ha_assist", UserID: "alice", Text: "привет"})
+	_, err = o.Handle(context.Background(), agentloop.InputRequest{Source: "ha_assist", UserID: "alice", Text: "привет"})
 	require.NoError(t, err)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)

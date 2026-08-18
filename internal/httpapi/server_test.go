@@ -13,6 +13,7 @@ import (
 
 	llm "github.com/archer-developer/miranda-llm"
 	"github.com/archer-developer/miranda-llm/llmtest"
+	agentloop "github.com/archer-developer/miranda/internal/agent_loop"
 	"github.com/archer-developer/miranda/internal/config"
 	"github.com/archer-developer/miranda/internal/session"
 	"github.com/archer-developer/miranda/internal/users"
@@ -21,7 +22,7 @@ import (
 func TestServer_Healthz_IsUnauthenticated(t *testing.T) {
 	provider := llmtest.New("local")
 	o, _, _ := newTestOrchestrator(t, provider)
-	server := NewServer(o, o.hub, "secret", nil, nil, nil, nil)
+	server := NewServer(o, o.Hub(), "secret", nil, nil, nil, nil)
 
 	ts := httptest.NewServer(server)
 	defer ts.Close()
@@ -35,18 +36,18 @@ func TestServer_Healthz_IsUnauthenticated(t *testing.T) {
 func TestServer_HandleInput_ReturnsJSONReply(t *testing.T) {
 	provider := llmtest.New("local", llmtest.Response{Text: "hello"})
 	o, _, _ := newTestOrchestrator(t, provider)
-	server := NewServer(o, o.hub, "", nil, nil, nil, nil)
+	server := NewServer(o, o.Hub(), "", nil, nil, nil, nil)
 
 	ts := httptest.NewServer(server)
 	defer ts.Close()
 
-	body, _ := json.Marshal(InputRequest{Source: "cli", UserID: "alex", Text: "hi"})
+	body, _ := json.Marshal(agentloop.InputRequest{Source: "cli", UserID: "alex", Text: "hi"})
 	resp, err := http.Post(ts.URL+"/api/v1/input", "application/json", bytes.NewReader(body))
 	require.NoError(t, err)
 	defer resp.Body.Close()
 	require.Equal(t, http.StatusOK, resp.StatusCode)
 
-	var out InputResponse
+	var out agentloop.InputResponse
 	require.NoError(t, json.NewDecoder(resp.Body).Decode(&out))
 	require.Equal(t, "hello", out.Reply)
 }
@@ -57,7 +58,7 @@ func TestServer_HandleInput_LogsRawRequestBody(t *testing.T) {
 
 	var logBuf bytes.Buffer
 	logger := slog.New(slog.NewTextHandler(&logBuf, nil))
-	server := NewServer(o, o.hub, "", nil, logger, nil, nil)
+	server := NewServer(o, o.Hub(), "", nil, logger, nil, nil)
 
 	ts := httptest.NewServer(server)
 	defer ts.Close()
@@ -80,7 +81,7 @@ func TestServer_HandleInput_LogsRawRequestBodyEvenWhenUnauthorized(t *testing.T)
 
 	var logBuf bytes.Buffer
 	logger := slog.New(slog.NewTextHandler(&logBuf, nil))
-	server := NewServer(o, o.hub, "secret-token", nil, logger, nil, nil)
+	server := NewServer(o, o.Hub(), "secret-token", nil, logger, nil, nil)
 
 	ts := httptest.NewServer(server)
 	defer ts.Close()
@@ -99,12 +100,12 @@ func TestServer_HandleInput_LogsRawRequestBodyEvenWhenUnauthorized(t *testing.T)
 func TestServer_HandleInput_RejectsMissingText(t *testing.T) {
 	provider := llmtest.New("local")
 	o, _, _ := newTestOrchestrator(t, provider)
-	server := NewServer(o, o.hub, "", nil, nil, nil, nil)
+	server := NewServer(o, o.Hub(), "", nil, nil, nil, nil)
 
 	ts := httptest.NewServer(server)
 	defer ts.Close()
 
-	body, _ := json.Marshal(InputRequest{Source: "cli", UserID: "alex"})
+	body, _ := json.Marshal(agentloop.InputRequest{Source: "cli", UserID: "alex"})
 	resp, err := http.Post(ts.URL+"/api/v1/input", "application/json", bytes.NewReader(body))
 	require.NoError(t, err)
 	defer resp.Body.Close()
@@ -114,12 +115,12 @@ func TestServer_HandleInput_RejectsMissingText(t *testing.T) {
 func TestServer_HandleInput_RequiresBearerTokenWhenConfigured(t *testing.T) {
 	provider := llmtest.New("local", llmtest.Response{Text: "hello"})
 	o, _, _ := newTestOrchestrator(t, provider)
-	server := NewServer(o, o.hub, "secret", nil, nil, nil, nil)
+	server := NewServer(o, o.Hub(), "secret", nil, nil, nil, nil)
 
 	ts := httptest.NewServer(server)
 	defer ts.Close()
 
-	body, _ := json.Marshal(InputRequest{Source: "cli", UserID: "alex", Text: "hi"})
+	body, _ := json.Marshal(agentloop.InputRequest{Source: "cli", UserID: "alex", Text: "hi"})
 
 	resp, err := http.Post(ts.URL+"/api/v1/input", "application/json", bytes.NewReader(body))
 	require.NoError(t, err)
@@ -144,17 +145,17 @@ func TestServer_HandleInput_ResolvesHAUserIDToCanonicalUsername(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	server := NewServer(o, o.hub, "", nil, nil, registry, nil)
+	server := NewServer(o, o.Hub(), "", nil, nil, registry, nil)
 	ts := httptest.NewServer(server)
 	defer ts.Close()
 
-	body, _ := json.Marshal(InputRequest{Source: "ha_assist", UserID: "ha-uuid-alex", Text: "привет"})
+	body, _ := json.Marshal(agentloop.InputRequest{Source: "ha_assist", UserID: "ha-uuid-alex", Text: "привет"})
 	resp, err := http.Post(ts.URL+"/api/v1/input", "application/json", bytes.NewReader(body))
 	require.NoError(t, err)
 	defer resp.Body.Close()
 	require.Equal(t, http.StatusOK, resp.StatusCode)
 
-	var out InputResponse
+	var out agentloop.InputResponse
 	require.NoError(t, json.NewDecoder(resp.Body).Decode(&out))
 
 	// The whole point of resolution: history/memory must be keyed by the
@@ -179,13 +180,13 @@ func TestServer_HandleInput_SessionCookieGrantsAccessAndSetsIdentity(t *testing.
 	token, err := sessions.Create("anna")
 	require.NoError(t, err)
 
-	server := NewServer(o, o.hub, "secret", nil, nil, registry, sessions)
+	server := NewServer(o, o.Hub(), "secret", nil, nil, registry, sessions)
 	ts := httptest.NewServer(server)
 	defer ts.Close()
 
 	// No bearer token, but a valid session cookie — and the client tries to
 	// claim a different user_id/source, which must be ignored.
-	body, _ := json.Marshal(InputRequest{Source: "ha_assist", UserID: "someone-else", Text: "привет"})
+	body, _ := json.Marshal(agentloop.InputRequest{Source: "ha_assist", UserID: "someone-else", Text: "привет"})
 	req, _ := http.NewRequest(http.MethodPost, ts.URL+"/api/v1/input", bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	req.AddCookie(&http.Cookie{Name: session.CookieName, Value: token})
@@ -195,7 +196,7 @@ func TestServer_HandleInput_SessionCookieGrantsAccessAndSetsIdentity(t *testing.
 	defer resp.Body.Close()
 	require.Equal(t, http.StatusOK, resp.StatusCode)
 
-	var out InputResponse
+	var out agentloop.InputResponse
 	require.NoError(t, json.NewDecoder(resp.Body).Decode(&out))
 
 	msgs, err := historyStore.ConversationMessages(t.Context(), out.ConversationID)
@@ -220,11 +221,11 @@ func TestServer_HandleInput_SessionCookieIdentityWinsEvenWithOpenBearerAuth(t *t
 	// auth_token empty ("LAN-only dev mode" — bearerAuthorized always passes)
 	// must not cause a logged-in dashboard session's identity to be
 	// discarded in favor of the anonymous/default user.
-	server := NewServer(o, o.hub, "", nil, nil, registry, sessions)
+	server := NewServer(o, o.Hub(), "", nil, nil, registry, sessions)
 	ts := httptest.NewServer(server)
 	defer ts.Close()
 
-	body, _ := json.Marshal(InputRequest{Source: "web_ui", Text: "Привет! как меня зовут?"})
+	body, _ := json.Marshal(agentloop.InputRequest{Source: "web_ui", Text: "Привет! как меня зовут?"})
 	req, _ := http.NewRequest(http.MethodPost, ts.URL+"/api/v1/input", bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	req.AddCookie(&http.Cookie{Name: session.CookieName, Value: token})
@@ -259,12 +260,12 @@ func TestServer_HandleInput_MemoryAndConversationShareSameKeyAcrossChannels(t *t
 	token, err := sessions.Create("archer")
 	require.NoError(t, err)
 
-	server := NewServer(o, o.hub, "", nil, nil, registry, sessions)
+	server := NewServer(o, o.Hub(), "", nil, nil, registry, sessions)
 	ts := httptest.NewServer(server)
 	defer ts.Close()
 
 	// Turn 1 arrives via HA voice, identified only by its raw speaker id.
-	body1, _ := json.Marshal(InputRequest{Source: "ha_assist", UserID: "ha-raw-archer", Text: "я люблю чай, запомни"})
+	body1, _ := json.Marshal(agentloop.InputRequest{Source: "ha_assist", UserID: "ha-raw-archer", Text: "я люблю чай, запомни"})
 	resp1, err := http.Post(ts.URL+"/api/v1/input", "application/json", bytes.NewReader(body1))
 	require.NoError(t, err)
 	defer resp1.Body.Close()
@@ -279,7 +280,7 @@ func TestServer_HandleInput_MemoryAndConversationShareSameKeyAcrossChannels(t *t
 	require.Empty(t, rawContent)
 
 	// Turn 2 arrives via an authenticated web UI session for the same person.
-	body2, _ := json.Marshal(InputRequest{Source: "web_ui", Text: "помнишь что я люблю?"})
+	body2, _ := json.Marshal(agentloop.InputRequest{Source: "web_ui", Text: "помнишь что я люблю?"})
 	req2, _ := http.NewRequest(http.MethodPost, ts.URL+"/api/v1/input", bytes.NewReader(body2))
 	req2.Header.Set("Content-Type", "application/json")
 	req2.AddCookie(&http.Cookie{Name: session.CookieName, Value: token})
@@ -288,7 +289,7 @@ func TestServer_HandleInput_MemoryAndConversationShareSameKeyAcrossChannels(t *t
 	defer resp2.Body.Close()
 	require.Equal(t, http.StatusOK, resp2.StatusCode)
 
-	var out2 InputResponse
+	var out2 agentloop.InputResponse
 	require.NoError(t, json.NewDecoder(resp2.Body).Decode(&out2))
 
 	// Both channels must land in the very same open conversation — session
@@ -304,11 +305,11 @@ func TestServer_HandleInput_InvalidSessionCookieIsUnauthorized(t *testing.T) {
 	o, _, _ := newTestOrchestrator(t, provider)
 	sessions := session.NewStore(time.Hour)
 
-	server := NewServer(o, o.hub, "secret", nil, nil, nil, sessions)
+	server := NewServer(o, o.Hub(), "secret", nil, nil, nil, sessions)
 	ts := httptest.NewServer(server)
 	defer ts.Close()
 
-	body, _ := json.Marshal(InputRequest{Source: "web_ui", Text: "hi"})
+	body, _ := json.Marshal(agentloop.InputRequest{Source: "web_ui", Text: "hi"})
 	req, _ := http.NewRequest(http.MethodPost, ts.URL+"/api/v1/input", bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	req.AddCookie(&http.Cookie{Name: session.CookieName, Value: "not-a-real-token"})

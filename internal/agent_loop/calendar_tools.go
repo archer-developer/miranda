@@ -1,4 +1,4 @@
-package httpapi
+package agentloop
 
 // Tool defs and dispatch for internal/calendar — Google Calendar access via
 // the plain REST API instead of Google's own hosted Calendar MCP server

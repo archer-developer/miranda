@@ -46,6 +46,7 @@ import (
 	llm "github.com/archer-developer/miranda-llm"
 	"github.com/archer-developer/miranda-llm/llmtest"
 	"github.com/archer-developer/miranda-llm/router"
+	agentloop "github.com/archer-developer/miranda/internal/agent_loop"
 	"github.com/archer-developer/miranda/internal/config"
 	"github.com/archer-developer/miranda/internal/envfile"
 	"github.com/archer-developer/miranda/internal/history"
@@ -151,7 +152,7 @@ func newCalendarE2EHarness(t *testing.T, provider *llmtest.FakeProvider, oauthSv
 	require.NoError(t, err)
 
 	eventHub := hub.New(100)
-	orchestrator := httpapi.NewOrchestrator(
+	orchestrator := agentloop.NewOrchestrator(
 		r, mcp.NewManager(nil), historyStore, memoryStore, nil, eventHub, nil,
 		config.AgentConfig{}, config.MemoryConfig{}, config.TTSConfig{}, 100, "debug",
 	)
@@ -164,7 +165,7 @@ func newCalendarE2EHarness(t *testing.T, provider *llmtest.FakeProvider, oauthSv
 	return &calendarE2EHarness{server: ts}
 }
 
-func (h *calendarE2EHarness) post(t *testing.T, req httpapi.InputRequest) httpapi.InputResponse {
+func (h *calendarE2EHarness) post(t *testing.T, req agentloop.InputRequest) agentloop.InputResponse {
 	t.Helper()
 	body, err := json.Marshal(req)
 	require.NoError(t, err)
@@ -174,7 +175,7 @@ func (h *calendarE2EHarness) post(t *testing.T, req httpapi.InputRequest) httpap
 	defer resp.Body.Close()
 	require.Equal(t, http.StatusOK, resp.StatusCode)
 
-	var out httpapi.InputResponse
+	var out agentloop.InputResponse
 	require.NoError(t, json.NewDecoder(resp.Body).Decode(&out))
 	return out
 }
@@ -196,7 +197,7 @@ func callCalendarTool(t *testing.T, oauthSvc *oauth2.Service, username, toolName
 	)
 	h := newCalendarE2EHarness(t, provider, oauthSvc)
 
-	resp := h.post(t, httpapi.InputRequest{Source: "cli", UserID: username, Text: "e2e: " + toolName})
+	resp := h.post(t, agentloop.InputRequest{Source: "cli", UserID: username, Text: "e2e: " + toolName})
 	require.Equal(t, "ok", resp.Reply)
 	require.Len(t, provider.Requests, 2)
 
@@ -244,13 +245,13 @@ func callCalendarToolIgnoringResult(oauthSvc *oauth2.Service, username, toolName
 		return err
 	}
 
-	orchestrator := httpapi.NewOrchestrator(
+	orchestrator := agentloop.NewOrchestrator(
 		r, mcp.NewManager(nil), historyStore, memoryStore, nil, hub.New(10), nil,
 		config.AgentConfig{}, config.MemoryConfig{}, config.TTSConfig{}, 100, "debug",
 	)
 	orchestrator.SetOAuth(oauthSvc, time.Minute, time.Minute, 10*time.Second)
 
-	_, err = orchestrator.Handle(context.Background(), httpapi.InputRequest{Source: "cli", UserID: username, Text: "cleanup"})
+	_, err = orchestrator.Handle(context.Background(), agentloop.InputRequest{Source: "cli", UserID: username, Text: "cleanup"})
 	return err
 }
 

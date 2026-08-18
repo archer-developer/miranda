@@ -1,4 +1,4 @@
-package httpapi
+package agentloop
 
 // Tests for docs/adr/system-prompt-caching.md: the system prompt is split
 // into a stable block (persona, speaker identity, memory) sent first and a

@@ -64,7 +64,7 @@ func (s *Server) handleUpload(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "file upload is not configured", http.StatusNotImplemented)
 		return
 	}
-	if s.orchestrator.attachStore == nil {
+	if s.orchestrator.AttachStore() == nil {
 		http.Error(w, "attachment store is not configured", http.StatusInternalServerError)
 		return
 	}
@@ -156,7 +156,7 @@ func (s *Server) handleUpload(w http.ResponseWriter, r *http.Request) {
 		Size:     int64(len(fileBytes)),
 		Data:     fileBytes,
 	}
-	s.orchestrator.attachStore.Put(rec)
+	s.orchestrator.AttachStore().Put(rec)
 
 	resp := UploadResponse{FileID: fileID, Filename: filename, SizeBytes: rec.Size, MIMEType: partMIME}
 	w.Header().Set("Content-Type", "application/json")
@@ -176,12 +176,12 @@ func (s *Server) handleUpload(w http.ResponseWriter, r *http.Request) {
 // not a user's browser (that's the separate, authenticated
 // GET /api/files/{file_id} — see handleDownload).
 func (s *Server) handleFilesServe(w http.ResponseWriter, r *http.Request) {
-	if s.orchestrator.attachStore == nil {
+	if s.orchestrator.AttachStore() == nil {
 		http.Error(w, "file staging is not configured", http.StatusNotImplemented)
 		return
 	}
 	id := r.PathValue("id")
-	rec, found := s.orchestrator.attachStore.Get(id)
+	rec, found := s.orchestrator.AttachStore().Get(id)
 	if !found {
 		http.Error(w, "not found", http.StatusNotFound)
 		return
@@ -246,7 +246,7 @@ func (s *Server) handleDownload(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "file download is not configured", http.StatusNotImplemented)
 		return
 	}
-	if s.orchestrator.attachStore == nil {
+	if s.orchestrator.AttachStore() == nil {
 		http.Error(w, "attachment store is not configured", http.StatusInternalServerError)
 		return
 	}
@@ -262,7 +262,7 @@ func (s *Server) handleDownload(w http.ResponseWriter, r *http.Request) {
 		requestingUser = s.users.ResolveUserID(r.URL.Query().Get("source"), r.URL.Query().Get("user_id"))
 	}
 
-	rec, found := s.orchestrator.attachStore.Get(fileID)
+	rec, found := s.orchestrator.AttachStore().Get(fileID)
 	if !found || (rec.UserID != "" && rec.UserID != requestingUser) || rec.RemoteURL == "" {
 		http.Error(w, "not found", http.StatusNotFound)
 		return

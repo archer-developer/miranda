@@ -5,58 +5,26 @@
 package httpapi
 
 import (
-	"context"
 	"encoding/json"
 	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
-	"time"
 
 	"github.com/coder/websocket"
 	"github.com/coder/websocket/wsjson"
 
+	agentloop "github.com/archer-developer/miranda/internal/agent_loop"
 	"github.com/archer-developer/miranda/internal/hub"
 	"github.com/archer-developer/miranda/internal/session"
 	"github.com/archer-developer/miranda/internal/users"
 )
 
-// webUISource is the InputRequest.Source value forced onto any request
-// authenticated via a web UI session cookie, regardless of what the client
-// sent — a browser can't be allowed to claim source: "ha_assist" and ride
-// the HA user-id-mapping path, or spoof another user_id.
-const webUISource = "web_ui"
-
-// turnTimeout bounds one full agent turn: LLM generation and tool calls,
-// which for a turn that calls several tools (or escalates to a slower
-// provider) can legitimately take well past what a browser tab, VPN link,
-// or reverse proxy will hold a connection open for. TTS dispatch itself no
-// longer contributes to this: Dispatcher.Speak only enqueues text onto a
-// background Player and returns immediately (see internal/tts/player.go) —
-// synthesis and the physical speaker's actual playback duration happen
-// entirely off this turn's own goroutine. detachedTurnContext below is what
-// makes turnTimeout the thing that bounds a turn instead of the caller's
-// connection: once a reply may already have been enqueued for TTS or sent
-// to Telegram, it must still get recorded to history even if the original
-// HTTP/webhook connection drops first.
-const turnTimeout = 5 * time.Minute
-
-// detachedTurnContext derives a context for one orchestrator.Handle call
-// that keeps parent values (deadlines aside) but is immune to the parent
-// being cancelled by the inbound connection closing — see turnTimeout.
-// Without this, a dropped client connection cancels ctx mid-turn, and
-// everything downstream that still needs to run (persisting the
-// assistant's reply to history so the next turn sees it) fails with
-// context.Canceled.
-func detachedTurnContext(parent context.Context) (context.Context, context.CancelFunc) {
-	return context.WithTimeout(context.WithoutCancel(parent), turnTimeout)
-}
-
 // Server is Miranda's HTTP server: the unified command interface, the
 // WebSocket log stream, and (if provided) the embedded web UI.
 type Server struct {
 	mux           *http.ServeMux
-	orchestrator  *Orchestrator
+	orchestrator  *agentloop.Orchestrator
 	hub           *hub.Hub
 	authToken     string
 	users         *users.Registry
@@ -82,7 +50,7 @@ type uploadConfig struct {
 // usersRegistry/sessions authenticate browser-originated requests (web UI
 // login) as an alternative to authToken's bearer-token auth (HA/curl/scripts);
 // either may be nil, in which case that auth path is simply unavailable.
-func NewServer(orchestrator *Orchestrator, h *hub.Hub, authToken string, webUI http.Handler, logger *slog.Logger, usersRegistry *users.Registry, sessions *session.Store) *Server {
+func NewServer(orchestrator *agentloop.Orchestrator, h *hub.Hub, authToken string, webUI http.Handler, logger *slog.Logger, usersRegistry *users.Registry, sessions *session.Store) *Server {
 	if logger == nil {
 		logger = slog.Default()
 	}
@@ -192,7 +160,7 @@ func (s *Server) handleInput(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var req InputRequest
+	var req agentloop.InputRequest
 	if err := json.Unmarshal(body, &req); err != nil {
 		http.Error(w, "invalid JSON body", http.StatusBadRequest)
 		return
@@ -206,7 +174,7 @@ func (s *Server) handleInput(w http.ResponseWriter, r *http.Request) {
 		// Session-cookie auth: identity comes entirely from who's logged
 		// in, never from client-supplied fields.
 		req.UserID = sessionUser
-		req.Source = webUISource
+		req.Source = agentloop.WebUISource
 	} else if s.users != nil {
 		// Bearer-token auth (HA thin client, curl, scripts): translate a
 		// raw HA speaker-recognition user id to our canonical username, if
@@ -217,7 +185,7 @@ func (s *Server) handleInput(w http.ResponseWriter, r *http.Request) {
 
 	s.hub.Publish(hub.Event{Source: req.Source, Message: fmt.Sprintf("%s: %s", req.UserID, req.Text)})
 
-	turnCtx, cancel := detachedTurnContext(r.Context())
+	turnCtx, cancel := agentloop.DetachedTurnContext(r.Context())
 	defer cancel()
 
 	resp, err := s.orchestrator.Handle(turnCtx, req)
