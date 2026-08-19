@@ -1,7 +1,32 @@
 # Channel-adapter formatting + lit-html chat.js migration
 
-Planning doc, not yet implemented — see "Implementation order" for the
-intended sequence when this is picked up.
+**Implemented.** Both workstreams below are done: `internal/replyformat`
+(parser + Telegram/voice/web renderers, all wired in, system prompt
+updated) and the lit-html vendoring + `chat.js` conversion. All of this
+doc's "Implementation order" steps are complete and
+`go build && go vet && go test ./...` passes.
+
+Two deviations from what's written below, made during implementation:
+
+- **lit-html's `unsafe-html` directive was never vendored.** Bundling it
+  separately (a second esm.sh fetch) would instantiate a second,
+  non-interoperable copy of lit-html's internal Directive machinery.
+  Instead, trusted icon SVGs are embedded by building a real DOM `Node`
+  (`icons.js`'s `iconNode()`) and interpolating that directly — lit-html
+  accepts a `Node` as a child value natively, no directive needed. Only
+  `internal/webui/static/js/vendor/lit-html/lit-html.mjs` (core
+  `html`/`svg`/`render`/`noChange`/`nothing`) is vendored, confirmed
+  self-contained (zero further imports) before committing.
+- **Link URLs are scheme-checked in `replyformat.Parse` itself**, not
+  documented anywhere below: a `[label](url)` whose scheme isn't
+  `http`/`https`/`mailto`/empty(relative) degrades to literal text rather
+  than ever becoming a `SegmentLink` — found during manual verification
+  that a model-produced `javascript:` URL would otherwise become a live,
+  clickable `href` in the web UI's authenticated origin (a real indirect-
+  prompt-injection-to-XSS path, e.g. via fetched web content echoed back
+  into a reply). Fixed once at the parser so every renderer (web, Telegram)
+  is protected from a single source of truth; segment-template.js also
+  keeps its own `isSafeLinkURL` check as defense in depth.
 
 ## Context
 

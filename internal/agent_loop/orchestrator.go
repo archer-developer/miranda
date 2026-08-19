@@ -20,6 +20,7 @@ import (
 	"github.com/archer-developer/miranda/internal/mcp"
 	"github.com/archer-developer/miranda/internal/memory"
 	"github.com/archer-developer/miranda/internal/oauth2"
+	"github.com/archer-developer/miranda/internal/replyformat"
 	"github.com/archer-developer/miranda/internal/schedule"
 	"github.com/archer-developer/miranda/internal/telegram"
 	"github.com/archer-developer/miranda/internal/tools"
@@ -155,6 +156,13 @@ type InputResponse struct {
 	// out of Reply. See history.Message.Downloads for why files are never
 	// represented in Reply's own text.
 	Downloads []history.DownloadRef `json:"downloads,omitempty"`
+	// Blocks is the web UI's rendering of the assistant's own reply text
+	// (before any voice-stripping/download-footnote transform applied to
+	// Reply — see replyformat.Parse), computed on read rather than
+	// persisted since it's 100% derivable from that text. Only ever set for
+	// the assistant's turn; there is no separate "user's own message"
+	// InputResponse.
+	Blocks []replyformat.Block `json:"blocks,omitempty"`
 }
 
 // ChatEvent is published on internal/hub (Source: "chat", scoped by UserID)
@@ -169,6 +177,12 @@ type ChatEvent struct {
 	Type           string           `json:"type"`
 	ConversationID string           `json:"conversation_id"`
 	Message        *history.Message `json:"message,omitempty"`
+	// Blocks mirrors InputResponse.Blocks — the web UI's chat screen renders
+	// straight from this on every live WS event (including messages from a
+	// channel this tab never itself talked to), the same way it renders
+	// InputResponse.Blocks for the tab's own synchronous reply. Only set
+	// when Message.Role == "assistant" — see publishChatMessage.
+	Blocks []replyformat.Block `json:"blocks,omitempty"`
 }
 
 // speakerHA is the subset of *ha.Client the Orchestrator needs for per-entity
@@ -632,13 +646,27 @@ func (o *Orchestrator) Handle(ctx context.Context, req InputRequest) (InputRespo
 		}
 	}
 
+	// A voice-classified source's HTTP reply is treated as equivalent to
+	// what gets spoken: same transformer as speakChunks/speak_reply, no
+	// footnote (voice doesn't need attachments — see appendDownloadFootnotes).
+	// Every other source gets the plain-text download footnote fallback the
+	// web UI doesn't need (it renders a chip from Downloads instead).
+	var reply string
+	switch req.Source {
+	case users.SourceHAAssist, users.SourceScheduled:
+		reply = voiceText(finalText)
+	default:
+		reply = appendDownloadFootnotes(finalText, control.downloadedFiles, req.Source)
+	}
+
 	return InputResponse{
 		ConversationID:     convID,
-		Reply:              appendDownloadFootnotes(finalText, control.downloadedFiles, req.Source),
+		Reply:              reply,
 		ProviderUsed:       providerUsed,
 		UserMessageID:      userMsgID,
 		AssistantMessageID: assistantMsgID,
 		Downloads:          downloads,
+		Blocks:             replyformat.Parse(finalText),
 	}, nil
 }
 
@@ -651,5 +679,9 @@ func (o *Orchestrator) Handle(ctx context.Context, req InputRequest) (InputRespo
 // still whatever AppendMessage persisted).
 func (o *Orchestrator) publishChatMessage(userID, convID string, msg history.Message) {
 	msg.CreatedAt = time.Now()
-	o.hub.Publish(hub.Event{Source: "chat", UserID: userID, Data: ChatEvent{Type: "message", ConversationID: convID, Message: &msg}})
+	var blocks []replyformat.Block
+	if msg.Role == "assistant" {
+		blocks = replyformat.Parse(msg.Content)
+	}
+	o.hub.Publish(hub.Event{Source: "chat", UserID: userID, Data: ChatEvent{Type: "message", ConversationID: convID, Message: &msg, Blocks: blocks}})
 }

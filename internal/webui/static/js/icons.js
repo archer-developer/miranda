@@ -60,3 +60,26 @@ export function icon(name, className = "h-4 w-4") {
   if (!path) return "";
   return `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="${className}" aria-hidden="true" focusable="false">${path}</svg>`;
 }
+
+/**
+ * Node counterpart of icon(), for embedding inside a lit-html template
+ * (see screens/chat.js, segment-template.js). lit-html auto-escapes plain
+ * string values, so `icon()`'s raw SVG markup would show as literal
+ * `&lt;svg&gt;...` text if interpolated directly — lit-html accepts a real
+ * DOM Node as a child value instead (standard lit-html behavior, not a
+ * directive; see vendor/lit-html/lit-html.mjs's header comment for why
+ * this project doesn't vendor the `unsafe-html` directive as the
+ * alternative). Building the Node via a detached <template> element relies
+ * on exactly the same trust boundary every existing `innerHTML = icon(...)`
+ * call site already does — `name` only ever selects from our own
+ * hardcoded ICON_PATHS registry, never user input. Unknown names degrade
+ * to an empty text node, mirroring icon()'s own "missing icon renders
+ * nothing" behavior.
+ */
+export function iconNode(name, className = "h-4 w-4") {
+  const svg = icon(name, className);
+  if (!svg) return document.createTextNode("");
+  const template = document.createElement("template");
+  template.innerHTML = svg;
+  return template.content.firstElementChild;
+}

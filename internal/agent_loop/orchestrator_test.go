@@ -22,6 +22,7 @@ import (
 	"github.com/archer-developer/miranda/internal/mcp"
 	"github.com/archer-developer/miranda/internal/mcp/mcptest"
 	"github.com/archer-developer/miranda/internal/memory"
+	"github.com/archer-developer/miranda/internal/replyformat"
 	"github.com/archer-developer/miranda/internal/telegram"
 	"github.com/archer-developer/miranda/internal/tools"
 	"github.com/archer-developer/miranda/internal/tts"
@@ -203,6 +204,21 @@ func TestOrchestrator_SimpleTextReply(t *testing.T) {
 	require.Len(t, msgs, 2)
 	require.Equal(t, "user", msgs[0].Role)
 	require.Equal(t, "assistant", msgs[1].Role)
+}
+
+// TestOrchestrator_InputResponseCarriesParsedBlocks guards the web UI's
+// wiring: InputResponse.Blocks must be replyformat.Parse of the model's own
+// reply text (finalText), independent of whatever transform (voice
+// stripping, download footnotes) Reply itself went through for this
+// source — the web UI renders from Blocks, never by parsing Reply.
+func TestOrchestrator_InputResponseCarriesParsedBlocks(t *testing.T) {
+	provider := llmtest.New("local", llmtest.Response{Text: "this is **bold** text"})
+	o, _, _ := newTestOrchestrator(t, provider)
+
+	resp, err := o.Handle(context.Background(), InputRequest{Source: WebUISource, UserID: "alex", Text: "hi"})
+	require.NoError(t, err)
+	require.Equal(t, "this is **bold** text", resp.Reply)
+	require.Equal(t, replyformat.Parse("this is **bold** text"), resp.Blocks)
 }
 
 func TestOrchestrator_RememberThisToolUpdatesMemoryAndContinues(t *testing.T) {
@@ -684,6 +700,26 @@ func TestOrchestrator_SpeaksExactlyTheTextPassedToSpeakReplyTool(t *testing.T) {
 	// Exactly the tool argument's text, exactly once — not the first turn's
 	// written reply, and not the second turn's wrap-up.
 	require.Equal(t, []string{"Скажу словами: наступила осень."}, ha.Calls())
+}
+
+// TestOrchestrator_SpeakReplyStripsMarkdownBeforeSpeaking guards the
+// replyformat wiring: speak_reply's argument may contain markdown-lite
+// syntax the model wrote (matching the system prompt's "## Форматирование"
+// guidance), but a TTS engine must never hear literal "**"/"*"/backticks —
+// only the plain spoken text replyformat.ToVoiceText produces.
+func TestOrchestrator_SpeakReplyStripsMarkdownBeforeSpeaking(t *testing.T) {
+	provider := llmtest.New("local",
+		llmtest.Response{ToolCall: &llm.ToolCall{ID: "call-1", Name: "speak_reply", Arguments: `{"text":"Погода сегодня **отличная**, бери *зонт* на всякий случай."}`}},
+		llmtest.Response{Text: "Готово."},
+	)
+	o, ha := newTestOrchestratorWithTTS(t, provider)
+
+	resp, err := o.Handle(context.Background(), InputRequest{Source: "web_ui", UserID: "alex", Text: "какая погода"})
+	require.NoError(t, err)
+	require.Equal(t, "Готово.", resp.Reply)
+
+	requireEventuallySpoken(t, ha)
+	require.Equal(t, []string{"Погода сегодня отличная, бери зонт на всякий случай."}, ha.Calls())
 }
 
 func TestOrchestrator_DoesNotSpeakViaTTSForNonHASources(t *testing.T) {

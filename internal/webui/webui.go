@@ -28,6 +28,7 @@ import (
 	"github.com/go-webauthn/webauthn/protocol"
 
 	"github.com/archer-developer/miranda/internal/history"
+	"github.com/archer-developer/miranda/internal/replyformat"
 	"github.com/archer-developer/miranda/internal/session"
 	"github.com/archer-developer/miranda/internal/users"
 	"github.com/archer-developer/miranda/internal/webauthn"
@@ -383,7 +384,31 @@ func (h *Handler) handleDialogMessages(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
 	}
-	writeJSON(w, messages)
+	writeJSON(w, toMessageViews(messages))
+}
+
+// messageView adds the web renderer's Blocks alongside a stored
+// history.Message — computed on read, not persisted, since it's 100%
+// derivable from Content and persisting would mean backfilling on every
+// future replyformat parser-rule tweak. Only assistant messages get
+// Blocks: user messages are rendered client-side with the existing
+// backtick-only inline-text.js path, matching chat.js's live WS rendering
+// (see ChatEvent.Blocks in agent_loop/orchestrator.go, computed the same
+// way in publishChatMessage).
+type messageView struct {
+	history.Message
+	Blocks []replyformat.Block `json:"blocks,omitempty"`
+}
+
+func toMessageViews(messages []history.Message) []messageView {
+	views := make([]messageView, len(messages))
+	for i, msg := range messages {
+		views[i] = messageView{Message: msg}
+		if msg.Role == "assistant" {
+			views[i].Blocks = replyformat.Parse(msg.Content)
+		}
+	}
+	return views
 }
 
 // handleGetMemory returns the logged-in user's memory file content, so the

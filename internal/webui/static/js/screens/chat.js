@@ -3,11 +3,13 @@
 // Miranda — same POST /api/v1/input the debug box always used, just
 // rendered as a proper message thread instead of a single reply box.
 import { t } from "../i18n.js";
-import { icon } from "../icons.js";
+import { icon, iconNode } from "../icons.js";
 import * as chatWs from "../chat-ws.js";
 import { downloadChip, extractAttachmentBlocks, attachmentChip } from "../downloads.js";
 import { renderInlineText } from "../inline-text.js";
 import { isChatBubble } from "../message-filter.js";
+import { html, render, nothing } from "../vendor/lit-html/lit-html.mjs";
+import { blocksTemplate } from "../segment-template.js";
 
 let messagesEl, scrollEl, formEl, textEl, sendBtn, fileInput, attachBtn, attachChip, unsubscribeWs, unsubscribeReconnect;
 // Non-null while a file upload XHR is in flight — aborted by clearAttachment().
@@ -118,40 +120,65 @@ function uploadWithProgress(file, onProgress) {
 
 /** downloads is the message's own structured file list (history.Message.Downloads /
  * InputResponse.Downloads / ChatEvent.Message.Downloads) — an array of
- * {file_id, filename, size_bytes, mime_type}, never parsed out of text. */
-function bubble(role, text, timeIso, downloads) {
+ * {file_id, filename, size_bytes, mime_type}, never parsed out of text.
+ *
+ * blocks is the server-parsed markdown-lite structure for this message
+ * (internal/replyformat's Block[] — see webui's messageView.Blocks /
+ * InputResponse.Blocks / ChatEvent.Blocks). Only ever set for an assistant
+ * message; when present and non-empty it's rendered via
+ * segment-template.js's blocksTemplate. Every other case — user messages
+ * (which never get server-computed blocks) and the rare WS-race edge case
+ * where a live event's blocks haven't arrived yet — falls back to the
+ * original renderInlineText() (backtick-only) path, unchanged. */
+function bubble(role, text, timeIso, downloads, blocks) {
   const wrap = document.createElement("div");
   wrap.className = `flex flex-col ${role === "user" ? "items-end" : "items-start"}`;
 
   let displayText = text;
+  const attachmentNodes = [];
   if (role === "user") {
     const { displayText: dt, attachments } = extractAttachmentBlocks(text);
     displayText = dt;
     for (const { filename, sizeBytes } of attachments) {
-      wrap.appendChild(attachmentChip(filename, sizeBytes ?? null));
+      attachmentNodes.push(attachmentChip(filename, sizeBytes ?? null));
     }
   }
 
+  // The text bubble itself is built as a plain node first (its content is
+  // populated either by renderInlineText() or a nested lit-html render()),
+  // then interpolated as a Node into the outer template below — lit-html
+  // accepts a real DOM Node as a child value directly.
+  let textNode = nothing;
   if (displayText) {
     const b = document.createElement("div");
     b.className =
       role === "user"
         ? "max-w-[85%] whitespace-pre-wrap rounded-2xl rounded-br-md bg-(--color-accent) px-4 py-2.5 text-sm leading-relaxed text-white sm:max-w-[75%]"
-        : "max-w-[85%] whitespace-pre-wrap rounded-2xl rounded-bl-md border border-(--color-border) bg-(--color-surface)/70 px-4 py-2.5 text-sm leading-relaxed text-(--color-text) sm:max-w-[75%]";
-    renderInlineText(b, displayText);
-    wrap.appendChild(b);
+        : // space-y-2: an 8px gap between block-level children (multiple
+          // <p>/<ul> from blocksTemplate) — harmless no-op for the
+          // renderInlineText() fallback, whose only element children
+          // (<code> spans) are inline and unaffected by margin-top.
+          "max-w-[85%] whitespace-pre-wrap rounded-2xl rounded-bl-md border border-(--color-border) bg-(--color-surface)/70 px-4 py-2.5 text-sm leading-relaxed text-(--color-text) sm:max-w-[75%] space-y-2";
+    if (blocks && blocks.length > 0) {
+      render(blocksTemplate(blocks), b);
+    } else {
+      renderInlineText(b, displayText);
+    }
+    textNode = b;
   }
 
-  for (const { file_id, filename, size_bytes } of downloads ?? []) {
-    wrap.appendChild(downloadChip(file_id, filename, size_bytes ?? null));
-  }
+  const downloadNodes = (downloads ?? []).map(({ file_id, filename, size_bytes }) =>
+    downloadChip(file_id, filename, size_bytes ?? null)
+  );
 
-  if (timeIso) {
-    const time = document.createElement("span");
-    time.className = "mt-1 px-1 text-xs text-(--color-text-muted)";
-    time.textContent = formatTime(timeIso);
-    wrap.appendChild(time);
-  }
+  render(
+    html`${attachmentNodes}${textNode}${downloadNodes}${
+      timeIso
+        ? html`<span class="mt-1 px-1 text-xs text-(--color-text-muted)">${formatTime(timeIso)}</span>`
+        : nothing
+    }`,
+    wrap
+  );
 
   return wrap;
 }
@@ -160,12 +187,16 @@ function bubble(role, text, timeIso, downloads) {
 function typingIndicator() {
   const wrap = document.createElement("div");
   wrap.className = "flex items-start";
-  wrap.innerHTML = `
-    <div class="flex items-center gap-1 rounded-2xl rounded-bl-md border border-(--color-border) bg-(--color-surface)/70 px-4 py-3">
-      <span class="h-1.5 w-1.5 animate-bounce rounded-full bg-(--color-text-faint) [animation-delay:-0.3s]"></span>
-      <span class="h-1.5 w-1.5 animate-bounce rounded-full bg-(--color-text-faint) [animation-delay:-0.15s]"></span>
-      <span class="h-1.5 w-1.5 animate-bounce rounded-full bg-(--color-text-faint)"></span>
-    </div>`;
+  render(
+    html`
+      <div class="flex items-center gap-1 rounded-2xl rounded-bl-md border border-(--color-border) bg-(--color-surface)/70 px-4 py-3">
+        <span class="h-1.5 w-1.5 animate-bounce rounded-full bg-(--color-text-faint) [animation-delay:-0.3s]"></span>
+        <span class="h-1.5 w-1.5 animate-bounce rounded-full bg-(--color-text-faint) [animation-delay:-0.15s]"></span>
+        <span class="h-1.5 w-1.5 animate-bounce rounded-full bg-(--color-text-faint)"></span>
+      </div>
+    `,
+    wrap
+  );
   return wrap;
 }
 
@@ -187,23 +218,27 @@ function hideThinking() {
 function errorBubble(detail, onRetry) {
   const wrap = document.createElement("div");
   wrap.className = "flex flex-col items-start gap-2";
-  wrap.innerHTML = `
-    <div class="flex max-w-[85%] items-start gap-2 rounded-2xl rounded-bl-md border border-(--color-danger-border) bg-(--color-danger-bg) px-4 py-2.5 text-sm text-(--color-danger-text) sm:max-w-[75%]">
-      ${icon("alert-circle", "mt-0.5 h-4 w-4 shrink-0")}
-      <span class="detail-text"></span>
-    </div>`;
-  // `detail` wraps a caught exception's message or an HTTP status — set via
-  // textContent rather than interpolated into the innerHTML above, so it
-  // can never be interpreted as markup no matter what a failing request or
-  // an unusual Error object happens to stringify to.
-  wrap.querySelector(".detail-text").textContent = `${t("request_failed", "Request failed:")} ${detail}`;
-  const retry = document.createElement("button");
-  retry.type = "button";
-  retry.className =
-    "ml-1 rounded-md px-2 py-1 text-xs font-medium text-(--color-text-muted) underline decoration-(--color-border-strong) underline-offset-2 transition-colors hover:text-(--color-text) focus-visible:outline-none";
-  retry.textContent = t("retry_button", "Try again");
-  retry.addEventListener("click", onRetry);
-  wrap.appendChild(retry);
+  render(
+    html`
+      <div class="flex max-w-[85%] items-start gap-2 rounded-2xl rounded-bl-md border border-(--color-danger-border) bg-(--color-danger-bg) px-4 py-2.5 text-sm text-(--color-danger-text) sm:max-w-[75%]">
+        ${iconNode("alert-circle", "mt-0.5 h-4 w-4 shrink-0")}
+        <!-- detail wraps a caught exception's message or an HTTP status —
+             a plain lit-html child expression, auto-escaped exactly like
+             the textContent-only assignment this replaces, so it can
+             never be interpreted as markup no matter what a failing
+             request or an unusual Error object happens to stringify to. -->
+        <span>${t("request_failed", "Request failed:")} ${detail}</span>
+      </div>
+      <button
+        type="button"
+        class="ml-1 rounded-md px-2 py-1 text-xs font-medium text-(--color-text-muted) underline decoration-(--color-border-strong) underline-offset-2 transition-colors hover:text-(--color-text) focus-visible:outline-none"
+        @click=${onRetry}
+      >
+        ${t("retry_button", "Try again")}
+      </button>
+    `,
+    wrap
+  );
   return wrap;
 }
 
@@ -211,22 +246,34 @@ function emptyState() {
   const wrap = document.createElement("div");
   wrap.dataset.emptyState = "true";
   wrap.className = "flex flex-col items-center gap-3 px-6 py-20 text-center";
-  wrap.innerHTML = `
-    <span class="flex h-12 w-12 items-center justify-center rounded-full bg-(--color-surface-2) text-(--color-text-faint)">${icon("chat", "h-5 w-5")}</span>
-    <div class="space-y-1">
-      <p class="text-sm font-medium text-(--color-text-muted)">${t("chat_empty_title", "Start a conversation")}</p>
-      <p class="max-w-xs text-sm text-(--color-text-faint)">${t("chat_empty_subtitle", "Ask Miranda anything — she remembers context across the conversation.")}</p>
-    </div>`;
+  render(
+    html`
+      <span class="flex h-12 w-12 items-center justify-center rounded-full bg-(--color-surface-2) text-(--color-text-faint)"
+        >${iconNode("chat", "h-5 w-5")}</span
+      >
+      <div class="space-y-1">
+        <p class="text-sm font-medium text-(--color-text-muted)">${t("chat_empty_title", "Start a conversation")}</p>
+        <p class="max-w-xs text-sm text-(--color-text-faint)">
+          ${t("chat_empty_subtitle", "Ask Miranda anything — she remembers context across the conversation.")}
+        </p>
+      </div>
+    `,
+    wrap
+  );
   return wrap;
 }
 
 function skeleton() {
   const wrap = document.createElement("div");
   wrap.className = "flex flex-col gap-4";
-  wrap.innerHTML = `
-    <div class="flex justify-start"><div class="skeleton animate-shimmer h-9 w-48 rounded-2xl"></div></div>
-    <div class="flex justify-end"><div class="skeleton animate-shimmer h-9 w-32 rounded-2xl"></div></div>
-    <div class="flex justify-start"><div class="skeleton animate-shimmer h-9 w-56 rounded-2xl"></div></div>`;
+  render(
+    html`
+      <div class="flex justify-start"><div class="skeleton animate-shimmer h-9 w-48 rounded-2xl"></div></div>
+      <div class="flex justify-end"><div class="skeleton animate-shimmer h-9 w-32 rounded-2xl"></div></div>
+      <div class="flex justify-start"><div class="skeleton animate-shimmer h-9 w-56 rounded-2xl"></div></div>
+    `,
+    wrap
+  );
   return wrap;
 }
 
@@ -251,39 +298,33 @@ function buildAttachChip(filename) {
   chip.className =
     "flex w-fit flex-col gap-1.5 rounded-lg border border-(--color-border) bg-(--color-surface)/80 px-3 py-2 mt-2 text-xs text-(--color-text-muted)";
 
-  // Top row: invisible spacer | filename (centred) | × button.
-  // The spacer mirrors the button's width so the name is truly centred.
-  const topRow = document.createElement("div");
-  topRow.className = "flex items-center";
-  topRow.dataset.topRow = "true";
-  const spacer = document.createElement("div");
-  spacer.className = "w-6 shrink-0";
-  topRow.appendChild(spacer);
-  const nameSpan = document.createElement("span");
-  nameSpan.className = "min-w-0 flex-1 truncate text-center";
-  nameSpan.title = filename;
-  nameSpan.textContent = filename;
-  topRow.appendChild(nameSpan);
-  const removeBtn = document.createElement("button");
-  removeBtn.type = "button";
-  removeBtn.className =
-    "w-6 shrink-0 flex items-center justify-end rounded p-1 text-(--color-text-faint) hover:text-(--color-danger-text) focus-visible:outline-none";
-  removeBtn.setAttribute("aria-label", "Remove attachment");
-  removeBtn.innerHTML = icon("close", "h-4 w-4");
-  removeBtn.addEventListener("click", clearAttachment);
-  topRow.appendChild(removeBtn);
-  chip.appendChild(topRow);
-
-  // Progress bar — hidden until setAttachChipProgress() is called.
-  const track = document.createElement("div");
-  track.className = "h-0.5 w-full overflow-hidden rounded-full bg-(--color-border)";
-  track.dataset.progressTrack = "true";
-  track.hidden = true;
-  const fill = document.createElement("div");
-  fill.className = "h-full rounded-full bg-(--color-accent) transition-[width] duration-100 ease-linear";
-  fill.style.width = "0%";
-  track.appendChild(fill);
-  chip.appendChild(track);
+  render(
+    html`
+      <!-- Top row: invisible spacer | filename (centred) | × button. The
+           spacer mirrors the button's width so the name is truly centred.
+           data-top-row is queried by finalizeAttachChip() below to prepend
+           a thumbnail once the upload completes — keep it exact. -->
+      <div class="flex items-center" data-top-row="true">
+        <div class="w-6 shrink-0"></div>
+        <span class="min-w-0 flex-1 truncate text-center" title=${filename}>${filename}</span>
+        <button
+          type="button"
+          class="flex w-6 shrink-0 items-center justify-end rounded p-1 text-(--color-text-faint) hover:text-(--color-danger-text) focus-visible:outline-none"
+          aria-label="Remove attachment"
+          @click=${clearAttachment}
+        >
+          ${iconNode("close", "h-4 w-4")}
+        </button>
+      </div>
+      <!-- Progress bar — hidden until setAttachChipProgress() reveals it;
+           data-progress-track is queried by setAttachChipProgress() below,
+           keep it exact. -->
+      <div class="h-0.5 w-full overflow-hidden rounded-full bg-(--color-border)" data-progress-track="true" hidden>
+        <div class="h-full rounded-full bg-(--color-accent) transition-[width] duration-100 ease-linear" style="width: 0%"></div>
+      </div>
+    `,
+    chip
+  );
 
   return chip;
 }
@@ -384,8 +425,12 @@ async function handleFileSelected(file) {
 /** Render a message delivered live over chat-ws.js, if it isn't already on
  * screen — a no-op for an id already in `rendered` (this tab's own HTTP
  * response beat the WS event, or a duplicate delivery), and for turns
- * isChatBubble filters out. */
-function upsertMessage(message) {
+ * isChatBubble filters out.
+ *
+ * blocks is the ChatEvent's own `blocks` field — a *sibling* of `message`
+ * on the event, not nested inside it (see onChatEvent below and bubble()'s
+ * doc comment). */
+function upsertMessage(message, blocks) {
   if (rendered.has(message.id) || !isChatBubble(message)) return;
 
   // This is the live echo of a user message this same tab is still waiting
@@ -400,7 +445,7 @@ function upsertMessage(message) {
   }
 
   messagesEl.querySelector("[data-empty-state]")?.remove();
-  const node = bubble(message.role, message.content, message.created_at, message.downloads);
+  const node = bubble(message.role, message.content, message.created_at, message.downloads, blocks);
   messagesEl.appendChild(node);
   rendered.set(message.id, node);
   scrollToBottom();
@@ -413,7 +458,9 @@ function onChatEvent(ev) {
   const chatEvent = ev.data;
   if (!chatEvent) return;
   if (chatEvent.type === "message") {
-    upsertMessage(chatEvent.message);
+    // chatEvent.blocks is a sibling of chatEvent.message, not nested
+    // inside it — see bubble()'s doc comment on the `blocks` param.
+    upsertMessage(chatEvent.message, chatEvent.blocks);
   } else if (chatEvent.type === "conversation_deleted" || chatEvent.type === "conversation_ended") {
     clearMessages();
     messagesEl.appendChild(emptyState());
@@ -444,7 +491,10 @@ async function loadHistory() {
         messagesEl.appendChild(emptyState());
       } else {
         for (const m of chatMessages) {
-          const node = bubble(m.role, m.content, m.created_at, m.downloads);
+          // m.blocks is a top-level sibling of m.content/m.role/m.id on
+          // each flattened message object (see webui's messageView) —
+          // only present (non-empty) when m.role === "assistant".
+          const node = bubble(m.role, m.content, m.created_at, m.downloads, m.blocks);
           messagesEl.appendChild(node);
           rendered.set(m.id, node);
         }
@@ -553,7 +603,8 @@ async function send(text) {
       // HTTP response (e.g. a slow/dropped response body) — if it already
       // rendered the bubble, don't render it a second time.
       if (!rendered.has(data.assistant_message_id)) {
-        const assistantNode = bubble("assistant", data.reply, new Date().toISOString(), data.downloads);
+        // data.blocks is already top-level, sibling of data.reply.
+        const assistantNode = bubble("assistant", data.reply, new Date().toISOString(), data.downloads, data.blocks);
         messagesEl.appendChild(assistantNode);
         rendered.set(data.assistant_message_id, assistantNode);
       }

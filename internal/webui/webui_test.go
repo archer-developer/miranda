@@ -19,6 +19,7 @@ import (
 
 	"github.com/archer-developer/miranda/internal/config"
 	"github.com/archer-developer/miranda/internal/history"
+	"github.com/archer-developer/miranda/internal/replyformat"
 	"github.com/archer-developer/miranda/internal/session"
 	"github.com/archer-developer/miranda/internal/users"
 )
@@ -350,7 +351,10 @@ func TestHandleDialogs_IgnoresForeignUserIDAndUsesOwnUsername(t *testing.T) {
 func TestHandleDialogMessages_ReturnsMessagesJSON(t *testing.T) {
 	fake := &fakeHistory{
 		conversations: []history.Conversation{{ID: "conv-1", UserID: "alex", Source: "cli", StartedAt: time.Now()}},
-		messages:      []history.Message{{ID: 1, Role: "user", Content: "привет"}},
+		messages: []history.Message{
+			{ID: 1, Role: "user", Content: "привет"},
+			{ID: 2, Role: "assistant", Content: "this is **bold** text"},
+		},
 	}
 	h, sessions := newTestHandler(t, fake)
 
@@ -359,10 +363,13 @@ func TestHandleDialogMessages_ReturnsMessagesJSON(t *testing.T) {
 	h.ServeHTTP(rec, req)
 
 	require.Equal(t, http.StatusOK, rec.Code)
-	var out []history.Message
+	var out []messageView
 	require.NoError(t, json.NewDecoder(rec.Body).Decode(&out))
-	require.Len(t, out, 1)
+	require.Len(t, out, 2)
 	require.Equal(t, "привет", out[0].Content)
+	require.Empty(t, out[0].Blocks, "user messages get no server-computed blocks")
+	require.Equal(t, "this is **bold** text", out[1].Content)
+	require.Equal(t, replyformat.Parse("this is **bold** text"), out[1].Blocks)
 }
 
 func TestHandleDialogMessages_RejectsAnotherUsersConversation(t *testing.T) {

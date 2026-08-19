@@ -7,6 +7,7 @@ import (
 
 	agentloop "github.com/archer-developer/miranda/internal/agent_loop"
 	"github.com/archer-developer/miranda/internal/hub"
+	"github.com/archer-developer/miranda/internal/replyformat"
 	"github.com/archer-developer/miranda/internal/telegram"
 	"github.com/archer-developer/miranda/internal/users"
 )
@@ -119,7 +120,7 @@ func (s *Server) handleTelegramWebhook(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := s.telegram.Client.SendMessage(turnCtx, msg.Chat.ID, resp.Reply); err != nil {
+	if err := s.telegram.Client.SendHTML(turnCtx, msg.Chat.ID, replyformat.Parse(resp.Reply)); err != nil {
 		s.logger.Error("telegram: send reply failed", "error", err, "user", user.Username)
 	}
 }

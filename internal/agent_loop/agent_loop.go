@@ -6,6 +6,7 @@ import (
 
 	llm "github.com/archer-developer/miranda-llm"
 	"github.com/archer-developer/miranda/internal/hub"
+	"github.com/archer-developer/miranda/internal/replyformat"
 	"github.com/archer-developer/miranda/internal/tts"
 	"github.com/archer-developer/miranda/internal/users"
 )
@@ -213,8 +214,20 @@ func (o *Orchestrator) publishChunks(chunks []string) {
 func (o *Orchestrator) speakChunks(ctx context.Context, chunks []string) {
 	o.publishChunks(chunks)
 	for _, chunk := range chunks {
-		o.speakText(ctx, chunk)
+		o.speakText(ctx, voiceText(chunk))
 	}
+}
+
+// voiceText strips markdown-lite markup down to plain spoken text (see
+// replyformat.ToVoiceText). Applied independently per already-chunked
+// piece of text, not buffered and re-parsed across a whole streamed
+// reply — buffering would kill live-stream responsiveness. A bold/link
+// span that happens to straddle two TTS chunk boundaries can therefore
+// degrade to a stray literal "**"/"_" character rather than being stripped
+// cleanly; acceptable given voice replies are already capped at ~100 chars
+// by the system prompt.
+func voiceText(text string) string {
+	return replyformat.ToVoiceText(replyformat.Parse(text))
 }
 
 // speakText enqueues one already-voice-approved piece of text onto

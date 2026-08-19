@@ -10,6 +10,7 @@ import (
 	"github.com/robfig/cron/v3"
 
 	llm "github.com/archer-developer/miranda-llm"
+	"github.com/archer-developer/miranda/internal/replyformat"
 	"github.com/archer-developer/miranda/internal/schedule"
 )
 
@@ -149,10 +150,11 @@ func (o *Orchestrator) executeTool(ctx context.Context, userID, conversationID s
 		if args.Text == "" {
 			return "error: text is required"
 		}
+		spoken := voiceText(args.Text)
 		if args.Device != "" && o.tts != nil {
-			o.tts.SpeakTo(ctx, args.Text, args.Device)
+			o.tts.SpeakTo(ctx, spoken, args.Device)
 		} else {
-			o.speakText(ctx, args.Text)
+			o.speakText(ctx, spoken)
 		}
 		return "spoken"
 	}
@@ -185,7 +187,7 @@ func (o *Orchestrator) executeTool(ctx context.Context, userID, conversationID s
 			targetUsername = target.Username
 		}
 
-		if err := o.telegram.SendToUser(ctx, targetUsername, args.Text); err != nil {
+		if err := o.telegram.SendHTMLToUser(ctx, targetUsername, replyformat.Parse(args.Text)); err != nil {
 			return fmt.Sprintf("error: %v", err)
 		}
 		return "sent"

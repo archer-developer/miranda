@@ -9,6 +9,8 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/require"
+
+	"github.com/archer-developer/miranda/internal/replyformat"
 )
 
 func newTestClient(t *testing.T, handler http.HandlerFunc) *Client {
@@ -63,6 +65,22 @@ func TestSendMessage_APIErrorEnvelopeReturnsError(t *testing.T) {
 	err := c.SendMessage(context.Background(), 1, "hi")
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "chat not found")
+}
+
+func TestSendHTML_PostsHTMLWithParseMode(t *testing.T) {
+	var gotBody map[string]any
+
+	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		require.NoError(t, json.NewDecoder(r.Body).Decode(&gotBody))
+		_ = json.NewEncoder(w).Encode(map[string]any{"ok": true})
+	})
+
+	blocks := replyformat.Parse("this is **bold** text")
+	err := c.SendHTML(context.Background(), 12345, blocks)
+	require.NoError(t, err)
+	require.Equal(t, float64(12345), gotBody["chat_id"])
+	require.Equal(t, "HTML", gotBody["parse_mode"])
+	require.Equal(t, "this is <b>bold</b> text", gotBody["text"])
 }
 
 func TestSetWebhook_SendsURLAndSecret(t *testing.T) {

@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/archer-developer/miranda/internal/httpx"
+	"github.com/archer-developer/miranda/internal/replyformat"
 )
 
 // defaultAPIBase is the real Telegram Bot API origin. Overridable per
@@ -60,6 +61,22 @@ func NewWithAPIBase(token, apiBase string) *Client {
 func (c *Client) SendMessage(ctx context.Context, chatID int64, text string) error {
 	for _, chunk := range splitMessage(text, maxMessageChars) {
 		payload := map[string]any{"chat_id": chatID, "text": chunk}
+		if err := c.call(ctx, "sendMessage", payload, nil); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// SendHTML sends blocks to chatID as Telegram Bot API HTML
+// (parse_mode="HTML"), splitting across multiple calls via
+// replyformat.ToTelegramHTMLChunks when the rendered HTML exceeds
+// maxMessageChars. Unlike SendMessage, malformed HTML in a chunk would
+// make Telegram reject that whole call — ToTelegramHTMLChunks' chunking is
+// block/tag-aware specifically to avoid that.
+func (c *Client) SendHTML(ctx context.Context, chatID int64, blocks []replyformat.Block) error {
+	for _, chunk := range replyformat.ToTelegramHTMLChunks(blocks, maxMessageChars) {
+		payload := map[string]any{"chat_id": chatID, "text": chunk, "parse_mode": "HTML"}
 		if err := c.call(ctx, "sendMessage", payload, nil); err != nil {
 			return err
 		}

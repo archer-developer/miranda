@@ -3,6 +3,8 @@ package telegram
 import (
 	"context"
 	"fmt"
+
+	"github.com/archer-developer/miranda/internal/replyformat"
 )
 
 // Sender is what the orchestrator's send_telegram tool (internal/httpapi)
@@ -31,4 +33,17 @@ func (s *Sender) SendToUser(ctx context.Context, username, text string) error {
 		return fmt.Errorf("no known Telegram chat for %q — they need to message the bot at least once first", username)
 	}
 	return s.client.SendMessage(ctx, chatID, text)
+}
+
+// SendHTMLToUser is SendToUser, but rendering blocks as Telegram HTML (see
+// Client.SendHTML) instead of sending text as-is — used wherever the
+// source text may carry markdown-lite formatting the model produced (the
+// send_telegram tool, the webhook's own reply), as opposed to Miranda's
+// own static markdown-free strings, which keep using SendToUser.
+func (s *Sender) SendHTMLToUser(ctx context.Context, username string, blocks []replyformat.Block) error {
+	chatID, ok := s.chats.Get(username)
+	if !ok {
+		return fmt.Errorf("no known Telegram chat for %q — they need to message the bot at least once first", username)
+	}
+	return s.client.SendHTML(ctx, chatID, blocks)
 }
