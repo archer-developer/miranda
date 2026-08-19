@@ -161,6 +161,14 @@ function bubble(role, text, timeIso, downloads, blocks) {
           "max-w-[85%] whitespace-pre-wrap rounded-2xl rounded-bl-md border border-(--color-border) bg-(--color-surface)/70 px-4 py-2.5 text-sm leading-relaxed text-(--color-text) sm:max-w-[75%] space-y-2";
     if (blocks && blocks.length > 0) {
       render(blocksTemplate(blocks), b);
+    } else if (role === "user") {
+      // renderInlineText()'s default <code> style (bg-(--color-surface-2))
+      // is tuned for a neutral surface and is nearly invisible against this
+      // bubble's solid bg-(--color-accent) blue — a translucent white
+      // treatment instead, same idea as attachmentChip's own blue-bubble
+      // variant in downloads.js. No text-color override: inherits this
+      // bubble's text-white.
+      renderInlineText(b, displayText, "rounded border border-white/20 bg-white/15 px-1 py-0.5 font-mono text-[0.85em] break-all");
     } else {
       renderInlineText(b, displayText);
     }
