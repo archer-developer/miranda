@@ -30,6 +30,7 @@ type Config struct {
 	Schedule   ScheduleConfig   `yaml:"schedule"`
 	FileUpload FileUploadConfig `yaml:"file_upload"`
 	OAuth      OAuthConfig      `yaml:"oauth"`
+	Backup     BackupConfig     `yaml:"backup"`
 	Users      []UserConfig     `yaml:"users"`
 }
 
@@ -206,6 +207,43 @@ type TelegramConfig struct {
 // turn on, so Enabled defaults to true (opt-out, not opt-in).
 type ScheduleConfig struct {
 	Enabled bool `yaml:"enabled"`
+}
+
+// BackupConfig controls periodic snapshotting of every SQLite store under
+// StorageConfig (internal/backup) — a VACUUM INTO copy of each existing
+// *.db file into a timestamped subdirectory of Dir, on a fixed interval,
+// with the oldest snapshots pruned once more than RetentionCount
+// accumulate. Deliberately scoped to the SQLite stores only: MemoryDir's
+// markdown and AvatarsDir/TTSCacheDir are not covered, since VACUUM INTO
+// only applies to a SQLite database file.
+//
+// Opt-in (Enabled defaults false), same posture as WebAuthn/Telegram/OAuth:
+// Dir is deployment-specific (often an absolute path to a mounted external
+// disk, so backups actually survive losing the machine Miranda runs on),
+// so there's no safe default to silently start writing to.
+type BackupConfig struct {
+	Enabled bool `yaml:"enabled"`
+	// Dir is where timestamped backup subdirectories are written. May be a
+	// relative path (under the working directory, like StorageConfig's
+	// paths) or an absolute path onto a separately mounted disk. Created
+	// automatically if missing — but if it's meant to be a mount point that
+	// isn't currently mounted, letting MkdirAll silently create an empty
+	// directory there instead would mean backups look like they're
+	// succeeding while actually landing on the machine's local disk, so
+	// backupSweep logs (rather than silently swallows) every MkdirAll/backup
+	// error to make that failure mode visible.
+	Dir string `yaml:"dir"`
+	// IntervalMinutes is how often a full backup runs. This is the actual
+	// backup cadence itself, not a polling interval like
+	// MemoryConfig.SessionIdleTimeoutMinutes — every tick performs a real
+	// backup, since (unlike an idle sweep) there's no per-item "is this one
+	// due yet" check to decouple from.
+	IntervalMinutes int `yaml:"interval_minutes"`
+	// RetentionCount is how many of the most recent timestamped backup
+	// subdirectories to keep; older ones are deleted after each successful
+	// run. 0 means keep all of them (same convention as
+	// LoggingConfig.MaxBackups).
+	RetentionCount int `yaml:"retention_count"`
 }
 
 // FileUploadConfig controls the optional POST /api/upload, GET /files/{id},
@@ -1021,6 +1059,17 @@ func Default() Config {
 		OAuth: OAuthConfig{
 			Enabled:      false,
 			CallbackPath: "/oauth/callback",
+		},
+		// Disabled by default — see BackupConfig's doc comment for why Dir
+		// has no safe auto-detected default. Dir/IntervalMinutes/
+		// RetentionCount below are still filled in with sane values so
+		// enabling it only requires flipping Enabled, unless a deployment
+		// wants an external-disk Dir instead.
+		Backup: BackupConfig{
+			Enabled:         false,
+			Dir:             "./data/backups",
+			IntervalMinutes: 24 * 60,
+			RetentionCount:  7,
 		},
 		// No default Users: web UI login is mandatory and fails closed until
 		// config.yaml lists at least one account (see internal/users).

@@ -27,6 +27,7 @@ import (
 	"github.com/archer-developer/miranda-llm/router"
 	agentloop "github.com/archer-developer/miranda/internal/agent_loop"
 	"github.com/archer-developer/miranda/internal/attachments"
+	"github.com/archer-developer/miranda/internal/backup"
 	"github.com/archer-developer/miranda/internal/config"
 	"github.com/archer-developer/miranda/internal/envfile"
 	"github.com/archer-developer/miranda/internal/ha"
@@ -129,6 +130,20 @@ func main() {
 		os.Exit(1)
 	}
 
+	// `miranda backup` runs one backup cycle (internal/backup.Run) and exits
+	// — for an on-demand run (before trusting the ticker, or right before a
+	// risky change) without starting the full service (HTTP server, MCP
+	// connections, TTS, ...). Uses cfg.Backup.Dir/RetentionCount regardless
+	// of cfg.Backup.Enabled, since that flag only gates the automatic
+	// ticker in run/sweepBackups, not this explicit invocation.
+	if len(os.Args) > 1 && os.Args[1] == "backup" {
+		if err := backup.Run(context.Background(), cfg.Backup, cfg.Storage, configDir, dotEnvPath, bootstrap); err != nil {
+			bootstrap.Error("backup failed", "error", err)
+			os.Exit(1)
+		}
+		return
+	}
+
 	// Built before setupLogging so the app logger can also mirror into it
 	// (see setupLogging) — the web UI's log-viewer screen and live event
 	// pane both read from this one Hub over /ws/logs.
@@ -141,7 +156,7 @@ func main() {
 	}
 	defer closeLogs()
 
-	if err := run(cfg, logger, eventHub); err != nil {
+	if err := run(cfg, logger, eventHub, configDir); err != nil {
 		logger.Error("fatal", "error", err)
 		os.Exit(1)
 	}
@@ -183,7 +198,12 @@ func rotatingLogFile(cfg config.LoggingConfig, filename string) *lumberjack.Logg
 	}
 }
 
-func run(cfg config.Config, logger *slog.Logger, eventHub *hub.Hub) error {
+// configDir is passed through (rather than re-derived from
+// os.Getenv("MIRANDA_CONFIG_DIR") here too) so run's only source of truth
+// for where config.yaml's *.yaml files live is main's own resolution of it,
+// used both to load cfg and, later, by sweepBackups to back the same
+// directory up.
+func run(cfg config.Config, logger *slog.Logger, eventHub *hub.Hub, configDir string) error {
 	if err := validateEscalationToolNames(cfg.LLM.Providers); err != nil {
 		return err
 	}
@@ -427,6 +447,7 @@ func run(cfg config.Config, logger *slog.Logger, eventHub *hub.Hub) error {
 
 	go sweepIdleSessions(ctx, orchestrator, cfg.Memory, logger)
 	go sweepScheduledTasks(ctx, orchestrator, cfg.Schedule, logger)
+	go sweepBackups(ctx, cfg.Backup, cfg.Storage, configDir, dotEnvPath, logger)
 
 	return serveUntilInterrupted(ctx, httpServer, logger)
 }
@@ -474,6 +495,32 @@ func sweepScheduledTasks(ctx context.Context, o *agentloop.Orchestrator, cfg con
 		case <-ticker.C:
 			if err := o.RunScheduledTasks(ctx, logger); err != nil {
 				logger.Error("scheduled task sweep failed", "error", err)
+			}
+		}
+	}
+}
+
+// sweepBackups runs a full database + config backup (internal/backup.Run)
+// every cfg.IntervalMinutes. Unlike sweepIdleSessions/sweepScheduledTasks,
+// the ticker interval here isn't a separate polling cadence decoupled from
+// some per-item due time — every tick just performs a backup, so cfg.
+// IntervalMinutes drives the ticker directly. A no-op if cfg.Enabled is
+// false, and exits once ctx is cancelled at shutdown.
+func sweepBackups(ctx context.Context, cfg config.BackupConfig, storageCfg config.StorageConfig, configDir, envPath string, logger *slog.Logger) {
+	if !cfg.Enabled {
+		return
+	}
+
+	ticker := time.NewTicker(time.Duration(cfg.IntervalMinutes) * time.Minute)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			if err := backup.Run(ctx, cfg, storageCfg, configDir, envPath, logger); err != nil {
+				logger.Error("database backup failed", "error", err)
 			}
 		}
 	}

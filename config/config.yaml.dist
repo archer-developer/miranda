@@ -155,6 +155,31 @@ schedule:
   # to call. No deployment-specific secret needed, so this defaults to true.
   enabled: true
 
+# Periodic database + config backups (internal/backup) — off by default,
+# same reasoning as webauthn/telegram/oauth: dir is deployment-specific
+# (often an external disk mount), so there's no safe default to silently
+# start writing to. When enabled, every tick:
+#   - snapshots every storage.*_sqlite_path file that currently exists on
+#     disk via SQLite's own VACUUM INTO (a transactionally consistent copy,
+#     safe to take while Miranda is running and mid-write — unlike a raw
+#     file copy);
+#   - copies this config/ directory's *.yaml files, and the .env file
+#     Miranda was started with (API keys, OAUTH_MASTER_KEY, ...) — included
+#     deliberately despite being sensitive, since oauth.db/keyring.db are
+#     encrypted under keys that live only in .env and are otherwise useless
+#     without it;
+# into dir/<UTC timestamp>/, with the oldest snapshots beyond
+# retention_count pruned after each successful run.
+backup:
+  enabled: false
+  # Absolute path onto a separately mounted disk is recommended — a backup
+  # that lives on the same disk as the data it backs up doesn't protect
+  # against losing that disk. Relative paths (under the working directory)
+  # are also fine for local/dev use. Created automatically if missing.
+  dir: "/mnt/backup/miranda"
+  interval_minutes: 1440 # once a day
+  retention_count: 7 # keep the 7 most recent daily backups; 0 = keep all
+
 # Optional generic OAuth2 authorization layer (internal/oauth2,
 # docs/adr/oauth2-layer.md) — off by default, same reasoning as webauthn/
 # telegram above: there's no safe auto-detected public_base_url. Lets

@@ -60,6 +60,7 @@ Desktop / Web UI ----> |     agent loop     | <---- Code sandbox
   - [Troubleshooting](#troubleshooting)
 - [Telegram bot](#telegram-bot)
 - [Scheduled tasks](#scheduled-tasks)
+- [Database backups](#database-backups)
 - [How it works](#how-it-works)
 
 ---
@@ -496,6 +497,58 @@ when it's due, exactly as if the user had just said it.
 the standard 5-field format, evaluated in the server's local time zone. A
 fired task is silent by default — it has to explicitly call `speak_reply`/
 `send_telegram`/etc. if it wants output somewhere.
+
+---
+
+## Database backups
+
+Off by default (`backup.enabled: false` — see `config/config.yaml.dist`).
+When enabled, a background ticker (`internal/backup`) runs every
+`backup.interval_minutes` and writes a new `backup.dir/<UTC timestamp>/`
+directory containing:
+
+- Every `storage.*_sqlite_path` file that currently exists, via one
+  `VACUUM INTO` per store rather than a raw file copy — a plain `cp` of a
+  live SQLite file can catch a torn page mid-write, `VACUUM INTO` can't.
+- This deployment's `config/*.yaml` files (a restored backup can't even
+  start without them), copied into a `config/` subdirectory.
+- The `.env` file Miranda was started with, if one exists — included
+  deliberately despite holding API keys/`OAUTH_MASTER_KEY`: `oauth.db` and
+  `keyring.db` are encrypted under keys that live only there, so a backup
+  without it can never be decrypted. File permissions (e.g. a `.env`
+  restricted to the owner) are preserved on copy.
+
+Old run directories beyond `backup.retention_count` are deleted after each
+successful run. Any of the above that doesn't exist yet (an unused optional
+store, a missing `.env`) is silently skipped rather than failing the run.
+
+`backup.dir` can be a relative path for local/dev use, but is meant to be
+pointed at a separately mounted disk in production (an absolute path like
+`/mnt/backup/miranda`) — a backup that lives on the same disk as the data
+it backs up doesn't protect against losing that disk. Markdown memory
+(`storage.memory_dir`) isn't covered — only the SQLite stores and config,
+since `VACUUM INTO` is a SQLite-specific mechanism and memory wasn't in
+scope for this pass.
+
+### Manual backups
+
+`miranda backup` runs one backup cycle and exits, without starting the full
+service (no HTTP server, no MCP connections) — useful for a one-off backup
+before a risky change, or to confirm `backup.dir` (especially an external
+disk mount) is actually writable before turning `backup.enabled` on. It
+uses `backup.dir`/`backup.retention_count` from `config.yaml` regardless of
+`backup.enabled`, since that flag only gates the automatic ticker, not this
+explicit invocation. On the production server:
+
+```bash
+ssh archer@miranda '~/miranda/miranda backup'
+```
+
+Run it locally the same way, from the repo root after `go build`:
+
+```bash
+./miranda backup
+```
 
 ---
 
