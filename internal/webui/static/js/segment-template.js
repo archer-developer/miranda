@@ -98,11 +98,17 @@ function segmentsTemplate(segs) {
 /** One Block — a paragraph or a list. */
 function blockTemplate(block) {
   if (block.type === "list") {
-    return html`
-      <ul class="list-disc space-y-1 pl-5">
-        ${(block.items ?? []).map((item) => html`<li>${segmentsTemplate(item)}</li>`)}
-      </ul>
-    `;
+    // The `>` immediately before/after the interpolations (no whitespace
+    // in between, same trick segmentTemplate's <code>/<a> cases use)
+    // matters here: the container this renders into has whitespace-pre-wrap
+    // (see chat.js's bubble()), so a literal newline+indentation left as a
+    // text node — as a "nicely formatted" multi-line template would — shows
+    // up as a real blank line/large gap around the list, not just
+    // source-level formatting.
+    return html`<ul
+      class="list-disc space-y-1 pl-5"
+      >${(block.items ?? []).map((item) => html`<li>${segmentsTemplate(item)}</li>`)}</ul
+    >`;
   }
   return html`<p>${segmentsTemplate(block.segments)}</p>`;
 }
