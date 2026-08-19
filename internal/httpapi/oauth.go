@@ -91,7 +91,7 @@ func renderOAuthResult(w http.ResponseWriter, ok bool, message string) {
 	if ok {
 		title = "Authorization successful"
 	}
-	fmt.Fprintf(w, `<!doctype html><html><head><meta charset="utf-8"><title>%s</title></head>`+
+	_, _ = fmt.Fprintf(w, `<!doctype html><html><head><meta charset="utf-8"><title>%s</title></head>`+
 		`<body style="font-family:sans-serif;text-align:center;padding:4rem 1rem"><h1>%s</h1><p>%s</p></body></html>`,
 		html.EscapeString(title), html.EscapeString(title), html.EscapeString(message))
 }

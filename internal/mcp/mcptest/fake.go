@@ -81,6 +81,7 @@ func (f *FakeClient) WithListToolsBlockingOn(unblock <-chan struct{}) *FakeClien
 	return f
 }
 
+// Name implements Client.
 func (f *FakeClient) Name() string { return f.name }
 
 // Close implements Client. Safe to call more than once, like a real session.
@@ -101,6 +102,7 @@ func (f *FakeClient) IsClosed() bool {
 	return f.Closed
 }
 
+// ListTools implements Client.
 func (f *FakeClient) ListTools(ctx context.Context) ([]llm.ToolDef, error) {
 	if f.listToolsBlock != nil {
 		select {
@@ -124,6 +126,7 @@ func (f *FakeClient) ListTools(ctx context.Context) ([]llm.ToolDef, error) {
 	return f.tools, nil
 }
 
+// CallTool implements Client.
 func (f *FakeClient) CallTool(ctx context.Context, name, argumentsJSON string) (string, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()

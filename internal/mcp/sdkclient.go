@@ -42,6 +42,7 @@ func Connect(ctx context.Context, name, url, token string) (*SDKClient, error) {
 	return &SDKClient{name: name, session: session}, nil
 }
 
+// Name implements Client.
 func (c *SDKClient) Name() string { return c.name }
 
 // Close implements Client, releasing this session's background keepalive

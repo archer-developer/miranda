@@ -154,12 +154,20 @@ func main() {
 		bootstrap.Error("fatal", "error", err)
 		os.Exit(1)
 	}
-	defer closeLogs()
 
+	os.Exit(runAndClose(cfg, logger, eventHub, configDir, closeLogs))
+}
+
+// runAndClose wraps run so closeLogs runs (via defer) before main calls
+// os.Exit — os.Exit itself never runs deferred calls, so that has to happen
+// in a function main returns from normally, not in main's own body.
+func runAndClose(cfg config.Config, logger *slog.Logger, eventHub *hub.Hub, configDir string, closeLogs func()) int {
+	defer closeLogs()
 	if err := run(cfg, logger, eventHub, configDir); err != nil {
 		logger.Error("fatal", "error", err)
-		os.Exit(1)
+		return 1
 	}
+	return 0
 }
 
 // setupLogging builds the application logger so everything it logs is
@@ -203,6 +211,8 @@ func rotatingLogFile(cfg config.LoggingConfig, filename string) *lumberjack.Logg
 // for where config.yaml's *.yaml files live is main's own resolution of it,
 // used both to load cfg and, later, by sweepBackups to back the same
 // directory up.
+//
+//nolint:gocyclo // linear service-wiring: each step is an independent `if err != nil { return err }`, not branching logic — splitting it up would scatter one bootstrap sequence across files without reducing real complexity
 func run(cfg config.Config, logger *slog.Logger, eventHub *hub.Hub, configDir string) error {
 	if err := validateEscalationToolNames(cfg.LLM.Providers); err != nil {
 		return err

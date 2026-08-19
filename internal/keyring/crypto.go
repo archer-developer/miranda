@@ -148,6 +148,7 @@ func Wrap(key, plaintext, aad []byte) (ciphertext, nonce []byte, err error) {
 	return wrap(key, plaintext, aad)
 }
 
+// Unwrap is the exported form of unwrap above — see the Wrap doc comment.
 func Unwrap(key, ciphertext, nonce, aad []byte) ([]byte, error) {
 	return unwrap(key, ciphertext, nonce, aad)
 }

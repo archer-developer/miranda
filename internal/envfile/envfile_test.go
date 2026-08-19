@@ -16,8 +16,8 @@ func writeEnvFile(t *testing.T, content string) string {
 }
 
 func TestLoad_SetsUnsetVariablesFromFile(t *testing.T) {
-	os.Unsetenv("ENVFILE_TEST_NEW_VAR")
-	t.Cleanup(func() { os.Unsetenv("ENVFILE_TEST_NEW_VAR") })
+	_ = os.Unsetenv("ENVFILE_TEST_NEW_VAR")
+	t.Cleanup(func() { _ = os.Unsetenv("ENVFILE_TEST_NEW_VAR") })
 
 	path := writeEnvFile(t, "ENVFILE_TEST_NEW_VAR=from-file\n")
 	require.NoError(t, Load(path))
@@ -39,8 +39,8 @@ func TestLoad_MissingFileIsNotAnError(t *testing.T) {
 }
 
 func TestLoad_SkipsBlankLinesAndComments(t *testing.T) {
-	os.Unsetenv("ENVFILE_TEST_COMMENTED")
-	t.Cleanup(func() { os.Unsetenv("ENVFILE_TEST_COMMENTED") })
+	_ = os.Unsetenv("ENVFILE_TEST_COMMENTED")
+	t.Cleanup(func() { _ = os.Unsetenv("ENVFILE_TEST_COMMENTED") })
 
 	path := writeEnvFile(t, "\n# a comment\n  \nENVFILE_TEST_COMMENTED=value\n# ENVFILE_TEST_COMMENTED=ignored\n")
 	require.NoError(t, Load(path))
@@ -49,11 +49,11 @@ func TestLoad_SkipsBlankLinesAndComments(t *testing.T) {
 }
 
 func TestLoad_StripsQuotesAndExportPrefix(t *testing.T) {
-	os.Unsetenv("ENVFILE_TEST_QUOTED")
-	os.Unsetenv("ENVFILE_TEST_EXPORTED")
+	_ = os.Unsetenv("ENVFILE_TEST_QUOTED")
+	_ = os.Unsetenv("ENVFILE_TEST_EXPORTED")
 	t.Cleanup(func() {
-		os.Unsetenv("ENVFILE_TEST_QUOTED")
-		os.Unsetenv("ENVFILE_TEST_EXPORTED")
+		_ = os.Unsetenv("ENVFILE_TEST_QUOTED")
+		_ = os.Unsetenv("ENVFILE_TEST_EXPORTED")
 	})
 
 	path := writeEnvFile(t, `ENVFILE_TEST_QUOTED="quoted value"`+"\n"+`export ENVFILE_TEST_EXPORTED=exported-value`+"\n")
@@ -64,7 +64,7 @@ func TestLoad_StripsQuotesAndExportPrefix(t *testing.T) {
 }
 
 func TestLoad_IgnoresLineWithNoEquals(t *testing.T) {
-	os.Unsetenv("NOT_A_VARIABLE")
+	_ = os.Unsetenv("NOT_A_VARIABLE")
 	path := writeEnvFile(t, "this line has no equals sign\n")
 	require.NoError(t, Load(path))
 }

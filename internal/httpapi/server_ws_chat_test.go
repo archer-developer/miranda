@@ -27,7 +27,7 @@ func dialChatWS(t *testing.T, wsURL, sessionToken string) *websocket.Conn {
 	if sessionToken != "" {
 		header.Set("Cookie", session.CookieName+"="+sessionToken)
 	}
-	conn, _, err := websocket.Dial(context.Background(), wsURL, &websocket.DialOptions{HTTPHeader: header})
+	conn, _, err := websocket.Dial(context.Background(), wsURL, &websocket.DialOptions{HTTPHeader: header}) //nolint:bodyclose // closed via t.Cleanup below; bodyclose doesn't see through closures
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = conn.CloseNow() })
 	return conn

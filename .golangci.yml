@@ -8,6 +8,10 @@ linters:
     - ineffassign
     - staticcheck
     - unused
+    - bodyclose
+    - gocritic
+    - gocyclo
+    - revive
   settings:
     errcheck:
       # Closing a response body / rows / connection in a defer after the
@@ -16,3 +20,18 @@ linters:
       exclude-functions:
         - (io.Closer).Close
         - (net/http.ResponseWriter).Write
+        - (*database/sql.Rows).Close
+        - (io/fs.File).Close
+    gocyclo:
+      # Default (30) mirrors the actual shape of this codebase: a few
+      # inherently large dispatch functions (e.g. the tool-call switch in
+      # the agent loop) sit above 15 without being genuinely tangled.
+      min-complexity: 30
+    revive:
+      # Only the "exported" rule: enforce doc-comments on exported symbols,
+      # matching the project convention in CLAUDE.md. Revive's other
+      # default rules (unused-parameter, context-as-argument, ...) are
+      # noisy on this codebase's test helpers and not worth enforcing.
+      rules:
+        - name: exported
+          severity: warning

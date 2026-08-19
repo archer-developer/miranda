@@ -63,7 +63,7 @@ func NewWithAPIBase(apiBase string) *Client {
 // Calendar API's CalendarListEntry resource (calendarList.list) Miranda's
 // tools expose to the model, enough to resolve a human description ("my
 // family calendar") to the calendarId every other method needs.
-type CalendarListEntry struct {
+type CalendarListEntry struct { //nolint:revive // name deliberately matches the Google Calendar API's own CalendarListEntry resource, not a stutter
 	ID         string `json:"id"`
 	Summary    string `json:"summary"`
 	TimeZone   string `json:"timeZone,omitempty"`

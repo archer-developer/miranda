@@ -193,7 +193,7 @@ func TestManager_KeepConnectedReconnectsAfterSilentDisconnect(t *testing.T) {
 		close(done)
 	}()
 
-	require.Eventually(t, func() bool { return reconnected.Load() }, time.Second, time.Millisecond,
+	require.Eventually(t, reconnected.Load, time.Second, time.Millisecond,
 		"a dead session must be reconnected without any Tools()/Call() ever being made")
 	require.True(t, dead.IsClosed(), "the health check must have evicted (and closed) the dead client")
 

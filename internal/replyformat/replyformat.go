@@ -21,6 +21,7 @@ import (
 // BlockType distinguishes the two block-level constructs Parse produces.
 type BlockType string
 
+// The two BlockType values Parse produces.
 const (
 	BlockParagraph BlockType = "paragraph"
 	BlockList      BlockType = "list"
@@ -42,6 +43,7 @@ type Block struct {
 // additive to extend later if nesting turns out to matter.
 type SegmentType string
 
+// The SegmentType values Parse recognizes.
 const (
 	SegmentText   SegmentType = "text"
 	SegmentBold   SegmentType = "bold"

@@ -25,6 +25,8 @@ const searchHistoryLimit = 8
 // Errors are turned into a result string rather than aborting the turn, so
 // the model can see what went wrong and react (apologize, retry
 // differently) instead of the whole request failing.
+//
+//nolint:gocyclo // one if-per-tool-name dispatch chain; each branch is independent and shallow, so splitting it up would obscure the 1:1 mapping between tool name and handler without reducing real complexity
 func (o *Orchestrator) executeTool(ctx context.Context, userID, conversationID string, tc llm.ToolCall, control *turnControl) string {
 	if tc.Name == rememberToolName {
 		var args struct {
