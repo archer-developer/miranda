@@ -117,6 +117,22 @@ func (o *Orchestrator) executeMCPTool(ctx context.Context, userID, conversationI
 		if o.logger != nil {
 			o.logger.Warn("mcp: tool call failed", "tool", tc.Name, "server", toolServer, "user", userID, "error", err)
 		}
+		// toolServer resolves by prefix match against every *configured*
+		// server (mcp.Manager.ServerAndTool), regardless of whether the
+		// model has actually loaded that server's real tool schemas this
+		// turn — so a lazy group the model hasn't (re-)loaded yet, or
+		// guessed a tool name for from memory of an earlier turn, reaches
+		// the remote server and fails there with whatever wording that
+		// server uses, not something Miranda controls. loadedGroups is
+		// per-turn (see control.loadedGroups doc), so this also catches the
+		// common case of a group loaded successfully in a previous user
+		// turn but not re-loaded in this one. Nudge toward the fix instead
+		// of leaving the model to guess further nonexistent tool names.
+		if toolServerOK && !control.loadedGroups[toolServer] {
+			if _, isLazy := o.lazyServerDescriptions[toolServer]; isLazy {
+				return fmt.Sprintf("error: %v — call load_tool_group with group=%q first (tool-group availability is per user-turn, even if you already loaded it earlier in this conversation)", err, toolServer)
+			}
+		}
 		return fmt.Sprintf("error: %v", err)
 	}
 
