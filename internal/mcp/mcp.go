@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -35,6 +36,37 @@ var ErrDisconnected = errors.New("mcp: server disconnected")
 // parsed back apart.
 func prefixedToolName(serverName, toolName string) string {
 	return serverName + "_" + toolName
+}
+
+// invalidToolNameChar matches anything outside Anthropic's tool-name
+// grammar (^[a-zA-Z0-9_-]{1,128}$) — the strictest of the providers Miranda
+// talks to. Gemini and OpenAI-shaped APIs accept a wider character set, so
+// a name that's fine for them (e.g. miranda-medical-card's own
+// "domain.action" convention, like "medical.ask") only surfaces as a 400
+// once a turn escalates to Claude. Sanitizing once here, at the one place
+// prefixed names are minted, keeps the name Miranda advertises identical
+// across every provider instead of only breaking on whichever one happens
+// to be active this turn.
+var invalidToolNameChar = regexp.MustCompile(`[^a-zA-Z0-9_-]`)
+
+// sanitizeToolName replaces every character outside Anthropic's tool-name
+// grammar with "_". The result is only ever used as the name advertised to
+// providers and matched back against toolAlias — never passed to an MCP
+// server's own CallTool, which always gets the untouched original name via
+// Manager.resolveTool.
+func sanitizeToolName(name string) string {
+	return invalidToolNameChar.ReplaceAllString(name, "_")
+}
+
+// toolAlias records what a sanitized, provider-facing tool name actually
+// refers to: the MCP server that owns it and that tool's own (unprefixed,
+// unsanitized) name, exactly as its ListTools call returned it — the form
+// Client.CallTool expects. Populated by listTools at the moment each name
+// is minted, since that's the only place both the sanitized and original
+// names are known together.
+type toolAlias struct {
+	server string
+	tool   string // unprefixed, unsanitized — passed straight to Client.CallTool
 }
 
 // Client is one MCP server's tool source: it can list its tools and invoke
@@ -86,6 +118,21 @@ type Manager struct {
 	clients map[clientKey]Client
 	order   []string // server *names* only, insertion order stable across reconnects — independent of any per-user keying
 
+	// aliasMu guards aliases separately from mu: listTools populates it
+	// after snapshot() has already released mu (ListTools RPCs can be
+	// slow, and must not hold the client-set lock while in flight), so it
+	// needs a lock of its own rather than reusing mu.
+	aliasMu sync.RWMutex
+	// aliases maps every sanitized, provider-facing tool name minted so
+	// far back to its owning server and real tool name — see
+	// sanitizeToolName and resolveTool. Entries are only ever added or
+	// overwritten (with an identical value, since a given server+tool
+	// always sanitizes the same way), never removed: a stale entry for a
+	// tool a server no longer exposes is harmless, since resolveTool is
+	// only ever consulted with a name the model just echoed back from a
+	// tool list Miranda itself advertised.
+	aliases map[string]toolAlias
+
 	// oauthServers marks which server names require per-user session
 	// multiplexing (config.MCPServer.OAuthProvider != ""), set once via
 	// SetOAuthServers before any per-user traffic starts.
@@ -110,6 +157,7 @@ func NewManager(logger *slog.Logger, clients ...Client) *Manager {
 	m := &Manager{
 		logger:              logger,
 		clients:             make(map[clientKey]Client, len(clients)),
+		aliases:             make(map[string]toolAlias),
 		oauthServers:        make(map[string]bool),
 		userSessionsStarted: make(map[clientKey]bool),
 		bgCtx:               context.Background(),
@@ -338,6 +386,7 @@ func (m *Manager) ToolsExcludingForUser(ctx context.Context, skip map[string]boo
 // clientKey for an OAuth-gated server.
 func (m *Manager) listTools(ctx context.Context, userID string, order []string, clients map[string]Client) []llm.ToolDef {
 	var out []llm.ToolDef
+	newAliases := make(map[string]toolAlias)
 	for _, name := range order {
 		c, ok := clients[name]
 		if !ok {
@@ -354,9 +403,19 @@ func (m *Manager) listTools(ctx context.Context, userID string, order []string, 
 			continue
 		}
 		for _, t := range tools {
-			t.Name = prefixedToolName(name, t.Name)
+			original := t.Name
+			sanitized := sanitizeToolName(prefixedToolName(name, original))
+			t.Name = sanitized
+			newAliases[sanitized] = toolAlias{server: name, tool: original}
 			out = append(out, t)
 		}
+	}
+	if len(newAliases) > 0 {
+		m.aliasMu.Lock()
+		for k, v := range newAliases {
+			m.aliases[k] = v
+		}
+		m.aliasMu.Unlock()
 	}
 	return out
 }
@@ -374,9 +433,9 @@ func (m *Manager) Call(ctx context.Context, prefixedName, argumentsJSON string) 
 // OAuth-gated server — see EnsureUserSession, which the caller (executeTool)
 // must have already invoked so that session exists.
 func (m *Manager) CallForUser(ctx context.Context, prefixedName, argumentsJSON, userID string) (string, error) {
-	order, clients := m.snapshot(userID)
+	_, clients := m.snapshot(userID)
 
-	name, ok := serverForTool(order, prefixedName)
+	name, tool, ok := m.resolveTool(prefixedName)
 	if !ok {
 		return "", fmt.Errorf("mcp: no configured server matches tool %q", prefixedName)
 	}
@@ -384,7 +443,7 @@ func (m *Manager) CallForUser(ctx context.Context, prefixedName, argumentsJSON, 
 	if !ok {
 		return "", fmt.Errorf("mcp: server %q for tool %q is currently disconnected", name, prefixedName)
 	}
-	result, err := c.CallTool(ctx, strings.TrimPrefix(prefixedName, prefixedToolName(name, "")), argumentsJSON)
+	result, err := c.CallTool(ctx, tool, argumentsJSON)
 	if err != nil && errors.Is(err, ErrDisconnected) {
 		m.logger.Warn("mcp: server disconnected, dropping it until it reconnects", "server", name, "error", err)
 		m.removeClientKeyed(m.keyFor(name, userID), c)
@@ -401,7 +460,8 @@ func (m *Manager) CallForUser(ctx context.Context, prefixedName, argumentsJSON, 
 // called on every tool call once a keyring is configured, so it's worth
 // not paying for a map copy it doesn't need).
 func (m *Manager) ServerForTool(prefixedName string) (string, bool) {
-	return serverForTool(m.orderSnapshot(), prefixedName)
+	server, _, ok := m.resolveTool(prefixedName)
+	return server, ok
 }
 
 // orderSnapshot copies just the current iteration order under a read lock —
@@ -423,24 +483,44 @@ func (m *Manager) orderSnapshot() []string {
 // delegate to the same serverAndTool so there is exactly one place that
 // walks order looking for a prefix match.
 func (m *Manager) ServerAndTool(prefixedName string) (server, tool string, ok bool) {
+	return m.resolveTool(prefixedName)
+}
+
+// resolveTool resolves prefixedName (exactly as Tools/ToolsForUser
+// advertised it, i.e. already sanitizeToolName'd) back to its owning
+// server and that tool's own real name, in the form Client.CallTool
+// expects. aliases (populated by listTools at the moment each name was
+// minted) is checked first — it's the only source that can invert
+// sanitizeToolName's character substitution, so it's required whenever
+// the underlying tool name contained a character the provider-facing name
+// had to have replaced (e.g. miranda-medical-card's "medical.ask" ->
+// "medical_card_medical_ask"). The legacy HasPrefix scan below is a
+// fallback for a name resolveTool is asked about before any Tools() call
+// ever minted it this process (e.g. tests constructing a Manager and
+// calling Call directly) — it only gives the right answer when the tool's
+// own name needed no sanitizing, which is the common case.
+func (m *Manager) resolveTool(prefixedName string) (server, tool string, ok bool) {
+	m.aliasMu.RLock()
+	a, found := m.aliases[prefixedName]
+	m.aliasMu.RUnlock()
+	if found {
+		return a.server, a.tool, true
+	}
 	return serverAndTool(m.orderSnapshot(), prefixedName)
 }
 
-// KNOWN ISSUE: this HasPrefix scan is ambiguous, not just in theory — two
-// enabled servers where one name is a "_"-delimited prefix of the other
-// (e.g. "medical" and "medical_card") can resolve a call to the wrong
-// server, and since tool names can themselves contain underscores, the
-// ambiguity isn't even limited to that case (server "a" + tool "b_c" and
-// server "a_b" + tool "c" both mint the identical prefixed name "a_b_c").
-// validateMCPServerNames only rejects exact duplicate server names, not
-// this. Every caller (ServerForTool, ServerAndTool, Call's own dispatch,
-// and everything httpapi.Orchestrator.executeTool gates on their result —
-// see CLAUDE.md's "Tools available to the model" section) inherits the
-// misattribution risk. Not yet fixed; the correct fix is to stop
-// re-deriving (server, tool) from the string here and instead have Tools()
-// record the exact prefixedName -> (server, tool) pairing at the moment it
-// mints each prefixed name (it already knows this unambiguously there),
-// with this function becoming a lookup into that map instead of a scan.
+// KNOWN ISSUE: the HasPrefix scan below (resolveTool's fallback, for a
+// name that was never minted by listTools this process) is ambiguous, not
+// just in theory — two enabled servers where one name is a "_"-delimited
+// prefix of the other (e.g. "medical" and "medical_card") can resolve a
+// call to the wrong server, and since tool names can themselves contain
+// underscores, the ambiguity isn't even limited to that case (server "a"
+// + tool "b_c" and server "a_b" + tool "c" both mint the identical
+// prefixed name "a_b_c"). validateMCPServerNames only rejects exact
+// duplicate server names, not this. resolveTool's aliases map sidesteps
+// this ambiguity entirely for any name that has actually been advertised
+// via Tools() at least once — which is every name a real tool call could
+// plausibly reference, since the model can only call a name it was shown.
 func serverAndTool(order []string, prefixedName string) (server, tool string, ok bool) {
 	for _, name := range order {
 		prefix := prefixedToolName(name, "")

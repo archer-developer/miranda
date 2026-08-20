@@ -41,6 +41,42 @@ func TestManager_CallRoutesToOwningServer(t *testing.T) {
 	require.Len(t, noolite.Calls, 1)
 }
 
+// TestManager_SanitizesToolNamesForProviders guards the fix for a real
+// production incident (2026-08-20): miranda-medical-card exposes tool
+// names like "medical.ask" (a "domain.action" convention), which Gemini
+// accepted but Anthropic's Messages API rejected outright once a turn
+// escalated to Claude — "tools.N.custom.name: String should match pattern
+// '^[a-zA-Z0-9_-]{1,128}$'". Every name Tools() advertises must satisfy
+// that pattern regardless of which provider is actually handling the turn.
+func TestManager_SanitizesToolNamesForProviders(t *testing.T) {
+	medicalCard := mcptest.New("medical_card", llm.ToolDef{Name: "medical.ask"})
+
+	m := NewManager(nil, medicalCard)
+	tools := m.Tools(context.Background())
+
+	require.Len(t, tools, 1)
+	require.Equal(t, "medical_card_medical_ask", tools[0].Name)
+}
+
+// TestManager_CallRoutesSanitizedNameToRealToolName checks the other half
+// of sanitization: once a model calls back the sanitized name Tools()
+// advertised, Call must still reach the MCP server with the tool's real,
+// unsanitized name — CallTool has no idea "medical_ask" means
+// "medical.ask".
+func TestManager_CallRoutesSanitizedNameToRealToolName(t *testing.T) {
+	medicalCard := mcptest.New("medical_card", llm.ToolDef{Name: "medical.ask"}).
+		WithResult("medical.ask", "answer")
+
+	m := NewManager(nil, medicalCard)
+	m.Tools(context.Background()) // mint the alias before calling, like a real turn does
+
+	result, err := m.Call(context.Background(), "medical_card_medical_ask", `{}`)
+	require.NoError(t, err)
+	require.Equal(t, "answer", result)
+	require.Len(t, medicalCard.Calls, 1)
+	require.Equal(t, "medical.ask", medicalCard.Calls[0].Tool)
+}
+
 func TestManager_CallUnknownToolReturnsError(t *testing.T) {
 	m := NewManager(nil, mcptest.New("ha"))
 	_, err := m.Call(context.Background(), "unknown_tool", `{}`)
@@ -334,12 +370,12 @@ func TestManager_ServerForTool(t *testing.T) {
 }
 
 func TestManager_ServerAndTool(t *testing.T) {
-	m := NewManager(nil, mcptest.New("ha", llm.ToolDef{Name: "get_state"}), mcptest.New("medical_card", llm.ToolDef{Name: "medical.ask"}))
+	m := NewManager(nil, mcptest.New("ha", llm.ToolDef{Name: "get_state"}), mcptest.New("diary", llm.ToolDef{Name: "add_entry"}))
 
-	server, tool, ok := m.ServerAndTool("medical_card_medical.ask")
+	server, tool, ok := m.ServerAndTool("diary_add_entry")
 	require.True(t, ok)
-	require.Equal(t, "medical_card", server)
-	require.Equal(t, "medical.ask", tool)
+	require.Equal(t, "diary", server)
+	require.Equal(t, "add_entry", tool)
 
 	_, _, ok = m.ServerAndTool("unknown_tool")
 	require.False(t, ok)
