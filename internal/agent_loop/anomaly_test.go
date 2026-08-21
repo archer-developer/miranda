@@ -134,8 +134,15 @@ func TestHandle_ExceedingMaxIterations_WritesAnomalyFileAndWarns(t *testing.T) {
 	o.SetLogger(slog.New(slog.NewTextHandler(&logBuf, nil)))
 	o.SetAnomalyConfig(AnomalyConfig{Dir: dir})
 
-	_, err := o.Handle(context.Background(), InputRequest{Source: "cli", UserID: "alex", Text: "keep going"})
-	require.Error(t, err)
+	// Handle no longer surfaces this as an error — see orchestrator.go's
+	// Handle: a failed agent loop (iteration cap, timeout, provider outage)
+	// now falls back to an ordinary-looking reply instead of leaving the
+	// caller (and the user) with nothing. Anomaly detection still fires
+	// exactly the same either way, since reportAnomalies is deferred and
+	// reads Outcome regardless of what Handle ultimately returns.
+	resp, err := o.Handle(context.Background(), InputRequest{Source: "cli", UserID: "alex", Text: "keep going"})
+	require.NoError(t, err)
+	require.NotEmpty(t, resp.Reply)
 
 	require.Contains(t, logBuf.String(), "turn had anomalies")
 	require.Contains(t, logBuf.String(), "iteration_cap")

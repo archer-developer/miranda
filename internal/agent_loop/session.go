@@ -249,3 +249,34 @@ func (o *Orchestrator) userLocation(userID string) *time.Location {
 	}
 	return time.Local
 }
+
+// turnFailureReplies is the one hardcoded, non-LLM-generated reply text
+// Miranda ever sends: what a user gets instead of total silence when
+// runAgentLoop itself errors out (provider outage, mid-stream failure, or
+// the turn's own deadline expiring — see Handle's call site). Keyed the
+// same way as config.UserConfig.Language/the web UI's own locale files
+// ("ru", "be", "en") since that's the only per-user language signal
+// Miranda already tracks; there's no broader backend i18n system to hook
+// into for a single fixed string like this one.
+var turnFailureReplies = map[string]string{
+	"ru": "Не получилось ответить — что-то пошло не так. Попробуй ещё раз.",
+	"be": "Не атрымалася адказаць — нешта пайшло не так. Паспрабуй яшчэ раз.",
+	"en": "Something went wrong and I couldn't finish that — please try again.",
+}
+
+// turnFailureReply returns the fallback reply text for userID's configured
+// language, falling back to "ru" (config.Default's own DefaultLanguage) when
+// there's no registry, no match, or an unrecognized language code — the same
+// "better to fall back sensibly than say nothing" reasoning as userLocation.
+func (o *Orchestrator) turnFailureReply(userID string) string {
+	lang := "ru"
+	if o.users != nil {
+		if u, ok := o.users.Get(userID); ok && u.Language != "" {
+			lang = u.Language
+		}
+	}
+	if s, ok := turnFailureReplies[lang]; ok {
+		return s
+	}
+	return turnFailureReplies["ru"]
+}

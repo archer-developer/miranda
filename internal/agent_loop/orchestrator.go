@@ -661,21 +661,56 @@ func (o *Orchestrator) Handle(ctx context.Context, req InputRequest) (InputRespo
 	control := &turnControl{}
 	tools := o.availableTools(ctx, userID, control)
 	finalText, providerUsed, err := o.runAgentLoop(ctx, userID, convID, req.Source, messages, tools, control, outcome)
-	if err != nil {
-		// An earlier tool-call iteration in this same loop may have already
-		// called download_file successfully (attachStore.Put and
-		// control.downloadedFiles both happen synchronously at call time in
-		// executeTool) before a *later* iteration errored out. Without this,
-		// that file would be staged and ownership-recorded with nowhere the
-		// user could discover it through normal use — see the success path
-		// below this mirrors. Best-effort: the turn still reports its
-		// original error.
+	if err != nil && req.Source == users.SourceScheduled {
+		// RunScheduledTasks needs the real error, not a graceful cover-up:
+		// it's what tells the store the fire failed, keeps the task due for
+		// the next sweep instead of silently marking it done, and records
+		// schedule.StatusError in the task's history. Nobody is watching a
+		// scheduled turn live for a reply the way a chat user is (see
+		// CLAUDE.md: every non-ha_assist source stays silent unless the
+		// model itself calls speak_reply/send_telegram) — swallowing the
+		// error into an unseen fallback reply here would just make a failed
+		// reminder look like it fired.
 		if len(control.downloadedFiles) > 0 {
 			if _, recErr := o.history.AppendAssistantMessage(ctx, convID, "", nil, toDownloadRefs(control.downloadedFiles)); recErr != nil {
 				o.hub.Publish(hub.Event{Source: "error", Message: "record recovered downloads: " + recErr.Error()})
 			}
 		}
 		return InputResponse{}, err
+	}
+	if err != nil {
+		// A provider outage, a mid-stream error, or the turn's own
+		// deadline expiring (e.g. after several slow tool round-trips ate
+		// the whole TurnTimeout budget, leaving escalation no time to even
+		// attempt a call — see logs/anomalies/'s "timeout" kind) used to
+		// propagate all the way to httpapi as a bare HTTP 500, leaving the
+		// user with total silence: no chat bubble, no TTS, nothing to react
+		// to after however long the turn had been working. Anomaly
+		// detection (reportAnomalies, deferred above) already records the
+		// real failure for later review regardless of what Handle returns,
+		// so swallowing it into an ordinary-looking reply here loses no
+		// operator visibility — it only fixes what the user experiences.
+		//
+		// An earlier tool-call iteration in this same loop may have already
+		// called download_file successfully (attachStore.Put and
+		// control.downloadedFiles both happen synchronously at call time in
+		// executeTool) before a *later* iteration errored out — that file
+		// stays staged and gets recorded below anyway, alongside the
+		// fallback reply text, via the same toDownloadRefs(control.
+		// downloadedFiles) the success path already uses; nothing extra to
+		// do here for it.
+		if o.logger != nil {
+			o.logger.Error("orchestrator: agent loop failed, replying with fallback message", "error", err, "conversationId", convID, "userId", userID)
+		}
+		o.hub.Publish(hub.Event{Source: "error", Message: err.Error()})
+		finalText = o.turnFailureReply(userID)
+		providerUsed = ""
+		if req.Source == users.SourceHAAssist {
+			// The normal live-TTS path (streamOneTurn's speakChunks) never
+			// got a chance to speak anything for this failed final
+			// call — say the fallback text out loud too, not just show it.
+			o.speakText(ctx, voiceText(finalText))
+		}
 	}
 	// downloads is recorded structurally alongside finalText, never folded
 	// into it — see history.Message.Downloads/toDownloadRefs for why. This
