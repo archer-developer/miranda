@@ -144,6 +144,17 @@ func main() {
 		return
 	}
 
+	// `miranda llm-trace` reads back logs/llm.log (see runLLMTrace's own doc
+	// comment) — a diagnostic, not the running service, so it exits here the
+	// same way `backup` does, before the full service wiring below.
+	if len(os.Args) > 1 && os.Args[1] == "llm-trace" {
+		if err := runLLMTrace(cfg.Logging, os.Args[2:]); err != nil {
+			bootstrap.Error("llm-trace failed", "error", err)
+			os.Exit(1)
+		}
+		return
+	}
+
 	// Built before setupLogging so the app logger can also mirror into it
 	// (see setupLogging) — the web UI's log-viewer screen and live event
 	// pane both read from this one Hub over /ws/logs.
@@ -222,8 +233,12 @@ func run(cfg config.Config, logger *slog.Logger, eventHub *hub.Hub, configDir st
 	defer func() { _ = llmTraceFile.Close() }()
 	// Mirrored into eventHub as Source: "llm_log" events too, same as the
 	// app logger above — the web UI's log-viewer screen tabs between the
-	// two over the one existing /ws/logs connection.
-	llmTracer := llmtrace.New(io.MultiWriter(llmTraceFile, eventHub.Writer("llm_log")))
+	// two over the one existing /ws/logs connection. Unlike the app logger's
+	// plain hub.Writer, this uses hub.Hub.LLMTraceWriter: it reassembles
+	// each traced call into a whole miranda-llm/llmtrace/analyze.Block
+	// before publishing, so the frontend renders already-parsed calls
+	// instead of reassembling a flood of raw lines itself.
+	llmTracer := llmtrace.New(io.MultiWriter(llmTraceFile, eventHub.LLMTraceWriter("llm_log")))
 
 	historyStore, err := history.Open(cfg.Storage.SQLitePath)
 	if err != nil {

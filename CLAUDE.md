@@ -192,7 +192,13 @@ see `internal/config.LoggingConfig`):
   `miranda-llm/llmtrace`). Every provider call (including every escalation
   hop) gets one block: exact system prompt, messages, tool names, and the
   model's response or error, tagged `conversation=<id>`. Use this to debug
-  why a given prompt didn't produce the expected tool call or reply.
+  why a given prompt didn't produce the expected tool call or reply. Read it
+  back with `go run ./cmd/miranda llm-trace [--conversation <id> | --latest |
+  --untagged]` (mirrors miranda-medical-card's own `medical-dev llm-trace`) or
+  via the web UI's Logs screen "LLM trace" tab — both the CLI and the web
+  UI's backend (`internal/hub.Hub.LLMTraceWriter`) parse this format through
+  the same shared `miranda-llm/llmtrace/analyze` package, so neither service
+  maintains its own copy of that logic.
 
 ### Web UI API surface
 

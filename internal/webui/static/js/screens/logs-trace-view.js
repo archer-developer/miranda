@@ -1,7 +1,9 @@
-// Rendering half of the Logs screen's "LLM trace" tab: turns one parsed call
-// record (see logs-trace-parser.js) into a collapsed summary row that
-// expands, on click, into a foldable JSON tree for its request/response —
-// see logs.js for how these rows get built and appended.
+// Rendering half of the Logs screen's "LLM trace" tab: turns one call
+// record — a miranda-llm/llmtrace/analyze.Block, already parsed server-side
+// by hub.Hub.LLMTraceWriter and delivered as the hub.Event's Data (see
+// logs.js) — into a collapsed summary row that expands, on click, into a
+// foldable JSON tree for its request/response — see logs.js for how these
+// rows get built and appended.
 import { t } from "../i18n.js";
 import { icon } from "../icons.js";
 import JSONFormatter from "../vendor/json-formatter-js/json-formatter.mjs";

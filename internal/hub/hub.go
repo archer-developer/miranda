@@ -90,19 +90,19 @@ func (h *Hub) Subscribe(filter func(Event) bool) (ch <-chan Event, replay []Even
 	defer h.mu.Unlock()
 
 	// Sized to match h.bufferSize (config.WebUI.LogBufferSize), not a small
-	// fixed constant: a single llmtrace block (miranda-llm/llmtrace)
-	// publishes every one of its lines (a large trace can run to hundreds
-	// of lines) from one synchronous Hub.Publish loop,
-	// far faster than the WS handler's Write goroutine can drain them over
-	// the network (see internal/httpapi.Server.handleWSLogs). A too-small
-	// channel used to fill up mid-burst and silently drop the rest of that
-	// same event (Publish's docs above are explicit that a full channel is
-	// skipped, not blocked on) — harmless for a scrolling plain-text pane
-	// missing one line, but fatal for the Logs screen's "LLM trace" tab,
-	// which only recognizes a call as complete once every one of its lines,
-	// including the terminating blank line, has arrived (see
-	// static/js/screens/logs-trace-parser.js) — a dropped line anywhere in
-	// the block meant it could never render at all.
+	// fixed constant: app_log's plain Writer still publishes one Event per
+	// raw line, and a burst of those (a busy request) could otherwise fill
+	// a too-small channel and silently drop the rest of it (Publish's docs
+	// above are explicit that a full channel is skipped, not blocked on) —
+	// harmless for app_log's scrolling plain-text pane missing one line, but
+	// was fatal for the Logs screen's "LLM trace" tab back when llm_log was
+	// also published one raw line at a time: a call was only recognized as
+	// complete once every one of its lines, including the terminating blank
+	// line, had arrived, so a single dropped line anywhere in a large trace
+	// meant it could never render at all. llm_log now publishes one Event
+	// per already-reassembled call instead (see Hub.LLMTraceWriter), which
+	// removed that specific failure mode, but app_log's own burst risk is
+	// reason enough to keep this the same size rather than a small constant.
 	sub := make(chan Event, h.bufferSize)
 	h.subscribers[sub] = filter
 

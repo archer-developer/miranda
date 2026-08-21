@@ -1,23 +1,22 @@
 // Real-time log viewer: tabs between the app log and LLM trace, both fed by
-// the one shared WebSocket connection (see ../ws.js) — internal/hub.Writer
-// mirrors both log files into hub events tagged "app_log"/"llm_log", so
-// there's no separate WS endpoint and no file-tailing/rotation to handle
-// here at all. ws.js's replay() already has history from before this
-// screen mounted (the hub's own ring buffer), so the pane isn't empty on
-// first visit.
+// the one shared WebSocket connection (see ../ws.js) — internal/hub mirrors
+// both log files into hub events tagged "app_log"/"llm_log", so there's no
+// separate WS endpoint and no file-tailing/rotation to handle here at all.
+// ws.js's replay() already has history from before this screen mounted (the
+// hub's own ring buffer), so the pane isn't empty on first visit.
 //
 // The two tabs render very differently. "app_log" stays exactly what it's
-// always been: one plain-text line per hub.Event. "llm_log" carries whole
-// multi-line internal/llmtrace blocks (one request/response per LLM call)
-// spread across many separate hub.Events — see logs-trace-parser.js, which
-// reassembles that flood of lines back into structured call records, and
-// logs-trace-view.js, which renders each one as a collapsed summary row
-// that expands into a foldable JSON tree (see the vendored
+// always been: one plain-text line per hub.Event. "llm_log" is fed by
+// hub.Hub.LLMTraceWriter instead of the plain per-line hub.Writer: each
+// event's Data is already a whole, server-parsed
+// miranda-llm/llmtrace/analyze.Block (one request/response per LLM call,
+// reassembled backend-side from internal/llmtrace's block format) — see
+// logs-trace-view.js, which renders it as a collapsed summary row that
+// expands into a foldable JSON tree (see the vendored
 // vendor/json-formatter-js/).
 import { t } from "../i18n.js";
 import { icon } from "../icons.js";
 import { on, replay } from "../ws.js";
-import { createTraceParser } from "./logs-trace-parser.js";
 import { buildTraceRow } from "./logs-trace-view.js";
 
 const TABS = [
@@ -38,12 +37,7 @@ let activeSource = TABS[0].source;
 let paneEl, emptyEl;
 let unsubscribers = [];
 
-// Only meaningful while activeSource === "llm_log": an incremental parser
-// primed with exactly the lines already rendered (see renderLlmLog), so
-// appendLlmLine can keep feeding it new lines one at a time without
-// re-parsing the whole backlog on every single incoming line.
-let llmParser = null;
-// The <div space-y-*> row list appendLlmLine appends fresh rows into — kept
+// The <div space-y-*> row list appendLlmEvent appends fresh rows into — kept
 // as its own element (rather than appending rows straight into paneEl, like
 // the plain-text app_log lines do) purely so the rows can have breathing
 // room between them via `space-y` without also spacing out app_log's
@@ -74,27 +68,13 @@ function appendLine(ev) {
   if (stick) paneEl.scrollTop = paneEl.scrollHeight;
 }
 
-/** Renders the "llm_log" tab from scratch: replay()'s full backlog is
- * re-parsed every time this tab becomes active (mount, or switching back to
- * it) rather than trusting any state left over from before — the same
- * "recompute from the one source of truth" approach renderActiveTab already
- * takes for app_log. This does mean any row a user had expanded is
- * collapsed again after switching tabs away and back; that trade-off (over
- * threading expand-state through a full backlog re-parse) mirrors how this
- * screen already treats a tab switch as a fresh render, and keeps a rare
- * edge case — the ring buffer's line cap (config.WebUI.LogBufferSize)
- * evicting a block's opening header while its tail remains — self-healing
- * (the next activation just sees the dangling tail dropped, or completed,
- * whichever the buffer now holds), rather than a stateful parser risking a
- * subtly wrong permanent view of it. */
+/** Renders the "llm_log" tab from scratch: each replayed event's Data is
+ * already a whole, server-parsed call record (see hub.Hub.LLMTraceWriter),
+ * so there's no backlog re-parsing left to do here — just map and render. */
 function renderLlmLog() {
-  const events = replay("llm_log");
-  llmParser = createTraceParser();
-  const blocks = [];
-  for (const ev of events) {
-    const block = llmParser.feed(ev.message);
-    if (block) blocks.push(block);
-  }
+  const blocks = replay("llm_log")
+    .map((ev) => ev.data)
+    .filter(Boolean);
 
   if (blocks.length === 0) {
     llmListEl = null;
@@ -109,25 +89,22 @@ function renderLlmLog() {
   paneEl.scrollTop = paneEl.scrollHeight;
 }
 
-/** Live handler for new "llm_log" lines while that tab is active — feeds
- * llmParser one line at a time and appends exactly one new row the instant
- * a line completes a block, instead of rebuilding the whole list (which
+/** Live handler for new "llm_log" events while that tab is active — appends
+ * exactly one new row per event instead of rebuilding the whole list (which
  * would also collapse whatever row the user currently has open to read). */
-function appendLlmLine(ev) {
-  if (ev.source !== "llm_log" || activeSource !== "llm_log" || !llmParser) return;
-  const block = llmParser.feed(ev.message);
-  if (!block) return; // mid-block line — nothing new to render yet
+function appendLlmEvent(ev) {
+  if (ev.source !== "llm_log" || activeSource !== "llm_log" || !ev.data) return;
 
   const stick = isNearBottom();
   emptyEl.classList.add("hidden");
   if (!llmListEl) {
-    // The very first call to complete after the tab was shown empty —
+    // The very first call to arrive after the tab was shown empty —
     // renderLlmLog() left llmListEl unset in that case (see above).
     llmListEl = document.createElement("div");
     llmListEl.className = "space-y-2";
     paneEl.appendChild(llmListEl);
   }
-  llmListEl.appendChild(buildTraceRow(block));
+  llmListEl.appendChild(buildTraceRow(ev.data));
   if (stick) paneEl.scrollTop = paneEl.scrollHeight;
 }
 
@@ -213,9 +190,9 @@ export function mount(container) {
   renderActiveTab();
 
   // "app_log" keeps the original one-line-in-one-line-out subscription;
-  // "llm_log" needs its own handler that reassembles lines into blocks
-  // (see appendLlmLine above).
-  unsubscribers = [on("app_log", appendLine), on("llm_log", appendLlmLine)];
+  // "llm_log" needs its own handler since each event is a whole call
+  // record, not a plain-text line (see appendLlmEvent above).
+  unsubscribers = [on("app_log", appendLine), on("llm_log", appendLlmEvent)];
 }
 
 export function unmount() {
