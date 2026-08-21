@@ -23,21 +23,31 @@ type currentUserView struct {
 	HAUserID    string `json:"haUserId,omitempty"`
 }
 
-func newCurrentUserView(u *users.User) currentUserView {
+// currentUserView resolves u's avatar, preferring an uploaded file (see
+// avatar.go's handlePostAvatar/resolveAvatarFile) over UserConfig.Avatar —
+// so uploading one from the profile screen takes effect immediately without
+// needing config.yaml (which the registry was already loaded from at
+// startup, and has no write-back path) to be edited by hand.
+func (h *Handler) currentUserView(u *users.User) currentUserView {
 	if u == nil {
 		return currentUserView{}
+	}
+	avatar := u.Avatar
+	if uploaded := resolveAvatarFile(h.avatarsDir, u.Username); uploaded != "" {
+		avatar = uploaded
 	}
 	return currentUserView{
 		Username:    u.Username,
 		DisplayName: u.DisplayName(),
-		Avatar:      avatarURL(u.Avatar),
+		Avatar:      avatarURL(avatar),
 		Language:    u.Language,
 		HAUserID:    u.HAUserID,
 	}
 }
 
 // avatarURL passes http(s) URLs through unchanged; anything else is treated
-// as a filename under the configured avatars directory (see webui.New).
+// as a filename under the configured avatars directory (see webui.New) —
+// either one handlePostAvatar wrote, or one named directly in config.yaml.
 func avatarURL(avatar string) string {
 	if avatar == "" {
 		return ""

@@ -117,6 +117,7 @@ type Handler struct {
 	users           *users.Registry
 	sessions        *session.Store
 	defaultLanguage string
+	avatarsDir      string // see New's doc comment; "" disables avatar upload/serving entirely
 	assetVersion    string // see staticAssetVersion; templates embed this in /static/v<version>/ URLs
 	logger          *slog.Logger
 }
@@ -195,6 +196,7 @@ func New(h History, mem Memory, turns TurnTracker, webauthnSvc WebAuthnService, 
 		users:           usersRegistry,
 		sessions:        sessions,
 		defaultLanguage: defaultLanguage,
+		avatarsDir:      avatarsDir,
 		assetVersion:    assetVersion,
 		logger:          logger,
 	}
@@ -239,6 +241,9 @@ func New(h History, mem Memory, turns TurnTracker, webauthnSvc WebAuthnService, 
 	mux.Handle("PUT /api/memory", handler.requireAuthAPI(http.HandlerFunc(handler.handlePutMemory)))
 	mux.Handle("GET /api/session", handler.requireAuthAPI(http.HandlerFunc(handler.handleSessionCheck)))
 	mux.Handle("GET /api/turn-status", handler.requireAuthAPI(http.HandlerFunc(handler.handleTurnStatus)))
+	if avatarsDir != "" {
+		mux.Handle("POST /api/profile/avatar", handler.requireAuthAPI(http.HandlerFunc(handler.handlePostAvatar)))
+	}
 
 	if webauthnSvc != nil {
 		// Registration/management require being logged in already (adding a
@@ -329,7 +334,7 @@ func (h *Handler) handleIndex(w http.ResponseWriter, r *http.Request) {
 	user := currentUser(r)
 	lang := h.resolveLanguage(r, user)
 	strings := localizedStrings(lang)
-	userView := newCurrentUserView(user)
+	userView := h.currentUserView(user)
 
 	data := indexPageData{
 		Lang:            lang,

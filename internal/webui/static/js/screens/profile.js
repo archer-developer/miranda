@@ -1,15 +1,36 @@
 // Profile screen: read-only account info (config.yaml-sourced — same
 // pattern as everywhere else in this project, hand-edit the file rather
-// than an in-app editor) plus passkey management. The passkeys section only
-// renders if both the server has WebAuthn enabled and this browser context
-// actually supports it (window.PublicKeyCredential — false on any insecure
-// origin), so there's never a control that would just fail if clicked.
+// than an in-app editor) plus avatar upload and passkey management. The
+// avatar is the one field this screen writes rather than just displays —
+// see handleAvatarFile below and internal/webui/avatar.go's
+// handlePostAvatar. The passkeys section only renders if both the server
+// has WebAuthn enabled and this browser context actually supports it
+// (window.PublicKeyCredential — false on any insecure origin), so there's
+// never a control that would just fail if clicked.
 import { t } from "../i18n.js";
 import { icon } from "../icons.js";
 import { showToast } from "../toast.js";
 import * as webauthn from "../webauthn.js";
+import { cropAvatar } from "../avatar-crop.js";
 
 const user = window.MIRANDA_USER || {};
+
+// Shared between the profile screen's own circle and the header's smaller
+// one (updated live on upload — see updateHeaderAvatar) so both always
+// agree on what "no avatar" looks like.
+function avatarMarkup(url, iconSizeClass) {
+  if (url) {
+    return `<img src="${url}" alt="" class="h-full w-full rounded-full object-cover" />`;
+  }
+  return `<span class="flex h-full w-full items-center justify-center rounded-full bg-(--color-surface-2) text-(--color-text-faint)">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="${iconSizeClass}" aria-hidden="true"><circle cx="12" cy="8" r="4"/><path d="M4 20c0-4 4-6 8-6s8 2 8 6"/></svg>
+  </span>`;
+}
+
+function updateHeaderAvatar(url) {
+  const header = document.querySelector("#header-avatar");
+  if (header) header.innerHTML = avatarMarkup(url, "h-4 w-4");
+}
 
 function field(label, value) {
   const row = document.createElement("div");
@@ -177,11 +198,92 @@ function mountPasskeys(container) {
   renderCredentials(listEl);
 }
 
+// Wires the circular drop-zone rendered in mount()'s template: click or
+// drag-and-drop a file in, crop it (avatar-crop.js), upload the result to
+// internal/webui/avatar.go's handlePostAvatar, then reflect the new avatar
+// both in this screen's own preview circle and in the header (see
+// updateHeaderAvatar) — no full page reload needed either way.
+function mountAvatarUpload(container) {
+  const dropzone = container.querySelector("#avatar-dropzone");
+  const fileInput = container.querySelector("#avatar-file-input");
+  const preview = container.querySelector("#avatar-preview");
+
+  const openPicker = () => fileInput.click();
+  dropzone.addEventListener("click", openPicker);
+  dropzone.addEventListener("keydown", (e) => {
+    if (e.key === "Enter" || e.key === " ") {
+      e.preventDefault();
+      openPicker();
+    }
+  });
+  dropzone.addEventListener("dragover", (e) => {
+    e.preventDefault();
+    dropzone.classList.add("border-(--color-accent-emphasis)");
+  });
+  dropzone.addEventListener("dragleave", () => {
+    dropzone.classList.remove("border-(--color-accent-emphasis)");
+  });
+  dropzone.addEventListener("drop", (e) => {
+    e.preventDefault();
+    dropzone.classList.remove("border-(--color-accent-emphasis)");
+    const file = e.dataTransfer?.files?.[0];
+    if (file) handleAvatarFile(file, preview);
+  });
+  fileInput.addEventListener("change", () => {
+    const file = fileInput.files?.[0];
+    fileInput.value = ""; // otherwise re-selecting the same file fires no "change"
+    if (file) handleAvatarFile(file, preview);
+  });
+}
+
+async function handleAvatarFile(file, preview) {
+  if (!file.type.startsWith("image/")) {
+    showToast(t("profile_avatar_invalid_file", "Please choose an image file"), "error");
+    return;
+  }
+
+  const blob = await cropAvatar(file);
+  if (!blob) return; // cancelled, or the file couldn't be decoded as an image
+
+  const previousHTML = preview.innerHTML;
+  const objURL = URL.createObjectURL(blob);
+  preview.innerHTML = `<img src="${objURL}" alt="" class="h-full w-full rounded-full object-cover" />`;
+
+  try {
+    const formData = new FormData();
+    formData.append("avatar", blob, "avatar.jpg");
+    const res = await fetch("/api/profile/avatar", { method: "POST", body: formData });
+    if (!res.ok) throw new Error(String(res.status));
+    const data = await res.json();
+    user.avatar = data.avatar_url;
+    preview.innerHTML = avatarMarkup(data.avatar_url, "h-10 w-10");
+    updateHeaderAvatar(data.avatar_url);
+  } catch {
+    preview.innerHTML = previousHTML;
+    showToast(t("profile_avatar_upload_error", "Couldn't upload avatar"), "error");
+  } finally {
+    URL.revokeObjectURL(objURL);
+  }
+}
+
 export function mount(container) {
   container.innerHTML = `
     <div class="scrollbar-thin h-full overflow-y-auto">
       <div class="mx-auto max-w-xl px-4 py-6 sm:px-6 sm:py-8">
         <h1 class="mb-6 text-2xl font-semibold tracking-tight text-(--color-text)">${t("nav_profile", "Profile")}</h1>
+
+        <div class="mb-6 flex flex-col items-center gap-3">
+          <div id="avatar-dropzone" tabindex="0" role="button"
+               aria-label="${t("profile_avatar_upload_label", "Upload avatar")}"
+               class="group relative flex h-32 w-32 items-center justify-center overflow-hidden rounded-full border-2 border-dashed border-(--color-border-strong) bg-(--color-surface-2) transition-colors hover:border-(--color-accent-emphasis) focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-(--color-accent-emphasis)">
+            <div id="avatar-preview" class="h-full w-full">${avatarMarkup(user.avatar, "h-10 w-10")}</div>
+            <div class="pointer-events-none absolute inset-0 flex items-center justify-center bg-black/40 opacity-0 transition-opacity group-hover:opacity-100">
+              <span class="text-xs font-medium text-white">${t("profile_avatar_change", "Change")}</span>
+            </div>
+          </div>
+          <input id="avatar-file-input" type="file" accept="image/*" class="hidden" />
+          <p class="text-xs text-(--color-text-faint)">${t("profile_avatar_hint", "Click or drop an image")}</p>
+        </div>
 
         <section class="rounded-xl border border-(--color-border) bg-(--color-surface)/30 px-4">
           <div id="profile-fields"></div>
@@ -247,6 +349,8 @@ export function mount(container) {
         </form>
       </div>
     </div>`;
+
+  mountAvatarUpload(container);
 
   const fields = container.querySelector("#profile-fields");
   fields.appendChild(field(t("profile_username_label", "Username"), user.username || ""));

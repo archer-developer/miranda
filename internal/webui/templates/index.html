@@ -268,13 +268,18 @@
           </button>
 
           <a href="#/profile" class="hidden min-h-11 items-center gap-2 rounded-full pl-1 pr-3 text-sm transition-colors hover:bg-(--color-surface-2) sm:flex">
-            {{if .User.Avatar}}
-            <img src="{{.User.Avatar}}" alt="" class="h-7 w-7 rounded-full object-cover ring-1 ring-(--color-border)" />
-            {{else}}
-            <span class="flex h-7 w-7 items-center justify-center rounded-full bg-(--color-surface-2) text-(--color-text-faint)">
-              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="h-4 w-4" aria-hidden="true"><circle cx="12" cy="8" r="4"/><path d="M4 20c0-4 4-6 8-6s8 2 8 6"/></svg>
+            <!-- id'd so profile.js can swap this in place right after a
+                 successful avatar upload, without a full page reload — see
+                 avatar-crop.js / screens/profile.js's onUploaded. -->
+            <span id="header-avatar">
+              {{if .User.Avatar}}
+              <img src="{{.User.Avatar}}" alt="" class="h-7 w-7 rounded-full object-cover ring-1 ring-(--color-border)" />
+              {{else}}
+              <span class="flex h-7 w-7 items-center justify-center rounded-full bg-(--color-surface-2) text-(--color-text-faint)">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="h-4 w-4" aria-hidden="true"><circle cx="12" cy="8" r="4"/><path d="M4 20c0-4 4-6 8-6s8 2 8 6"/></svg>
+              </span>
+              {{end}}
             </span>
-            {{end}}
             <span class="font-medium text-(--color-text)">{{.User.DisplayName}}</span>
           </a>
 
