@@ -1,7 +1,23 @@
 <!doctype html>
-<html lang="{{.Lang}}" class="h-full overflow-hidden">
+<html lang="{{.Lang}}" class="h-full overflow-hidden fouc-lock">
 <head>
   <meta charset="utf-8" />
+  <!-- Anti-FOUC guard: this rule (and the .fouc-lock class on <html> above)
+       must be the very first thing the parser sees, so nothing can paint
+       before it applies. Without it, on a slow/uncached load the browser
+       can paint the DOM with only default UA styles for a frame or two
+       before styles.css finishes — e.g. the header's profile-fallback SVG
+       (styles/screens/*.js render nothing yet at this point, this is pure
+       template markup) has no width/height attribute and depends entirely
+       on Tailwind's h-7 w-7 class for its size, so an unstyled paint shows
+       it at the SVG spec's ~300x150 default intrinsic size, on the default
+       white body background — a huge person icon flashing on white. The
+       unlock script right after the stylesheet link below removes this
+       class once styles.css has actually loaded (see that script's own
+       comment for why placement there — not "on DOMContentLoaded" or
+       similar — is what makes this airtight rather than just "usually
+       fast enough"). -->
+  <style>html.fouc-lock { visibility: hidden; }</style>
   <!-- viewport-fit=cover: lets the page extend under the iOS notch/home-
        indicator instead of Safari letterboxing it there, which is what
        makes the env(safe-area-inset-*) values below resolve to the real
@@ -125,6 +141,17 @@
   <link rel="icon" type="image/svg+xml" href="/static/v{{.AssetVersion}}/brand/icon.svg" />
   <link rel="alternate icon" type="image/png" href="/static/v{{.AssetVersion}}/brand/icon.png" />
   <link rel="stylesheet" href="/static/v{{.AssetVersion}}/css/styles.css" />
+  <!-- Removes the .fouc-lock guard above. Deliberately a plain synchronous
+       inline script, not deferred/module/DOMContentLoaded-triggered: the
+       HTML parser guarantees a classic script waits for any stylesheet
+       that precedes it in the document and is still loading before it
+       executes (the same "script blocks on pending stylesheets" rule that
+       makes computed-style reads after a <link> reliable) — so this line
+       genuinely cannot run until styles.css has been fetched and applied,
+       regardless of how slow that fetch is. A noscript fallback undoes the
+       lock too, so a no-JS visit isn't left permanently blank. -->
+  <script>document.documentElement.classList.remove("fouc-lock");</script>
+  <noscript><style>html.fouc-lock { visibility: visible; }</style></noscript>
 
   <!-- PWA: install metadata. manifest.webmanifest itself is served at a
        fixed, unversioned URL (see webui.go's handleManifest) — an

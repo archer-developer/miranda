@@ -7,7 +7,27 @@
 // another tab instead of only ever learning about its own POST
 // /api/v1/input responses. Reconnect/backoff mechanics live in
 // reconnecting-ws.js, shared with ws.js.
+//
+// This connection also drives the nav bar's ws-dot/ws-status indicator
+// (rather than ws.js's /ws/logs socket): that indicator is shown on every
+// screen, so it needs to reflect the connection whose health actually
+// affects using the app — whether the user's own messages/replies are
+// flowing — not the logs tail, which only the Logs screen cares about and
+// which already shows its own "Live" badge there.
+import { t } from "./i18n.js";
 import { connectReconnecting } from "./reconnecting-ws.js";
+
+const wsDot = document.getElementById("ws-dot");
+const wsStatus = document.getElementById("ws-status");
+
+function setStatus(connected) {
+  // Sized/positioned to match the dot's initial markup in index.html
+  // exactly (h-2 w-2 rounded-full) — only the color and the "still
+  // settling in" pulse animation change once we know the real state.
+  wsDot.className = `h-2 w-2 shrink-0 rounded-full ${connected ? "bg-(--color-success-dot)" : "bg-(--color-danger-icon) animate-pulse-soft"}`;
+  wsStatus.textContent = connected ? t("ws_connected", "connected") : t("ws_disconnected", "disconnected — retrying…");
+  wsDot.title = wsStatus.textContent;
+}
 
 const listeners = new Set();
 // Fired on every *re*connection — deliberately not the very first connect,
@@ -57,6 +77,7 @@ export function connect() {
   connectReconnecting(`${proto}//${location.host}/ws/chat/${encodeURIComponent(username)}`, {
     onOpen: () => {
       console.info("[chat-ws] connected");
+      setStatus(true);
       if (everConnected) {
         for (const fn of reconnectListeners) fn();
       }
@@ -66,6 +87,7 @@ export function connect() {
       console.warn(
         `[chat-ws] closed after ${upSecs}s (code=${code} reason=${JSON.stringify(reason)} wasClean=${wasClean}) — reconnecting in ${nextDelayMs}ms`,
       );
+      setStatus(false);
     },
     onMessage: dispatch,
   });
