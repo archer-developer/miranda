@@ -59,10 +59,17 @@ func EnsureSelfSigned(certPath, keyPath string, hosts []string, logger *slog.Log
 		Subject:      pkix.Name{CommonName: "Miranda (self-signed)"},
 		// Backdated by an hour to tolerate clock skew between this host and
 		// whatever verifies the cert first.
-		NotBefore:             time.Now().Add(-time.Hour),
-		NotAfter:              time.Now().Add(validity),
-		KeyUsage:              x509.KeyUsageDigitalSignature | x509.KeyUsageKeyEncipherment,
-		ExtKeyUsage:           []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+		NotBefore:   time.Now().Add(-time.Hour),
+		NotAfter:    time.Now().Add(validity),
+		KeyUsage:    x509.KeyUsageDigitalSignature | x509.KeyUsageKeyEncipherment | x509.KeyUsageCertSign,
+		ExtKeyUsage: []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+		// IsCA (with the matching KeyUsageCertSign above) is what lets this
+		// single self-signed cert double as its own trust anchor — clients
+		// verify it by chaining straight to itself. Without it, most OS/
+		// browser trust stores accept it as a manually pinned leaf cert
+		// (macOS Keychain does), but Firefox's "Authorities" import
+		// specifically refuses anything that isn't flagged as a CA.
+		IsCA:                  true,
 		BasicConstraintsValid: true,
 	}
 
