@@ -51,6 +51,25 @@ service_name="$2"
 chmod +x ~/"$remote_dir"/"$service_name".new
 mv ~/"$remote_dir"/"$service_name".new ~/"$remote_dir"/"$service_name"
 
+# cap_net_bind_service lets the binary bind ports <1024 (e.g. server.tls.addr:
+# ":443") without running the systemd --user service as root. This is
+# per-binary, not per-service — lost every time the mv above replaces the
+# file, so it's reapplied on every deploy. sudo -n (non-interactive) so a
+# host without passwordless sudo configured for this command degrades to a
+# warning instead of hanging the deploy on a password prompt; only relevant
+# if server.tls.addr is actually set to a privileged port.
+if command -v setcap >/dev/null 2>&1; then
+  if sudo -n setcap 'cap_net_bind_service=+ep' ~/"$remote_dir"/"$service_name" 2>/dev/null; then
+    echo "setcap: cap_net_bind_service granted on ~/$remote_dir/$service_name"
+  else
+    echo "WARNING: could not set cap_net_bind_service (no passwordless sudo for this host/command)." >&2
+    echo "  Only needed if server.tls.addr uses a port <1024 (e.g. :443). Run manually:" >&2
+    echo "    sudo setcap 'cap_net_bind_service=+ep' ~/$remote_dir/$service_name && systemctl --user restart $service_name" >&2
+  fi
+else
+  echo "WARNING: setcap not found — install libcap2-bin (Debian/Ubuntu) to bind ports <1024 without root." >&2
+fi
+
 systemctl --user daemon-reload
 systemctl --user enable --now "$service_name" >/dev/null
 systemctl --user restart "$service_name"

@@ -264,6 +264,15 @@ A monitoring dashboard at `server.http_addr` (`http://localhost:8787` by
 default) — live log tail, dialog history, and a debug text box hitting the
 same input path Home Assistant uses.
 
+Set `server.tls.enabled: true` to also serve HTTPS on `server.tls.addr`
+(`:8443` by default) — plain HTTP on `http_addr` keeps working either way.
+With no certificate/key pair at `server.tls.cert_file`/`key_file`, Miranda
+generates a self-signed one itself at startup, valid for `localhost`,
+`127.0.0.1`, and any `server.tls.hosts` you list. Browsers will show a
+one-time trust warning for a self-signed cert; for a certificate they trust
+automatically (or for WebAuthn/Telegram, which need one), front Miranda
+with a reverse proxy instead and point those features at *its* hostname.
+
 ### Login
 
 Signing in is mandatory — no anonymous access, no opt-out. With no `users`

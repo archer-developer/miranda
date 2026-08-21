@@ -22,7 +22,13 @@ Run `scripts/deploy.sh` from the repo root. It:
    (`~/.config/systemd/user/miranda.service`) from a template in the script,
    so the unit is always in sync with the script rather than hand-maintained
    on the server.
-4. Runs `systemctl --user daemon-reload` and `restart miranda`, then prints
+4. Re-applies `cap_net_bind_service` to the new binary via `sudo -n setcap`
+   (non-interactive — if the host has no passwordless sudo for this
+   command, it degrades to a warning rather than hanging on a password
+   prompt). This only matters if `server.tls.addr` is set to a privileged
+   port (e.g. `:443`) — see "Binding privileged ports" below. Harmless,
+   just a no-op warning, when it isn't.
+5. Runs `systemctl --user daemon-reload` and `restart miranda`, then prints
    `systemctl --user status` and polls `http://localhost:8787/healthz` on
    the server to confirm the new process actually came up.
 
@@ -56,6 +62,31 @@ appears, run once:
 
 ```bash
 ssh archer@miranda loginctl enable-linger archer
+```
+
+## Binding privileged ports (server.tls.addr < 1024, e.g. :443)
+
+`systemd --user` runs the process as an unprivileged user, which can't bind
+ports below 1024 on its own. The deploy script re-applies
+`cap_net_bind_service` to the binary on every deploy (step 4 above) via
+`sudo -n setcap` — non-interactive, so it silently degrades to a warning if
+the host has no passwordless sudo configured for that exact command. To
+make that step actually succeed unattended, add a narrowly-scoped sudoers
+rule once:
+
+```bash
+ssh archer@miranda
+sudo visudo -f /etc/sudoers.d/miranda-setcap
+# add exactly this line (adjust the path if remote_dir/service_name in
+# scripts/deploy.sh ever change):
+archer ALL=(root) NOPASSWD: /usr/sbin/setcap cap_net_bind_service=+ep /home/archer/miranda/miranda
+```
+
+Without that rule, run the same command by hand after each deploy instead:
+
+```bash
+ssh archer@miranda sudo setcap 'cap_net_bind_service=+ep' ~/miranda/miranda
+ssh archer@miranda systemctl --user restart miranda
 ```
 
 ## If something goes wrong

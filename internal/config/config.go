@@ -69,6 +69,40 @@ type UserConfig struct {
 type ServerConfig struct {
 	HTTPAddr  string `yaml:"http_addr"`
 	AuthToken string `yaml:"auth_token"`
+	// TLS optionally adds a second, HTTPS listener alongside HTTPAddr — see
+	// TLSConfig. Plain HTTP on HTTPAddr keeps working unconditionally either
+	// way; enabling TLS never disables it.
+	TLS TLSConfig `yaml:"tls"`
+}
+
+// TLSConfig optionally has Miranda terminate TLS itself, on its own
+// listener (Addr), in addition to — never instead of — the plain-HTTP
+// listener on ServerConfig.HTTPAddr; both run concurrently whenever TLS is
+// enabled. Off by default (like WebAuthnConfig/TelegramConfig): most
+// deployments that need a *trusted* certificate (for WebAuthn's RPOrigins,
+// a Telegram webhook, or a browser without a manual trust step) already
+// front Miranda with a reverse proxy that terminates one. This exists for
+// the case a reverse proxy doesn't cover — e.g. reaching Miranda directly
+// by LAN IP — where a browser security warning on first visit (or `curl
+// -k`) is an acceptable trade for not routing through anything else.
+type TLSConfig struct {
+	Enabled bool `yaml:"enabled"`
+	// Addr is the HTTPS listen address, e.g. ":8443". Independent of
+	// ServerConfig.HTTPAddr — both listeners run at once.
+	Addr string `yaml:"addr"`
+	// CertFile/KeyFile are PEM paths. If neither exists at startup, Miranda
+	// generates a self-signed certificate/key pair and writes them here (see
+	// internal/tlscert) — nothing else to configure for the common case.
+	// Point these at a real certificate/key pair instead (e.g. one issued by
+	// a real CA) to skip self-signed generation entirely; an existing pair
+	// is never overwritten or validated, only filled in when absent.
+	CertFile string `yaml:"cert_file"`
+	KeyFile  string `yaml:"key_file"`
+	// Hosts lists the DNS names/IP addresses a generated self-signed
+	// certificate is valid for (its SANs) — ignored once CertFile/KeyFile
+	// exist. "localhost" and "127.0.0.1" are always included even if
+	// omitted here.
+	Hosts []string `yaml:"hosts"`
 }
 
 // StorageConfig points at the on-disk SQLite history DB, markdown memory
@@ -879,6 +913,13 @@ func Default() Config {
 		Server: ServerConfig{
 			HTTPAddr:  ":8787",
 			AuthToken: "",
+			TLS: TLSConfig{
+				Enabled:  false,
+				Addr:     ":8443",
+				CertFile: "./data/tls/cert.pem",
+				KeyFile:  "./data/tls/key.pem",
+				Hosts:    []string{"localhost"},
+			},
 		},
 		Storage: StorageConfig{
 			SQLitePath:         "./data/miranda.db",

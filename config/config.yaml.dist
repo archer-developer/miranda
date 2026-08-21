@@ -13,6 +13,28 @@ server:
   # Bearer token required on POST /api/v1/input and the web UI's API calls.
   # Leave empty for LAN-only dev use with no auth.
   auth_token: ""
+  tls:
+    # Adds a second, HTTPS listener on tls.addr — http_addr above keeps
+    # serving plain HTTP either way, this never replaces it. Off by default:
+    # most deployments that need a *trusted* cert (WebAuthn's rp_origins, a
+    # Telegram webhook, a browser with no manual trust step) already front
+    # Miranda with a reverse proxy that terminates one. Turn this on for
+    # direct HTTPS to Miranda itself — e.g. reaching it by LAN IP with no
+    # proxy in front — where a one-time browser warning (or `curl -k`) is an
+    # acceptable trade.
+    enabled: false
+    addr: ":8443"
+    # If neither file exists at startup, Miranda generates a self-signed
+    # cert/key pair here itself (see internal/tlscert) — nothing else to
+    # configure for the common case. Point these at a real cert/key pair
+    # instead to skip self-signed generation; an existing pair is never
+    # overwritten.
+    cert_file: "./data/tls/cert.pem"
+    key_file: "./data/tls/key.pem"
+    # DNS names/IPs (SANs) the generated self-signed cert is valid for.
+    # Ignored once cert_file/key_file exist. "localhost"/"127.0.0.1" are
+    # always included even if omitted here.
+    hosts: []
 
 storage:
   sqlite_path: "./data/miranda.db"

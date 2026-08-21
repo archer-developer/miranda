@@ -42,6 +42,7 @@ import (
 	"github.com/archer-developer/miranda/internal/session"
 	"github.com/archer-developer/miranda/internal/tavily"
 	"github.com/archer-developer/miranda/internal/telegram"
+	"github.com/archer-developer/miranda/internal/tlscert"
 	"github.com/archer-developer/miranda/internal/tools"
 	"github.com/archer-developer/miranda/internal/tts"
 	"github.com/archer-developer/miranda/internal/users"
@@ -481,11 +482,26 @@ func run(cfg config.Config, logger *slog.Logger, eventHub *hub.Hub, configDir st
 		WriteTimeout:      5 * time.Minute,
 	}
 
+	// HTTPS is additive, never a replacement: httpServer above keeps serving
+	// plain HTTP on cfg.Server.HTTPAddr regardless of cfg.Server.TLS.Enabled.
+	var httpsServer *http.Server
+	if cfg.Server.TLS.Enabled {
+		if err := tlscert.EnsureSelfSigned(cfg.Server.TLS.CertFile, cfg.Server.TLS.KeyFile, cfg.Server.TLS.Hosts, logger); err != nil {
+			return fmt.Errorf("main: prepare TLS certificate: %w", err)
+		}
+		httpsServer = &http.Server{
+			Addr:              cfg.Server.TLS.Addr,
+			Handler:           server,
+			ReadHeaderTimeout: 30 * time.Second,
+			WriteTimeout:      5 * time.Minute,
+		}
+	}
+
 	go sweepIdleSessions(ctx, orchestrator, cfg.Memory, logger)
 	go sweepScheduledTasks(ctx, orchestrator, cfg.Schedule, logger)
 	go sweepBackups(ctx, cfg.Backup, cfg.Storage, configDir, dotEnvPath, logger)
 
-	return serveUntilInterrupted(ctx, httpServer, logger)
+	return serveUntilInterrupted(ctx, httpServer, httpsServer, cfg.Server.TLS, logger)
 }
 
 // sweepIdleSessions periodically marks conversations that have sat idle past
@@ -562,12 +578,24 @@ func sweepBackups(ctx context.Context, cfg config.BackupConfig, storageCfg confi
 	}
 }
 
-func serveUntilInterrupted(ctx context.Context, httpServer *http.Server, logger *slog.Logger) error {
-	errCh := make(chan error, 1)
+// serveUntilInterrupted runs httpServer (always) and httpsServer (only if
+// non-nil, i.e. cfg.Server.TLS.Enabled) concurrently until ctx is cancelled,
+// then shuts both down. Either listener failing outright (anything but a
+// graceful http.ErrServerClosed) is treated as fatal for the whole process —
+// consistent with the single-listener behavior this replaced, and simpler
+// than trying to keep running on just one of the two.
+func serveUntilInterrupted(ctx context.Context, httpServer, httpsServer *http.Server, tlsCfg config.TLSConfig, logger *slog.Logger) error {
+	errCh := make(chan error, 2)
 	go func() {
-		logger.Info("listening", "addr", httpServer.Addr)
+		logger.Info("listening", "addr", httpServer.Addr, "scheme", "http")
 		errCh <- httpServer.ListenAndServe()
 	}()
+	if httpsServer != nil {
+		go func() {
+			logger.Info("listening", "addr", httpsServer.Addr, "scheme", "https")
+			errCh <- httpsServer.ListenAndServeTLS(tlsCfg.CertFile, tlsCfg.KeyFile)
+		}()
+	}
 
 	select {
 	case err := <-errCh:
@@ -579,7 +607,13 @@ func serveUntilInterrupted(ctx context.Context, httpServer *http.Server, logger 
 		logger.Info("shutting down")
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
 		defer cancel()
-		return httpServer.Shutdown(shutdownCtx)
+		err := httpServer.Shutdown(shutdownCtx)
+		if httpsServer != nil {
+			if httpsErr := httpsServer.Shutdown(shutdownCtx); httpsErr != nil && err == nil {
+				err = httpsErr
+			}
+		}
+		return err
 	}
 }
 
