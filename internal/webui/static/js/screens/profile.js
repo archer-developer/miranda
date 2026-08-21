@@ -15,9 +15,14 @@ import { cropAvatar } from "../avatar-crop.js";
 
 const user = window.MIRANDA_USER || {};
 
-// Shared between the profile screen's own circle and the header's smaller
-// one (updated live on upload — see updateHeaderAvatar) so both always
-// agree on what "no avatar" looks like.
+// Used for the profile screen's own (large) preview circle — #avatar-preview
+// fills #avatar-dropzone (h-32 w-32), so h-full/w-full here resolves
+// against that. The header's smaller circle uses headerAvatarMarkup below
+// instead, deliberately not this: reusing h-full/w-full there would
+// resolve against #header-avatar's own box, which is right in principle,
+// but the two need different fallback icon sizes and the img needs the
+// header's ring — easier to keep them as two small templates than one
+// parameterized over both.
 function avatarMarkup(url, iconSizeClass) {
   if (url) {
     return `<img src="${url}" alt="" class="h-full w-full rounded-full object-cover" />`;
@@ -27,9 +32,22 @@ function avatarMarkup(url, iconSizeClass) {
   </span>`;
 }
 
+// Mirrors index.html's #header-avatar markup exactly (ring included) so a
+// live update after upload looks identical to what a fresh page load would
+// render — see that template's comment on why #header-avatar itself (not
+// this markup) is what's sized to 28px.
+function headerAvatarMarkup(url) {
+  if (url) {
+    return `<img src="${url}" alt="" class="h-full w-full rounded-full object-cover ring-1 ring-(--color-border)" />`;
+  }
+  return `<span class="flex h-full w-full items-center justify-center rounded-full bg-(--color-surface-2) text-(--color-text-faint)">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="h-4 w-4" aria-hidden="true"><circle cx="12" cy="8" r="4"/><path d="M4 20c0-4 4-6 8-6s8 2 8 6"/></svg>
+  </span>`;
+}
+
 function updateHeaderAvatar(url) {
   const header = document.querySelector("#header-avatar");
-  if (header) header.innerHTML = avatarMarkup(url, "h-4 w-4");
+  if (header) header.innerHTML = headerAvatarMarkup(url);
 }
 
 function field(label, value) {

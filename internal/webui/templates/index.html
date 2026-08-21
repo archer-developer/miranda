@@ -271,11 +271,16 @@
             <!-- id'd so profile.js can swap this in place right after a
                  successful avatar upload, without a full page reload — see
                  avatar-crop.js / screens/profile.js's onUploaded. -->
-            <span id="header-avatar">
+            <!-- Sized here (not on the img/span below) so profile.js's
+                 innerHTML swap on upload (updateHeaderAvatar) — which
+                 reuses this same h-full/w-full markup — resolves against a
+                 fixed 28px box instead of the uploaded image's natural
+                 (128px) size. -->
+            <span id="header-avatar" class="flex h-7 w-7 shrink-0">
               {{if .User.Avatar}}
-              <img src="{{.User.Avatar}}" alt="" class="h-7 w-7 rounded-full object-cover ring-1 ring-(--color-border)" />
+              <img src="{{.User.Avatar}}" alt="" class="h-full w-full rounded-full object-cover ring-1 ring-(--color-border)" />
               {{else}}
-              <span class="flex h-7 w-7 items-center justify-center rounded-full bg-(--color-surface-2) text-(--color-text-faint)">
+              <span class="flex h-full w-full items-center justify-center rounded-full bg-(--color-surface-2) text-(--color-text-faint)">
                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="h-4 w-4" aria-hidden="true"><circle cx="12" cy="8" r="4"/><path d="M4 20c0-4 4-6 8-6s8 2 8 6"/></svg>
               </span>
               {{end}}
