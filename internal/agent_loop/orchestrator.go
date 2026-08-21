@@ -10,6 +10,7 @@ import (
 
 	llm "github.com/archer-developer/miranda-llm"
 	"github.com/archer-developer/miranda-llm/llmtrace"
+	"github.com/archer-developer/miranda-llm/llmtrace/anomaly"
 	"github.com/archer-developer/miranda-llm/router"
 	"github.com/archer-developer/miranda/internal/attachments"
 	"github.com/archer-developer/miranda/internal/calendar"
@@ -331,6 +332,10 @@ type Orchestrator struct {
 	// broadcasts around every Handle call. Always non-nil (constructed in
 	// NewOrchestrator, holds no external dependencies).
 	turns *TurnTracker
+	// anomaly is set via SetAnomalyConfig: per-turn anomaly detection (see
+	// anomaly.go). Zero value (the default) disables it entirely — Handle
+	// never attaches a Recorder to a turn's ctx.
+	anomaly AnomalyConfig
 }
 
 // TurnStatus reports whether userID currently has a Handle turn in flight
@@ -601,6 +606,20 @@ func (o *Orchestrator) Handle(ctx context.Context, req InputRequest) (InputRespo
 	// with a specific dialog.
 	ctx = llmtrace.WithConversationID(ctx, convID)
 
+	// A Recorder scoped to just this turn, teed onto whatever the
+	// process-wide tracer already does (see llmtrace.ContextTracer) — only
+	// attached when anomaly detection is enabled (see SetAnomalyConfig).
+	// outcome is filled in by runAgentLoop as the turn ends (normal reply,
+	// error/timeout, or the iteration cap) and read back here, after the
+	// turn is fully done, by the deferred reportAnomalies call.
+	var recorder *anomaly.Recorder
+	outcome := &anomaly.Outcome{MaxIterations: maxToolIterations}
+	if o.anomaly.enabled() {
+		recorder = anomaly.NewRecorder(convID)
+		ctx = llmtrace.WithTracer(ctx, recorder)
+		defer func() { o.reportAnomalies(convID, recorder, *outcome) }()
+	}
+
 	// Read once per conversation, not once per turn — see
 	// conversationMemory's doc comment and docs/adr/system-prompt-caching.md
 	// for why re-reading on every turn would both hit disk needlessly and
@@ -641,7 +660,7 @@ func (o *Orchestrator) Handle(ctx context.Context, req InputRequest) (InputRespo
 
 	control := &turnControl{}
 	tools := o.availableTools(ctx, userID, control)
-	finalText, providerUsed, err := o.runAgentLoop(ctx, userID, convID, req.Source, messages, tools, control)
+	finalText, providerUsed, err := o.runAgentLoop(ctx, userID, convID, req.Source, messages, tools, control, outcome)
 	if err != nil {
 		// An earlier tool-call iteration in this same loop may have already
 		// called download_file successfully (attachStore.Put and

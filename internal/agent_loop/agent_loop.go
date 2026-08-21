@@ -2,9 +2,11 @@ package agentloop
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
 	llm "github.com/archer-developer/miranda-llm"
+	"github.com/archer-developer/miranda-llm/llmtrace/anomaly"
 	"github.com/archer-developer/miranda/internal/hub"
 	"github.com/archer-developer/miranda/internal/replyformat"
 	"github.com/archer-developer/miranda/internal/tts"
@@ -91,16 +93,25 @@ func (c *turnControl) recordDownloadedFile(df downloadedFile) {
 // answered by that same model once the tool result comes back, not silently
 // downgraded back to the chain's default provider on the very next
 // iteration just because the tool call happened in between.
-func (o *Orchestrator) runAgentLoop(ctx context.Context, userID, conversationID, source string, messages []llm.Message, tools []llm.ToolDef, control *turnControl) (string, string, error) {
+// outcome, if non-nil, is filled in with what only this loop knows
+// authoritatively about how the turn ended (see anomaly.Outcome and
+// Handle's own doc comment on why that can't be reliably reconstructed from
+// the trace text alone) — passed in by Handle rather than returned
+// alongside (string, string, error) so a caller with anomaly detection
+// disabled pays nothing beyond one always-allocated struct.
+func (o *Orchestrator) runAgentLoop(ctx context.Context, userID, conversationID, source string, messages []llm.Message, tools []llm.ToolDef, control *turnControl, outcome *anomaly.Outcome) (string, string, error) {
 	var providerUsed string
 
 	for i := 0; i < maxToolIterations; i++ {
 		text, toolCalls, err := o.streamOneTurn(ctx, source, messages, tools, &providerUsed)
 		if err != nil {
+			outcome.IterationCount = i + 1
+			outcome.TimedOut = errors.Is(err, context.DeadlineExceeded)
 			return "", "", err
 		}
 
 		if len(toolCalls) == 0 {
+			outcome.IterationCount = i + 1
 			return text, providerUsed, nil
 		}
 
@@ -133,6 +144,8 @@ func (o *Orchestrator) runAgentLoop(ctx context.Context, userID, conversationID,
 		}
 	}
 
+	outcome.HitIterationCap = true
+	outcome.IterationCount = maxToolIterations
 	return "", "", fmt.Errorf("orchestrator: exceeded %d tool-call iterations without a final reply", maxToolIterations)
 }
 

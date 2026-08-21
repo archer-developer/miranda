@@ -238,7 +238,11 @@ func run(cfg config.Config, logger *slog.Logger, eventHub *hub.Hub, configDir st
 	// each traced call into a whole miranda-llm/llmtrace/analyze.Block
 	// before publishing, so the frontend renders already-parsed calls
 	// instead of reassembling a flood of raw lines itself.
-	llmTracer := llmtrace.New(io.MultiWriter(llmTraceFile, eventHub.LLMTraceWriter("llm_log")))
+	// Wrapped in ContextTracer (rather than SetTracer(llmTracer) directly)
+	// so Handle can tee an extra, turn-scoped anomaly.Recorder onto this same
+	// stream via ctx — see llmtrace.WithTracer's doc comment for why that's
+	// safe despite the tracer being installed once, globally, below.
+	llmTracer := &llmtrace.ContextTracer{Default: llmtrace.New(io.MultiWriter(llmTraceFile, eventHub.LLMTraceWriter("llm_log")))}
 
 	historyStore, err := history.Open(cfg.Storage.SQLitePath)
 	if err != nil {
@@ -351,6 +355,13 @@ func run(cfg config.Config, logger *slog.Logger, eventHub *hub.Hub, configDir st
 		cfg.Agent, cfg.Memory, cfg.TTS, ttsChunkMaxChars(cfg.TTS), defaultUserID,
 	)
 	orchestrator.SetLogger(logger)
+	// Unconditional, unlike medical-card's own equivalent wiring — Miranda's
+	// llm.log is always on (no debug-only gate), so there's always a real
+	// tracer for a turn's Recorder to tee onto. See agentloop.AnomalyConfig.
+	orchestrator.SetAnomalyConfig(agentloop.AnomalyConfig{
+		LLMLogPath: filepath.Join(cfg.Logging.Dir, "llm.log"),
+		Dir:        filepath.Join(cfg.Logging.Dir, "anomalies"),
+	})
 	if cfg.Telegram.Enabled {
 		orchestrator.SetTelegram(telegram.NewSender(tgClient, tgChats), cfg.Telegram)
 	}

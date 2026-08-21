@@ -75,7 +75,7 @@ sequenceDiagram
     M-->>O: memory markdown
     O->>H: AppendMessage(user, text)
     O->>H: SetSystemPrompt(convID, basePrompt + memory)
-    loop until final text (max 5 tool iterations)
+    loop until final text (max 15 tool iterations — `maxToolIterations`, internal/agent_loop/orchestrator.go)
         O->>R: Chat(messages, tools)
         R-->>O: text delta / tool call
         opt source == ha_assist
@@ -199,6 +199,25 @@ see `internal/config.LoggingConfig`):
   UI's backend (`internal/hub.Hub.LLMTraceWriter`) parse this format through
   the same shared `miranda-llm/llmtrace/analyze` package, so neither service
   maintains its own copy of that logic.
+
+### Reviewing `logs/anomalies/`
+
+Every `Handle` turn is checked, as it ends, for a set of mechanical anomalies — a slow LLM call, the
+model retrying a tool with identical arguments, a call to a tool that doesn't exist, malformed tool
+arguments, a tool execution error, or hitting the iteration cap/a timeout
+(`miranda-llm/llmtrace/anomaly.Detect`, wired in via `internal/agent_loop/anomaly.go`'s
+`reportAnomalies`, `orchestrator.SetAnomalyConfig` in `cmd/miranda/main.go`). Unlike medical-card, this
+is unconditional — Miranda's `llm.log` is always on, so there's always a real tracer for a turn's
+Recorder to tee onto (see `llmtrace.ContextTracer`). A flagged turn gets its own file under
+`logs/anomalies/` (the whole conversation so far, re-read from `logs/llm.log`, falling back to just that
+turn's own blocks if the conversation isn't found there — e.g. rotated out of the current file) plus
+exactly one `WARN` line in the normal app log/journal — never a full trace dump there, that's what the
+file is for. Detection is mechanical/deterministic — it does not judge whether an anomaly is a real bug
+or a benign edge case. **Review is manual and on-demand, not automated**: periodically, or when
+investigating a report, open a session and ask it to look through `logs/anomalies/` — each file is
+already in `llm.log`'s own block format, so `go run ./cmd/miranda llm-trace` and medical-card's own
+debugging loop (see that repo's `CLAUDE.md`) apply directly; the file's leading `#`-prefixed header lines
+out anomaly kind(s) even before opening the trace itself.
 
 ### Web UI API surface
 
