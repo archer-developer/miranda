@@ -94,13 +94,26 @@ func TestServer_HandleWSChat_ReceivesOwnConversationEvents(t *testing.T) {
 	wsURL := "ws" + strings.TrimPrefix(ts.URL, "http") + "/ws/chat/alice"
 	conn := dialChatWS(t, wsURL, token)
 
-	resp, err := o.Handle(context.Background(), agentloop.InputRequest{Source: "ha_assist", UserID: "alice", Text: "привет"})
-	require.NoError(t, err)
-
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 
-	var userEvent, assistantEvent chatEventEnvelope
+	// handleWSChat sends a turn_in_progress snapshot immediately on connect,
+	// before any turn has started — see its doc comment.
+	var snapshot chatEventEnvelope
+	require.NoError(t, wsjson.Read(ctx, conn, &snapshot))
+	require.Equal(t, "turn_in_progress", snapshot.Data.Type)
+	require.False(t, snapshot.Data.InProgress)
+
+	resp, err := o.Handle(context.Background(), agentloop.InputRequest{Source: "ha_assist", UserID: "alice", Text: "привет"})
+	require.NoError(t, err)
+
+	// Handle brackets the whole turn with turn_started/turn_ended (see
+	// TurnTracker) around the two "message" events — read and discard
+	// turn_started here, and consume turn_ended after the assertions below.
+	var turnStarted, userEvent, assistantEvent, turnEnded chatEventEnvelope
+	require.NoError(t, wsjson.Read(ctx, conn, &turnStarted))
+	require.Equal(t, "turn_started", turnStarted.Data.Type)
+
 	require.NoError(t, wsjson.Read(ctx, conn, &userEvent))
 	require.NoError(t, wsjson.Read(ctx, conn, &assistantEvent))
 
@@ -114,6 +127,9 @@ func TestServer_HandleWSChat_ReceivesOwnConversationEvents(t *testing.T) {
 	require.Equal(t, "assistant", assistantEvent.Data.Message.Role)
 	require.Equal(t, "Привет!", assistantEvent.Data.Message.Content)
 	require.Equal(t, resp.AssistantMessageID, assistantEvent.Data.Message.ID)
+
+	require.NoError(t, wsjson.Read(ctx, conn, &turnEnded))
+	require.Equal(t, "turn_ended", turnEnded.Data.Type)
 }
 
 func TestServer_HandleWSChat_DoesNotLeakOtherUsersEvents(t *testing.T) {
@@ -129,6 +145,15 @@ func TestServer_HandleWSChat_DoesNotLeakOtherUsersEvents(t *testing.T) {
 
 	bobURL := "ws" + strings.TrimPrefix(ts.URL, "http") + "/ws/chat/bob"
 	bobConn := dialChatWS(t, bobURL, bobToken)
+
+	// bob's own turn_in_progress connect snapshot arrives regardless of
+	// alice's activity — read and discard it before checking nothing of
+	// alice's leaks through.
+	snapshotCtx, snapshotCancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer snapshotCancel()
+	var snapshot chatEventEnvelope
+	require.NoError(t, wsjson.Read(snapshotCtx, bobConn, &snapshot))
+	require.Equal(t, "turn_in_progress", snapshot.Data.Type)
 
 	_, err = o.Handle(context.Background(), agentloop.InputRequest{Source: "ha_assist", UserID: "alice", Text: "привет"})
 	require.NoError(t, err)
@@ -147,8 +172,9 @@ type chatEventEnvelope struct {
 	Source string `json:"source"`
 	UserID string `json:"user_id"`
 	Data   struct {
-		Type    string `json:"type"`
-		Message struct {
+		Type       string `json:"type"`
+		InProgress bool   `json:"in_progress"`
+		Message    struct {
 			ID      int64  `json:"id"`
 			Role    string `json:"role"`
 			Content string `json:"content"`

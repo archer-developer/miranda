@@ -159,7 +159,7 @@ func newTestHandlerWithWebAuthn(t *testing.T, fake *fakeWebAuthnService) (*Handl
 	require.NoError(t, err)
 	sessions := session.NewStore(time.Hour)
 
-	h, err := New(&fakeHistory{}, newFakeMemory(), fake, nil, registry, sessions, "ru", "", testLogger())
+	h, err := New(&fakeHistory{}, newFakeMemory(), nil, fake, nil, registry, sessions, "ru", "", testLogger())
 	require.NoError(t, err)
 	return h, sessions
 }
@@ -175,7 +175,7 @@ func newTestHandlerWithWebAuthnAndKeyring(t *testing.T, fake *fakeWebAuthnServic
 	require.NoError(t, err)
 	sessions := session.NewStore(time.Hour)
 
-	h, err := New(&fakeHistory{}, newFakeMemory(), fake, keyringFake, registry, sessions, "ru", "", testLogger())
+	h, err := New(&fakeHistory{}, newFakeMemory(), nil, fake, keyringFake, registry, sessions, "ru", "", testLogger())
 	require.NoError(t, err)
 	return h, sessions
 }

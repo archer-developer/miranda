@@ -14,6 +14,7 @@
   "ws_disconnected": "злучэнне страчана — паўторнае падключэнне…",
   "chat_placeholder": "Паведамленне для Miranda…",
   "chat_thinking_ellipsis": "…",
+  "chat_waiting_elapsed": "Чакаем адказ",
   "chat_empty_title": "Пачніце размову",
   "chat_empty_subtitle": "Спытайце Miranda пра што заўгодна — яна памятае кантэкст размовы.",
   "chat_hint": "Enter — адправіць · Shift+Enter — новы радок",

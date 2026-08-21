@@ -88,6 +88,16 @@ func (s *Server) handleUpload(w http.ResponseWriter, r *http.Request) {
 			break
 		}
 		if err != nil {
+			// Worth a server-side log, not just the 400 sent back: this is
+			// the shape of error a client whose connection was cut mid-body
+			// produces (multipart.Reader.NextPart wraps an underlying read
+			// error, most commonly io.EOF, once the stream ends before the
+			// terminating boundary) — indistinguishable from other
+			// malformed-body causes without one. See the 2026-08-20 mobile
+			// Safari incident this guards: a truncated body surfaced only as
+			// a client-side error, with nothing in miranda.log to correlate
+			// it against.
+			s.logger.Warn("upload: failed to parse multipart body", "error", err, "user", sessionUser)
 			http.Error(w, "failed to parse multipart body: "+err.Error(), http.StatusBadRequest)
 			return
 		}

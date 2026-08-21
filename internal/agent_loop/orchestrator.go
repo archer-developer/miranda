@@ -172,8 +172,13 @@ type InputResponse struct {
 // given tab never itself talked to (HA, Telegram, another tab).
 type ChatEvent struct {
 	// Type is "message" (a new history.Message was recorded — Message is
-	// set), "conversation_deleted" (forget_conversation), or
-	// "conversation_ended" (end_conversation / the idle sweep).
+	// set), "conversation_deleted" (forget_conversation),
+	// "conversation_ended" (end_conversation / the idle sweep),
+	// "turn_started"/"turn_ended" (a Handle call began/finished for this
+	// user — edge-triggered, published from Handle itself, see
+	// TurnTracker), or "turn_in_progress" (a point-in-time snapshot sent
+	// once when GET /ws/chat/{username} connects, see
+	// internal/httpapi.handleWSChat).
 	Type           string           `json:"type"`
 	ConversationID string           `json:"conversation_id"`
 	Message        *history.Message `json:"message,omitempty"`
@@ -183,6 +188,15 @@ type ChatEvent struct {
 	// InputResponse.Blocks for the tab's own synchronous reply. Only set
 	// when Message.Role == "assistant" — see publishChatMessage.
 	Blocks []replyformat.Block `json:"blocks,omitempty"`
+	// InProgress is set on "turn_in_progress" snapshots only (false is a
+	// meaningful value there, so it's not omitempty) — see TurnTracker.
+	InProgress bool `json:"in_progress,omitempty"`
+	// StartedAt is set on "turn_started" and on "turn_in_progress" when
+	// InProgress is true — lets the web UI render elapsed time on its
+	// waiting bubble for long-running turns (tool calls, web search,
+	// escalation) instead of a plain, ambiguous spinner. Zero/omitted on
+	// "turn_ended" and on a not-in-progress snapshot.
+	StartedAt time.Time `json:"started_at,omitempty"`
 }
 
 // speakerHA is the subset of *ha.Client the Orchestrator needs for per-entity
@@ -311,6 +325,21 @@ type Orchestrator struct {
 	// AND googleCalendarProvider is one of its configured providers) — see
 	// availableTools/executeTool's calendar_* branches.
 	calendar *calendar.Client
+	// turns tracks, per user, how many Handle calls are currently in
+	// flight and when the oldest of them started — see TurnTracker,
+	// TurnStatus, and the turn_started/turn_ended events publishTurnStatus
+	// broadcasts around every Handle call. Always non-nil (constructed in
+	// NewOrchestrator, holds no external dependencies).
+	turns *TurnTracker
+}
+
+// TurnStatus reports whether userID currently has a Handle turn in flight
+// (on any channel — HA, web, Telegram, scheduled) and, if so, when the
+// oldest still-running one started. Used by GET /ws/chat/{username}'s
+// connect-time snapshot (internal/httpapi.handleWSChat) and by
+// internal/webui's GET /api/turn-status polling fallback.
+func (o *Orchestrator) TurnStatus(userID string) (inProgress bool, startedAt time.Time) {
+	return o.turns.Status(userID)
 }
 
 // calendarEnabled reports whether the calendar_* tools should be offered:
@@ -529,6 +558,7 @@ func NewOrchestrator(
 		baseSystemPrompt: agentCfg.SystemPrompt,
 		memoryCache:      make(map[string]cachedMemory),
 		calendar:         calendar.New(),
+		turns:            NewTurnTracker(),
 	}
 }
 
@@ -546,6 +576,21 @@ func (o *Orchestrator) Handle(ctx context.Context, req InputRequest) (InputRespo
 	if userID == "" {
 		userID = o.defaultUserID
 	}
+
+	// Bracket the whole turn so TurnStatus/the web UI can tell "Miranda is
+	// still working on something for this user" apart from a client-side
+	// guess (see TurnTracker, publishTurnStatus, and the fixed-timeout hack
+	// this replaced in chat.js). end() is deferred immediately so every
+	// exit path below — success, every early error return, and the
+	// TurnTimeout deadline expiring inside runAgentLoop — clears it.
+	// Registered before the turn_ended publish defer so LIFO clears the
+	// tracker first (a client reacting to turn_ended never races ahead of
+	// TurnStatus reflecting it).
+	end := o.turns.Begin(userID)
+	defer end()
+	_, startedAt := o.turns.Status(userID)
+	o.publishTurnStatus(userID, ChatEvent{Type: "turn_started", StartedAt: startedAt})
+	defer func() { o.publishTurnStatus(userID, ChatEvent{Type: "turn_ended"}) }()
 
 	convID, priorMessages, err := o.resolveConversation(ctx, userID, req.Source)
 	if err != nil {
@@ -684,4 +729,13 @@ func (o *Orchestrator) publishChatMessage(userID, convID string, msg history.Mes
 		blocks = replyformat.Parse(msg.Content)
 	}
 	o.hub.Publish(hub.Event{Source: "chat", UserID: userID, Data: ChatEvent{Type: "message", ConversationID: convID, Message: &msg, Blocks: blocks}})
+}
+
+// publishTurnStatus broadcasts a turn_started/turn_ended ChatEvent for
+// userID — carries no history.Message, unlike publishChatMessage: it exists
+// purely so a WS-connected tab (or one about to fall back to REST polling
+// GET /api/turn-status) learns a turn is/was in flight without waiting on
+// the eventual reply itself. See TurnTracker and Handle's use of this.
+func (o *Orchestrator) publishTurnStatus(userID string, ev ChatEvent) {
+	o.hub.Publish(hub.Event{Source: "chat", UserID: userID, Data: ev})
 }

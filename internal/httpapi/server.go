@@ -292,6 +292,14 @@ func (s *Server) handleWSLogs(w http.ResponseWriter, r *http.Request) {
 // mount and on every reconnect (see chat-ws.js's onReconnect/chat.js's
 // loadHistory) — that's the real resync mechanism; this connection only
 // needs to carry updates live from here forward.
+//
+// One exception: right after subscribing, this sends a single synthetic
+// "turn_in_progress" ChatEvent snapshotting whether a Handle turn is
+// currently running for this user (see agentloop.TurnTracker) — not
+// message history, just a live boolean (+ start time). Without it, a tab
+// that reconnects (or a second tab that opens) while a turn from another
+// channel/tab is mid-flight would have no way to show a waiting indicator
+// until the next REST poll tick or the turn's own turn_ended event.
 func (s *Server) handleWSChat(w http.ResponseWriter, r *http.Request) {
 	sessionUser, ok := s.authorize(r)
 	if !ok {
@@ -322,6 +330,15 @@ func (s *Server) handleWSChat(w http.ResponseWriter, r *http.Request) {
 	defer unsubscribe()
 
 	ctx := r.Context()
+
+	inProgress, startedAt := s.orchestrator.TurnStatus(sessionUser)
+	if err := wsjson.Write(ctx, conn, hub.Event{
+		Source: "chat", UserID: sessionUser,
+		Data: agentloop.ChatEvent{Type: "turn_in_progress", InProgress: inProgress, StartedAt: startedAt},
+	}); err != nil {
+		return
+	}
+
 	for {
 		select {
 		case ev, ok := <-ch:

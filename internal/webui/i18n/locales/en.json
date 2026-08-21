@@ -14,6 +14,7 @@
   "ws_disconnected": "disconnected — retrying…",
   "chat_placeholder": "Message Miranda…",
   "chat_thinking_ellipsis": "…",
+  "chat_waiting_elapsed": "Waiting",
   "chat_empty_title": "Start a conversation",
   "chat_empty_subtitle": "Ask Miranda anything — she remembers context across the conversation.",
   "chat_hint": "Enter to send · Shift+Enter for a new line",

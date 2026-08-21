@@ -24,6 +24,7 @@ import (
 	"strconv"
 	"strings"
 	texttemplate "text/template"
+	"time"
 
 	"github.com/go-webauthn/webauthn/protocol"
 
@@ -55,6 +56,15 @@ type History interface {
 type Memory interface {
 	Read(userID string) (string, error)
 	Write(userID, content string) error
+}
+
+// TurnTracker is the subset of *agentloop.Orchestrator the dashboard needs
+// to answer "is a turn currently running for this user, and since when" —
+// see handleTurnStatus / GET /api/turn-status. Named/scoped narrowly
+// (rather than importing all of internal/agent_loop into webui) the same
+// way History/Memory already are.
+type TurnTracker interface {
+	TurnStatus(userID string) (inProgress bool, startedAt time.Time)
 }
 
 // WebAuthnService is the subset of *webauthn.Service the dashboard needs
@@ -101,6 +111,7 @@ type Handler struct {
 	manifestTmpl    *texttemplate.Template // text/template, not html/template: the output is JSON, not HTML
 	history         History
 	memory          Memory
+	turns           TurnTracker
 	webauthn        WebAuthnService // nil disables passkey login/registration entirely
 	keyring         KeyringService  // nil only in tests — cmd/miranda always passes a real one
 	users           *users.Registry
@@ -154,7 +165,7 @@ func staticAssetVersion(fsys fs.FS) (string, error) {
 // package needs a separate "is it enabled" branch beyond this one nil check.
 // keyringSvc may independently be nil in tests that don't exercise it — see
 // KeyringService's doc comment.
-func New(h History, mem Memory, webauthnSvc WebAuthnService, keyringSvc KeyringService, usersRegistry *users.Registry, sessions *session.Store, defaultLanguage, avatarsDir string, logger *slog.Logger) (*Handler, error) {
+func New(h History, mem Memory, turns TurnTracker, webauthnSvc WebAuthnService, keyringSvc KeyringService, usersRegistry *users.Registry, sessions *session.Store, defaultLanguage, avatarsDir string, logger *slog.Logger) (*Handler, error) {
 	indexTmpl, err := template.ParseFS(templatesFS, "templates/index.html")
 	if err != nil {
 		return nil, fmt.Errorf("webui: parse index template: %w", err)
@@ -178,6 +189,7 @@ func New(h History, mem Memory, webauthnSvc WebAuthnService, keyringSvc KeyringS
 		manifestTmpl:    manifestTmpl,
 		history:         h,
 		memory:          mem,
+		turns:           turns,
 		webauthn:        webauthnSvc,
 		keyring:         keyringSvc,
 		users:           usersRegistry,
@@ -226,6 +238,7 @@ func New(h History, mem Memory, webauthnSvc WebAuthnService, keyringSvc KeyringS
 	mux.Handle("GET /api/memory", handler.requireAuthAPI(http.HandlerFunc(handler.handleGetMemory)))
 	mux.Handle("PUT /api/memory", handler.requireAuthAPI(http.HandlerFunc(handler.handlePutMemory)))
 	mux.Handle("GET /api/session", handler.requireAuthAPI(http.HandlerFunc(handler.handleSessionCheck)))
+	mux.Handle("GET /api/turn-status", handler.requireAuthAPI(http.HandlerFunc(handler.handleTurnStatus)))
 
 	if webauthnSvc != nil {
 		// Registration/management require being logged in already (adding a
@@ -385,6 +398,23 @@ func (h *Handler) handleDialogMessages(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, toMessageViews(messages))
+}
+
+// handleTurnStatus reports whether the logged-in user currently has an
+// Orchestrator.Handle turn in flight, on any channel (HA, web, Telegram,
+// scheduled) — chat.js polls this every ~5s (and checks it on mount/
+// reconnect) as the fallback/confirmation for the live WS
+// turn_in_progress/turn_started/turn_ended events, so a dropped WS
+// connection during a long turn never leaves the client guessing. See
+// TurnTracker.
+func (h *Handler) handleTurnStatus(w http.ResponseWriter, r *http.Request) {
+	user := currentUser(r)
+	inProgress, startedAt := h.turns.TurnStatus(user.Username)
+	resp := map[string]any{"in_progress": inProgress}
+	if inProgress {
+		resp["started_at"] = startedAt.Format(time.RFC3339)
+	}
+	writeJSON(w, resp)
 }
 
 // messageView adds the web renderer's Blocks alongside a stored

@@ -5,13 +5,15 @@
 import { t } from "../i18n.js";
 import { icon, iconNode } from "../icons.js";
 import * as chatWs from "../chat-ws.js";
+import * as chatTurnStatus from "../chat-turn-status.js";
 import { downloadChip, extractAttachmentBlocks, attachmentChip } from "../downloads.js";
 import { renderInlineText } from "../inline-text.js";
 import { isChatBubble } from "../message-filter.js";
 import { html, render, nothing } from "../vendor/lit-html/lit-html.mjs";
 import { blocksTemplate } from "../segment-template.js";
 
-let messagesEl, scrollEl, formEl, textEl, sendBtn, fileInput, attachBtn, attachChip, unsubscribeWs, unsubscribeReconnect;
+let messagesEl, scrollEl, formEl, textEl, sendBtn, fileInput, attachBtn, attachChip;
+let unsubscribeWs, unsubscribeReconnect, unsubscribeTurnStatus;
 // Non-null while a file upload XHR is in flight — aborted by clearAttachment().
 let currentUploadXHR = null;
 
@@ -55,6 +57,73 @@ let pendingUserKey = null;
 // empty-state thread; see send()'s use of it below.
 let renderGeneration = 0;
 
+// Resolver callbacks waiting on notifyReplyArrivedViaWS() — see
+// waitForReplyOrTurnEnd's doc comment on what this guards.
+let replyArrivedResolvers = [];
+
+// When Miranda's "thinking" indicator is showing, the wall-clock time the
+// turn it represents actually started — either this tab's own send() (set
+// when isSending flips true) or, when onTurnStatusChange picks up a turn
+// started elsewhere (HA/Telegram/another tab), the server-reported
+// TurnTracker start time. Read by showThinking() to drive the elapsed-time
+// display; null whenever nothing is in flight.
+let activeTurnStartedAt = null;
+
+// Called by upsertMessage whenever it freshly appends an assistant message
+// (i.e. one this tab didn't already know about) — send()'s catch block
+// races this against waitForReplyOrTurnEnd's turn-status signal to tell a
+// genuine failed turn apart from a fetch() that merely died on this end.
+function notifyReplyArrivedViaWS() {
+  const resolvers = replyArrivedResolvers;
+  replyArrivedResolvers = [];
+  for (const resolve of resolvers) resolve(true);
+}
+
+/** Resolves true the instant notifyReplyArrivedViaWS() fires (the fast
+ * path — a healthy WS delivered the actual reply, already rendered by
+ * upsertMessage), or false once the server confirms — via a live WS
+ * turn_ended/turn_in_progress push, or ~5s REST polling
+ * (chat-turn-status.js) when the WS itself is down — that no turn is in
+ * flight for this user, without ever having delivered a WS reply.
+ *
+ * Exists because a fetch() rejection (e.g. Safari's "NetworkError when
+ * attempting to fetch resource", thrown when the tab backgrounds or the
+ * network interface changes mid-request on mobile) only means *this tab's*
+ * connection died — the server can still finish the turn and broadcast the
+ * reply over chat-ws.js later (see the 2026-08-20 incident this guards: a
+ * file uploaded and was processed correctly, but the user still saw a
+ * "request failed" error from a fixed 10s timeout that was wrong for a
+ * legitimately long turn). Unlike that old fixed timeout, this is bounded
+ * by the server's actual state, not a guess — the only timeout left is a
+ * generous last-resort backstop against a truly wedged loop, comfortably
+ * past Orchestrator.Handle's own 5-minute TurnTimeout. */
+function waitForReplyOrTurnEnd() {
+  return new Promise((resolve) => {
+    let settled = false;
+    const finish = (v) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(backstop);
+      unsubscribeStatus();
+      resolve(v);
+    };
+
+    replyArrivedResolvers.push(finish);
+
+    const onStatus = (status) => {
+      // `confirmed` guards against chat-turn-status.js's pre-first-signal
+      // default (inProgress:false before anything real has arrived), which
+      // would otherwise be indistinguishable from a genuine "not running".
+      if (status.confirmed && !status.inProgress) finish(false);
+    };
+    const unsubscribeStatus = chatTurnStatus.onStatusChange(onStatus);
+    onStatus(chatTurnStatus.currentStatus());
+    chatTurnStatus.startPolling();
+
+    const backstop = setTimeout(() => finish(false), 10 * 60 * 1000);
+  });
+}
+
 function formatTime(iso) {
   try {
     return new Date(iso).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
@@ -89,11 +158,16 @@ function thumbnailDataURL(file, maxPx) {
 /** Sentinel thrown when the user cancels an in-flight upload via clearAttachment(). */
 class UploadCancelledError extends Error {}
 
-/** POST a file to /api/upload via XHR so we can track byte-level progress.
- * Calls onProgress(0..100) as data is sent; resolves with the parsed JSON
- * response on success. Rejects with UploadCancelledError on abort (user
- * clicked ×), or a plain Error on network failure / non-2xx status. */
-function uploadWithProgress(file, onProgress) {
+/** POST a blob to /api/upload under filename via XHR so we can track
+ * byte-level progress. Calls onProgress(0..100) as data is sent; resolves
+ * with the parsed JSON response on success. Rejects with
+ * UploadCancelledError on abort (user clicked ×), or a plain Error on
+ * network failure / non-2xx status.
+ *
+ * Takes a Blob rather than the original File deliberately — see
+ * handleFileSelected's doc comment on why a retry must never hand Safari
+ * the same File object a second time. */
+function uploadWithProgress(blob, filename, onProgress) {
   return new Promise((resolve, reject) => {
     const xhr = new XMLHttpRequest();
     currentUploadXHR = xhr;
@@ -113,7 +187,7 @@ function uploadWithProgress(file, onProgress) {
     xhr.addEventListener("error", () => { currentUploadXHR = null; reject(new Error("Network error")); });
     xhr.addEventListener("abort", () => { currentUploadXHR = null; reject(new UploadCancelledError()); });
     const formData = new FormData();
-    formData.append("file", file, file.name);
+    formData.append("file", blob, filename);
     xhr.send(formData);
   });
 }
@@ -191,16 +265,23 @@ function bubble(role, text, timeIso, downloads, blocks) {
   return wrap;
 }
 
-/** The three-dot "Miranda is thinking" indicator shown while a request is in flight. */
+/** The three-dot "Miranda is thinking" indicator shown while a request is in
+ * flight. Includes a data-elapsed span, hidden until updateElapsedDisplay()
+ * (driven by activeTurnStartedAt) fills it in — only once a turn has run
+ * long enough that a bare spinner becomes ambiguous about whether it's
+ * stuck or just slow. */
 function typingIndicator() {
   const wrap = document.createElement("div");
   wrap.className = "flex items-start";
   render(
     html`
-      <div class="flex items-center gap-1 rounded-2xl rounded-bl-md border border-(--color-border) bg-(--color-surface)/70 px-4 py-3">
-        <span class="h-1.5 w-1.5 animate-bounce rounded-full bg-(--color-text-faint) [animation-delay:-0.3s]"></span>
-        <span class="h-1.5 w-1.5 animate-bounce rounded-full bg-(--color-text-faint) [animation-delay:-0.15s]"></span>
-        <span class="h-1.5 w-1.5 animate-bounce rounded-full bg-(--color-text-faint)"></span>
+      <div class="flex items-center gap-2 rounded-2xl rounded-bl-md border border-(--color-border) bg-(--color-surface)/70 px-4 py-3">
+        <span class="flex items-center gap-1">
+          <span class="h-1.5 w-1.5 animate-bounce rounded-full bg-(--color-text-faint) [animation-delay:-0.3s]"></span>
+          <span class="h-1.5 w-1.5 animate-bounce rounded-full bg-(--color-text-faint) [animation-delay:-0.15s]"></span>
+          <span class="h-1.5 w-1.5 animate-bounce rounded-full bg-(--color-text-faint)"></span>
+        </span>
+        <span data-elapsed class="hidden text-xs text-(--color-text-faint)"></span>
       </div>
     `,
     wrap
@@ -208,16 +289,54 @@ function typingIndicator() {
   return wrap;
 }
 
+// A quick reply shouldn't show a stopwatch — only once a turn has run long
+// enough that the plain three-dot bubble alone becomes ambiguous about
+// whether it's stuck (tool calls, web search, escalation can legitimately
+// take a while; see Orchestrator.Handle's 5-minute TurnTimeout).
+const ELAPSED_GRACE_MS = 6000;
+let elapsedTimer = null;
+
+function formatElapsed(ms) {
+  const totalSec = Math.max(0, Math.floor(ms / 1000));
+  const m = Math.floor(totalSec / 60);
+  const s = totalSec % 60;
+  return m > 0 ? `${m}м ${s}с` : `${s}с`;
+}
+
+function updateElapsedDisplay() {
+  const span = thinkingEl?.querySelector("[data-elapsed]");
+  if (!span || !activeTurnStartedAt) return;
+  const elapsedMs = Date.now() - activeTurnStartedAt.getTime();
+  if (elapsedMs < ELAPSED_GRACE_MS) {
+    span.classList.add("hidden");
+    return;
+  }
+  span.textContent = `${t("chat_waiting_elapsed", "Waiting")} — ${formatElapsed(elapsedMs)}`;
+  span.classList.remove("hidden");
+}
+
 function showThinking() {
-  if (thinkingEl) return;
-  thinkingEl = typingIndicator();
+  if (!thinkingEl) thinkingEl = typingIndicator();
+  // Unconditional, even when reusing an already-shown indicator:
+  // appendChild on a node that already has a parent *moves* it (DOM spec),
+  // so this guarantees thinkingEl is always the last child — otherwise a
+  // stale indicator left over from onTurnStatusChange (shown before the
+  // user's own new message existed) would sit frozen above a newly
+  // appended bubble instead of trailing it.
   messagesEl.appendChild(thinkingEl);
   scrollToBottom();
+  activeTurnStartedAt ??= new Date();
+  clearInterval(elapsedTimer);
+  updateElapsedDisplay();
+  elapsedTimer = setInterval(updateElapsedDisplay, 1000);
 }
 
 function hideThinking() {
   thinkingEl?.remove();
   thinkingEl = null;
+  activeTurnStartedAt = null;
+  clearInterval(elapsedTimer);
+  elapsedTimer = null;
 }
 
 /** A visually distinct error bubble with an inline retry action — errors
@@ -294,6 +413,8 @@ function clearMessages() {
   rendered.clear();
   pendingUserKey = null;
   thinkingEl = null; // detached by the innerHTML wipe above
+  clearInterval(elapsedTimer);
+  elapsedTimer = null;
   renderGeneration++;
 }
 
@@ -396,7 +517,22 @@ function setUploading(uploading) {
     : icon("paperclip", "h-4 w-4");
 }
 
-/** Handle a File object selected by the user (via button or drag-and-drop). */
+/** Handle a File object selected by the user (via button or drag-and-drop).
+ *
+ * Reads file's bytes into memory once, up front, and uploads a fresh Blob
+ * built from those bytes rather than passing file itself to
+ * uploadWithProgress — including on a retry (errorBubble's onRetry below
+ * calls this same function again with the same File). iOS Safari has a
+ * known WebKit bug where handing the same File object to a second
+ * FormData/XHR .send() (e.g. exactly this retry path) can produce a
+ * truncated multipart body server-side, surfacing as "multipart:
+ * NextPart: EOF" — reproducibly, even over a reliable connection (see the
+ * 2026-08-20 incident this guards). file.arrayBuffer() doesn't share that
+ * bug: it either resolves with the complete contents or rejects, so
+ * reading it fresh on every attempt (this attempt included) and always
+ * uploading a same-sized Blob built from those bytes keeps every attempt's
+ * multipart framing correct regardless of how many times this file has
+ * already been sent. */
 async function handleFileSelected(file) {
   if (!file) return;
   clearAttachment();
@@ -405,7 +541,9 @@ async function handleFileSelected(file) {
   showAttachChip(file.name);
   setAttachChipProgress(0);
   try {
-    const data = await uploadWithProgress(file, setAttachChipProgress);
+    const bytes = await file.arrayBuffer();
+    const blob = new Blob([bytes], file.type ? { type: file.type } : undefined);
+    const data = await uploadWithProgress(blob, file.name, setAttachChipProgress);
     pendingAttachment = {
       file_id: data.file_id,
       filename: data.filename,
@@ -452,6 +590,8 @@ function upsertMessage(message, blocks) {
     return;
   }
 
+  if (message.role === "assistant") notifyReplyArrivedViaWS();
+
   messagesEl.querySelector("[data-empty-state]")?.remove();
   const node = bubble(message.role, message.content, message.created_at, message.downloads, blocks);
   messagesEl.appendChild(node);
@@ -475,9 +615,17 @@ function onChatEvent(ev) {
   }
 }
 
+/** Reloads the visible thread from server-recorded truth. Returns the role
+ * ("user"|"assistant") of the last rendered chat message, or null if the
+ * thread ended up empty (no conversation, an ended one, or a fetch
+ * failure) — send()'s catch block uses this as its reconciliation signal
+ * when a turn ends without ever delivering a WS reply: "assistant" means
+ * the turn actually succeeded (just missed by this tab's own connection),
+ * "user" means it genuinely failed silently server-side. */
 async function loadHistory() {
   clearMessages();
   messagesEl.appendChild(skeleton());
+  let lastRole = null;
   try {
     const res = await fetch("/api/dialogs?limit=1");
     const conversations = await res.json();
@@ -507,6 +655,7 @@ async function loadHistory() {
           rendered.set(m.id, node);
         }
         scrollToBottom();
+        lastRole = chatMessages.at(-1).role;
       }
     }
   } catch {
@@ -524,6 +673,7 @@ async function loadHistory() {
     setSending(true);
     showThinking();
   }
+  return lastRole;
 }
 
 function setSending(sending) {
@@ -618,12 +768,37 @@ async function send(text) {
       }
     }
   } catch (err) {
+    // fetch() itself failed (network error, not an HTTP error status) —
+    // this only proves *this tab's* connection died, not that the server
+    // never got or finished the turn (mobile Safari in particular tears
+    // down an in-flight fetch when the tab backgrounds or the network
+    // interface changes, even mid-turn). Wait for the server's own
+    // authoritative signal (see waitForReplyOrTurnEnd) instead of guessing
+    // off a fixed timeout — the incident this guards: a file uploaded and
+    // processed fine, but the user still saw a scary "request failed"
+    // error because the old fixed 10s wait was too short for this turn.
+    const replyArrivedViaWS = await waitForReplyOrTurnEnd();
+    // The server has now authoritatively confirmed the turn is no longer in
+    // flight (either the reply arrived, or turn-status flipped to false) —
+    // clear isSending before reconciling below, so loadHistory() (which
+    // treats isSending as "a send() is still pending, restore the
+    // indicator") doesn't mistake this now-resolved wait for one and
+    // re-show it. finally below re-sets the same values regardless.
+    isSending = false;
     hideThinking();
-    // Same reasoning as the !res.ok branch above: shown regardless of a
-    // stale renderGeneration, since a network failure has no chat-ws.js
-    // reply that could arrive instead.
-    messagesEl.querySelector("[data-empty-state]")?.remove();
-    messagesEl.appendChild(errorBubble(String(err), () => send(text)));
+    if (!replyArrivedViaWS && renderGeneration === myGeneration) {
+      // The server confirmed the turn ended without ever getting a WS
+      // reply through — reconcile against its actual recorded state rather
+      // than assuming failure: loadHistory() re-renders the thread from
+      // truth and reports whether it ended on an assistant reply (this
+      // tab's connection merely missed it) or not (a genuine silent
+      // server-side failure).
+      const lastRole = await loadHistory();
+      if (lastRole === "user") {
+        messagesEl.querySelector("[data-empty-state]")?.remove();
+        messagesEl.appendChild(errorBubble(String(err), () => send(text)));
+      }
+    }
   } finally {
     isSending = false;
     setSending(false);
@@ -753,6 +928,17 @@ export function mount(container) {
   // anything published while the socket was down instead of leaving the
   // tab silently stale until a manual reload.
   unsubscribeReconnect = chatWs.onReconnect(loadHistory);
+  // Picks up a turn already in flight for this user on ANY channel — not
+  // just this tab's own send() — so reloading mid-turn, opening a second
+  // tab, or a turn started via HA/Telegram while this tab is just sitting
+  // open all show the waiting indicator too (see onTurnStatusChange).
+  // startPolling() is paired with stopPolling() in unmount() so the timer
+  // doesn't leak across navigations; its immediate pollOnce() plus
+  // chat-ws.js's connect-time snapshot mean a fresh mount learns the real
+  // state within one round trip, without racing loadHistory() below (both
+  // signals arrive asynchronously, after this synchronous setup returns).
+  unsubscribeTurnStatus = chatTurnStatus.onStatusChange(onTurnStatusChange);
+  chatTurnStatus.startPolling();
   loadHistory();
 }
 
@@ -764,10 +950,29 @@ export function unmount() {
   // handlers.
   unsubscribeWs?.();
   unsubscribeReconnect?.();
+  unsubscribeTurnStatus?.();
+  chatTurnStatus.stopPolling();
   // Discard any pending attachment so a remounted screen starts clean.
   clearAttachment();
   pendingAttachment = null;
   attachBtn = null;
   fileInput = null;
   attachChip = null;
+}
+
+/** Reacts to chatTurnStatus's signal for turns NOT triggered by this tab's
+ * own send() — isSending guards that case, since send()'s catch path has
+ * its own dedicated wait/reconcile flow (waitForReplyOrTurnEnd) that must
+ * not be second-guessed here. Covers: reloading the page mid-turn, a
+ * second tab, or a turn started via HA/Telegram while this tab just sits
+ * open (see mount()'s "full scope" wiring above). */
+function onTurnStatusChange(status) {
+  if (!status.confirmed || isSending) return;
+  if (status.inProgress) {
+    activeTurnStartedAt = status.startedAt;
+    showThinking();
+  } else if (thinkingEl) {
+    hideThinking();
+    loadHistory();
+  }
 }

@@ -415,7 +415,7 @@ func run(cfg config.Config, logger *slog.Logger, eventHub *hub.Hub, configDir st
 
 	var webHandler http.Handler
 	if cfg.WebUI.Enabled {
-		wh, err := webui.New(historyStore, memoryStore, webauthnSvc, keyringService, usersRegistry, sessions, cfg.WebUI.DefaultLanguage, cfg.Storage.AvatarsDir, logger)
+		wh, err := webui.New(historyStore, memoryStore, orchestrator, webauthnSvc, keyringService, usersRegistry, sessions, cfg.WebUI.DefaultLanguage, cfg.Storage.AvatarsDir, logger)
 		if err != nil {
 			return err
 		}

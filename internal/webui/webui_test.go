@@ -76,6 +76,15 @@ func (f *fakeMemory) Write(userID, content string) error {
 	return nil
 }
 
+type fakeTurnTracker struct {
+	inProgress bool
+	startedAt  time.Time
+}
+
+func (f *fakeTurnTracker) TurnStatus(userID string) (bool, time.Time) {
+	return f.inProgress, f.startedAt
+}
+
 func mustHash(t *testing.T, password string) string {
 	t.Helper()
 	hash, err := users.HashPassword(password)
@@ -101,9 +110,24 @@ func newTestHandlerWithMemory(t *testing.T, fake *fakeHistory) (*Handler, *sessi
 	sessions := session.NewStore(time.Hour)
 	mem := newFakeMemory()
 
-	h, err := New(fake, mem, nil, nil, registry, sessions, "ru", "", testLogger())
+	h, err := New(fake, mem, nil, nil, nil, registry, sessions, "ru", "", testLogger())
 	require.NoError(t, err)
 	return h, sessions, mem
+}
+
+// newTestHandlerWithTurns is newTestHandler plus a fakeTurnTracker, for
+// tests covering GET /api/turn-status.
+func newTestHandlerWithTurns(t *testing.T, turns *fakeTurnTracker) (*Handler, *session.Store) {
+	t.Helper()
+	registry, err := users.NewRegistry([]config.UserConfig{
+		{Username: "alex", PasswordHash: mustHash(t, "555"), FullName: "Alex"},
+	})
+	require.NoError(t, err)
+	sessions := session.NewStore(time.Hour)
+
+	h, err := New(&fakeHistory{}, newFakeMemory(), turns, nil, nil, registry, sessions, "ru", "", testLogger())
+	require.NoError(t, err)
+	return h, sessions
 }
 
 // newTestHandlerWithKeyring is newTestHandler plus a fakeKeyringService, for
@@ -116,7 +140,7 @@ func newTestHandlerWithKeyring(t *testing.T, keyringFake *fakeKeyringService) (*
 	require.NoError(t, err)
 	sessions := session.NewStore(time.Hour)
 
-	h, err := New(&fakeHistory{}, newFakeMemory(), nil, keyringFake, registry, sessions, "ru", "", testLogger())
+	h, err := New(&fakeHistory{}, newFakeMemory(), nil, nil, keyringFake, registry, sessions, "ru", "", testLogger())
 	require.NoError(t, err)
 	return h, sessions
 }
@@ -308,7 +332,7 @@ func TestServesLocalAvatarFiles(t *testing.T) {
 	registry, err := users.NewRegistry([]config.UserConfig{{Username: "alex", PasswordHash: mustHash(t, "555")}})
 	require.NoError(t, err)
 	sessions := session.NewStore(time.Hour)
-	h, err := New(&fakeHistory{}, newFakeMemory(), nil, nil, registry, sessions, "ru", dir, testLogger())
+	h, err := New(&fakeHistory{}, newFakeMemory(), nil, nil, nil, registry, sessions, "ru", dir, testLogger())
 	require.NoError(t, err)
 
 	req := httptest.NewRequest(http.MethodGet, "/static/avatars/alex.png", nil)
@@ -384,6 +408,45 @@ func TestHandleDialogMessages_RejectsAnotherUsersConversation(t *testing.T) {
 	h.ServeHTTP(rec, req)
 
 	require.Equal(t, http.StatusNotFound, rec.Code)
+}
+
+func TestHandleTurnStatus_RequiresAuth(t *testing.T) {
+	h, _ := newTestHandlerWithTurns(t, &fakeTurnTracker{})
+
+	req := httptest.NewRequest(http.MethodGet, "/api/turn-status", nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusUnauthorized, rec.Code)
+}
+
+func TestHandleTurnStatus_InProgressIncludesStartedAt(t *testing.T) {
+	startedAt := time.Now().Add(-30 * time.Second)
+	h, sessions := newTestHandlerWithTurns(t, &fakeTurnTracker{inProgress: true, startedAt: startedAt})
+
+	req := authedRequest(t, sessions, http.MethodGet, "/api/turn-status")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusOK, rec.Code)
+	var out map[string]any
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&out))
+	require.Equal(t, true, out["in_progress"])
+	require.Equal(t, startedAt.Format(time.RFC3339), out["started_at"])
+}
+
+func TestHandleTurnStatus_NotInProgressOmitsStartedAt(t *testing.T) {
+	h, sessions := newTestHandlerWithTurns(t, &fakeTurnTracker{inProgress: false})
+
+	req := authedRequest(t, sessions, http.MethodGet, "/api/turn-status")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusOK, rec.Code)
+	var out map[string]any
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&out))
+	require.Equal(t, false, out["in_progress"])
+	require.NotContains(t, out, "started_at")
 }
 
 func TestHandleMemory_RequiresAuth(t *testing.T) {
