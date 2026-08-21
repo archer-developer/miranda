@@ -164,8 +164,8 @@ Config flags live on `config.MemoryConfig` unless noted.
 |---|---|---|
 | `remember_this` | `ExplicitTool` | Append one durable fact to memory immediately, mid-conversation. |
 | `search_history` | `SearchHistoryTool` | FTS the user's *ended* conversations; returns each match's stored `Summary`. |
-| `end_conversation` | `EndConversationTool` | Close the current session immediately. |
-| `forget_conversation` | `ForgetConversationTool` | Delete the current conversation entirely, no memory write. |
+| `end_conversation` | `EndConversationTool` | Close the current session immediately — same `summarizeConversation` path as an idle-timeout close: recap + durable facts are written, conversation stays in history (just excluded from future `OpenConversation` lookups). Use for "let's start a new conversation" — the old one is worth remembering. |
+| `forget_conversation` | `ForgetConversationTool` | Delete the current conversation entirely — no summarization, no memory write, `DeleteConversation` removes messages/tool_calls/FTS rows outright. Use for "forget this"/"start over" — nothing from it should persist anywhere. |
 | `speak_reply` | `config.TTSConfig.SpeakReplyTool` | Dispatch the given `text` to `tts.primary`, even on a non-`ha_assist` source. |
 | `stop_speech` | `config.TTSConfig.StopSpeechTool` | Interrupt/clear the TTS queue and stop playback on all entities. |
 | `send_telegram` | `config.TelegramConfig.SendMessageTool` | Push a message to a household member's Telegram. See `internal/telegram/CLAUDE.md`. |

@@ -549,23 +549,3 @@ Run it locally the same way, from the repo root after `go build`:
 ```bash
 ./miranda backup
 ```
-
----
-
-## How it works
-
-```mermaid
-flowchart LR
-    In(["Input:<br/>voice, text, Telegram"]) --> Loop["Agent loop"]
-    Loop -->|"needs a tool"| Tools["Tools:<br/>HA, search, memory, ..."]
-    Tools --> Loop
-    Loop -->|"too hard for<br/>this model"| Esc["Escalate to a<br/>stronger provider"]
-    Esc --> Loop
-    Loop --> Out(["Reply:<br/>spoken and/or written"])
-```
-
-Every channel — HA voice, the web UI, Telegram, scheduled tasks — feeds the
-same loop and the same per-person memory. What differs is only how a reply
-comes back: `ha_assist` turns are spoken automatically; everything else
-stays silent unless the model calls `speak_reply` or `send_telegram`
-itself.
