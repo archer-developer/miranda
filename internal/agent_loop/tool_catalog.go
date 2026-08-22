@@ -113,8 +113,11 @@ func (o *Orchestrator) availableTools(ctx context.Context, userID string, contro
 		add(llm.ToolDef{
 			Name: speakReplyToolName,
 			Description: "Speak text out loud through the physical speaker, even though this request didn't arrive " +
-				"via the voice pipeline — use only when the user explicitly asks to hear something read aloud " +
-				"(e.g. \"озвучь это\", \"расскажи голосом\", \"скажи вслух\", \"read that out loud\"). Pass the text to speak — normally " +
+				"via the voice pipeline — use only when the user's own message explicitly asks to hear something " +
+				"read aloud (e.g. \"озвучь это\", \"расскажи голосом\", \"скажи вслух\", \"read that out loud\"). Never call this " +
+				"on your own initiative just because you judge the content important, urgent, or worth emphasizing " +
+				"(e.g. a concerning lab result) — significance is not a request for voice. A plain acknowledgement " +
+				"like \"верно\"/\"ок\" is not a voice request either. Pass the text to speak — normally " +
 				"the same as your written reply, but reworded speech-friendly (no markdown, links, code) if the " +
 				"reply itself wouldn't sound natural read verbatim.",
 			Parameters: map[string]any{
