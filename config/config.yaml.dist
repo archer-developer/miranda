@@ -309,7 +309,7 @@ mcp:
     #   expose_files: true
     #   session_id_tools: ["medical.ask"]
     #   lazy: true
-    #   description: "Medical records: lab results, diagnoses, medications, documents, health event timeline."
+    #   description: "Medical records: Q&A over the full medical history; health profile (diagnoses, medications, allergies, vaccinations, labs, vitals); event timeline; documents; self-reported events; upcoming-action reminders; diagnosis resolution."
     # Google Calendar is NOT an MCP server entry here — Google's own hosted
     # Calendar MCP server (calendarmcp.googleapis.com) turned out to be
     # gated behind enrollment in the Google Workspace Developer Preview
