@@ -82,7 +82,7 @@ func readLLMLog(path string) ([]analyze.Block, error) {
 	if err != nil {
 		return nil, fmt.Errorf("orchestrator: open llm log: %w", err)
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 	return analyze.ParseAll(f)
 }
 
@@ -95,9 +95,12 @@ func writeAnomalyFile(dir string, found []anomaly.Anomaly, blocks []analyze.Bloc
 	if err != nil {
 		return "", fmt.Errorf("orchestrator: create anomaly file: %w", err)
 	}
-	defer f.Close()
 	if err := anomaly.WriteFile(f, found, blocks); err != nil {
+		_ = f.Close()
 		return "", err
+	}
+	if err := f.Close(); err != nil {
+		return "", fmt.Errorf("orchestrator: close anomaly file: %w", err)
 	}
 	return path, nil
 }
