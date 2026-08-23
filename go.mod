@@ -4,7 +4,7 @@ go 1.25.14
 
 require (
 	github.com/anthropics/anthropic-sdk-go v1.59.0
-	github.com/archer-developer/miranda-llm v0.0.0-20260822144816-6bb0bfcb6f93
+	github.com/archer-developer/miranda-llm v0.0.0-20260823121634-cf301b12ce44
 	github.com/braheezy/shine-mp3 v0.1.0
 	github.com/coder/websocket v1.8.15
 	github.com/descope/virtualwebauthn v1.0.5

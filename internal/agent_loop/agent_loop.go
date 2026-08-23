@@ -112,6 +112,21 @@ func (o *Orchestrator) runAgentLoop(ctx context.Context, userID, conversationID,
 
 		if len(toolCalls) == 0 {
 			outcome.IterationCount = i + 1
+			// A provider can stream Done with zero TextDelta and zero
+			// ToolCall chunks and still report no error — observed in
+			// practice from Gemini silently swallowing a prompt-level
+			// safety block or an unpopulated finish reason (see
+			// gemini.Provider.attempt's PromptFeedback/finishReason
+			// handling, miranda-llm). Treating that as a valid "final
+			// answer" here would forward an empty string all the way to
+			// the end user as a silent blank reply, with nothing in
+			// history or logs/anomalies/ to explain why. Erroring instead
+			// routes through the same o.turnFailureReply(userID) fallback
+			// every other agent-loop failure already uses, so the user
+			// sees an honest "something went wrong" instead of nothing.
+			if text == "" {
+				return "", "", fmt.Errorf("orchestrator: provider returned an empty final reply with no tool calls")
+			}
 			return text, providerUsed, nil
 		}
 

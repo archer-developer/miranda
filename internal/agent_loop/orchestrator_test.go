@@ -206,6 +206,26 @@ func TestOrchestrator_SimpleTextReply(t *testing.T) {
 	require.Equal(t, "assistant", msgs[1].Role)
 }
 
+// TestOrchestrator_EmptyFinalReplyFallsBackInsteadOfSendingBlankText is the
+// regression test for a real production incident: a provider can stream
+// Done with zero TextDelta and zero ToolCall chunks while reporting no
+// error at all (observed from Gemini silently swallowing a prompt-level
+// safety block — see gemini.Provider.attempt's PromptFeedback/finishReason
+// handling in miranda-llm). runAgentLoop used to treat that as a valid
+// "final answer" (len(toolCalls)==0) and forward the empty string straight
+// through, so the end user got a silent blank reply. It must now go
+// through the same turnFailureReply fallback every other agent-loop
+// failure already uses.
+func TestOrchestrator_EmptyFinalReplyFallsBackInsteadOfSendingBlankText(t *testing.T) {
+	provider := llmtest.New("local", llmtest.Response{Text: ""})
+	o, _, _ := newTestOrchestrator(t, provider)
+
+	resp, err := o.Handle(context.Background(), InputRequest{Source: "cli", UserID: "alex", Text: "покажи анализ крови"})
+	require.NoError(t, err, "a failed turn must still return a graceful reply to the caller, not a hard error")
+	require.NotEmpty(t, resp.Reply, "the user must never see a blank final reply")
+	require.Equal(t, o.turnFailureReply("alex"), resp.Reply)
+}
+
 // TestOrchestrator_InputResponseCarriesParsedBlocks guards the web UI's
 // wiring: InputResponse.Blocks must be replyformat.Parse of the model's own
 // reply text (finalText), independent of whatever transform (voice
