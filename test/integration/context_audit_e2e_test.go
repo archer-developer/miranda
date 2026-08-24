@@ -590,7 +590,7 @@ func TestContextAudit_DebugUser(t *testing.T) {
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = scheduleStore.Close() })
 
-	eventHub := hub.New(200)
+	eventHub := hub.New(200, nil)
 
 	orchestrator := agentloop.NewOrchestrator(
 		llmRouter, toolManager, historyStore, memoryStore, nil, eventHub, nil,

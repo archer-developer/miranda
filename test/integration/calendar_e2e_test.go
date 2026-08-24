@@ -151,7 +151,7 @@ func newCalendarE2EHarness(t *testing.T, provider *llmtest.FakeProvider, oauthSv
 	r, err := router.New([]llm.Provider{provider}, nil, "")
 	require.NoError(t, err)
 
-	eventHub := hub.New(100)
+	eventHub := hub.New(100, nil)
 	orchestrator := agentloop.NewOrchestrator(
 		r, mcp.NewManager(nil), historyStore, memoryStore, nil, eventHub, nil,
 		config.AgentConfig{}, config.MemoryConfig{}, config.TTSConfig{}, 100, "debug",
@@ -246,7 +246,7 @@ func callCalendarToolIgnoringResult(oauthSvc *oauth2.Service, username, toolName
 	}
 
 	orchestrator := agentloop.NewOrchestrator(
-		r, mcp.NewManager(nil), historyStore, memoryStore, nil, hub.New(10), nil,
+		r, mcp.NewManager(nil), historyStore, memoryStore, nil, hub.New(10, nil), nil,
 		config.AgentConfig{}, config.MemoryConfig{}, config.TTSConfig{}, 100, "debug",
 	)
 	orchestrator.SetOAuth(oauthSvc, time.Minute, time.Minute, 10*time.Second)

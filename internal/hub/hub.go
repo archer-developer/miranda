@@ -1,10 +1,12 @@
 // Package hub broadcasts structured log/event lines to subscribers (the web
 // UI's WebSocket log tail, primarily) while keeping a bounded in-memory
-// buffer so a new subscriber sees recent history immediately on connect.
+// buffer, one per event source, so a new subscriber sees recent history
+// immediately on connect.
 package hub
 
 import (
 	"bytes"
+	"encoding/json"
 	"strings"
 	"sync"
 )
@@ -24,40 +26,122 @@ type Event struct {
 	UserID string `json:"user_id,omitempty"`
 }
 
-// Hub fans Events out to any number of subscribers and retains the last N
-// events so late subscribers (a browser tab opened mid-request) aren't blind.
+// SourceLimit bounds one hub source's replay buffer (see Hub.buffers).
+// A zero value on either field means "no cap on that dimension"; leaving
+// both zero means that source is fully unbounded — only do that
+// deliberately, and never for a source fed by high-frequency or
+// user-triggered bursts (see New's doc comment for why sources differ).
+type SourceLimit struct {
+	MaxCount int // 0 = unlimited event count
+	MaxBytes int // 0 = unlimited total serialized size (see eventSize)
+}
+
+// sourceBuf is one event source's own replay history and trim bookkeeping.
+type sourceBuf struct {
+	events []Event
+	sizes  []int // eventSize(events[i]), parallel to events
+	bytes  int    // running total of sizes, kept in sync with events/sizes
+}
+
+// Hub fans Events out to any number of subscribers and retains, per source,
+// the last events published to it so late subscribers (a browser tab opened
+// mid-request) aren't blind.
 type Hub struct {
-	mu          sync.Mutex
-	bufferSize  int
-	buffer      []Event
+	mu sync.Mutex
+
+	// bufferSize is the capacity of every subscriber's channel (see
+	// Subscribe) and the MaxCount fallback for any source with no entry in
+	// limits.
+	bufferSize int
+	limits     map[string]SourceLimit
+
+	buffers map[string]*sourceBuf
+	order   []string // source names in first-seen order, for deterministic replay
+
 	subscribers map[chan Event]func(Event) bool
 }
 
-// New creates a Hub that retains up to bufferSize recent events for replay to
-// new subscribers.
-func New(bufferSize int) *Hub {
+// New creates a Hub whose subscriber channels have capacity bufferSize and
+// whose per-source replay buffers are trimmed as directed by limits — a
+// source with no entry there (or when limits is nil) falls back to a plain
+// MaxCount cap of bufferSize, matching the Hub's original (pre-per-source)
+// behavior.
+//
+// Different sources genuinely need different policies, which is why this
+// isn't just one shared cap: app_log events are one short line apiece, so
+// they're best bounded by total size (a "how many KB of recent log text"
+// budget). llm_log events are different in kind — each one's Data is a
+// whole miranda-llm/llmtrace/analyze.Block (full request/response,
+// including the accumulated conversation history the provider was sent —
+// see Hub.LLMTraceWriter), and a single call's trace can legitimately be
+// large without that being a reason to drop it; what the Logs screen's
+// "LLM trace" tab actually wants is a fixed number of recent *calls*
+// (one UI row per block), regardless of any one call's size. A single
+// shared byte/count cap can express neither of these precisely, and on a
+// long-lived, chatty server the difference matters: every buffered event
+// for a source is replayed to a /ws/logs subscriber in one synchronous
+// burst on connect (see httpapi.Server.handleWSLogs), so an under-tuned
+// cap on llm_log specifically can turn simply opening the web UI into a
+// multi-megabyte payload that freezes the tab rendering it.
+func New(bufferSize int, limits map[string]SourceLimit) *Hub {
 	if bufferSize <= 0 {
 		bufferSize = 1
 	}
 	return &Hub{
 		bufferSize:  bufferSize,
+		limits:      limits,
+		buffers:     make(map[string]*sourceBuf),
 		subscribers: make(map[chan Event]func(Event) bool),
 	}
 }
 
+// eventSize estimates ev's serialized size for a source's byte-cap trim.
+// Message covers app_log's plain-text lines; Data (marshaled the same way
+// wsjson.Write will send it) covers llm_log's *analyze.Block payloads, which
+// dominate real-world buffer size — see New's doc comment.
+func eventSize(ev Event) int {
+	n := len(ev.Message)
+	if ev.Data != nil {
+		if b, err := json.Marshal(ev.Data); err == nil {
+			n += len(b)
+		}
+	}
+	return n
+}
+
 // Publish broadcasts ev to every subscriber whose filter (see Subscribe)
-// accepts it, and appends it to the replay buffer regardless of any filter
-// (the buffer is a shared, unfiltered tail of everything ever published —
-// each Subscribe call re-filters it for its own replay). Subscribers with a
-// full channel are skipped rather than blocking the publisher — a slow web
-// UI tab must never stall the agent loop.
+// accepts it, and appends it to ev.Source's own replay buffer regardless of
+// any filter (each source's buffer is a full, unfiltered tail of everything
+// ever published to it — each Subscribe call re-filters across every
+// source's buffer for its own replay). Subscribers with a full channel are
+// skipped rather than blocking the publisher — a slow web UI tab must never
+// stall the agent loop.
 func (h *Hub) Publish(ev Event) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 
-	h.buffer = append(h.buffer, ev)
-	if len(h.buffer) > h.bufferSize {
-		h.buffer = h.buffer[len(h.buffer)-h.bufferSize:]
+	buf, ok := h.buffers[ev.Source]
+	if !ok {
+		buf = &sourceBuf{}
+		h.buffers[ev.Source] = buf
+		h.order = append(h.order, ev.Source)
+	}
+
+	lim, ok := h.limits[ev.Source]
+	if !ok {
+		lim = SourceLimit{MaxCount: h.bufferSize}
+	}
+
+	size := eventSize(ev)
+	buf.events = append(buf.events, ev)
+	buf.sizes = append(buf.sizes, size)
+	buf.bytes += size
+
+	for (lim.MaxCount > 0 && len(buf.events) > lim.MaxCount) ||
+		(lim.MaxBytes > 0 && buf.bytes > lim.MaxBytes && len(buf.events) > 1) {
+		buf.bytes -= buf.sizes[0]
+		buf.events = buf.events[1:]
+		buf.sizes = buf.sizes[1:]
 	}
 
 	for sub, filter := range h.subscribers {
@@ -72,8 +156,17 @@ func (h *Hub) Publish(ev Event) {
 }
 
 // Subscribe registers a new subscriber and returns its channel plus a replay
-// of currently buffered events (filtered the same way, if filter is set).
-// Call the returned unsubscribe func when done.
+// of currently buffered events across every source (filtered the same way,
+// if filter is set). Call the returned unsubscribe func when done.
+//
+// The replay is grouped by source (each source's own buffer, in its own
+// chronological order, one source fully before the next in h.order's
+// first-seen order) rather than one global chronological interleaving —
+// safe today because every current consumer already keys off ev.Source
+// before doing anything with an event: logs.js renders app_log/llm_log as
+// separate tabs, and ws.js's own client-side buffer already buckets
+// everything by source. A filter that needed strict cross-source ordering
+// would need to sort replay itself.
 //
 // filter, if non-nil, is checked in Publish *before* an event is ever sent
 // to this subscriber's channel — pass one whenever a subscriber only cares
@@ -106,9 +199,11 @@ func (h *Hub) Subscribe(filter func(Event) bool) (ch <-chan Event, replay []Even
 	sub := make(chan Event, h.bufferSize)
 	h.subscribers[sub] = filter
 
-	for _, ev := range h.buffer {
-		if filter == nil || filter(ev) {
-			replay = append(replay, ev)
+	for _, source := range h.order {
+		for _, ev := range h.buffers[source].events {
+			if filter == nil || filter(ev) {
+				replay = append(replay, ev)
+			}
 		}
 	}
 

@@ -158,8 +158,14 @@ func main() {
 
 	// Built before setupLogging so the app logger can also mirror into it
 	// (see setupLogging) — the web UI's log-viewer screen and live event
-	// pane both read from this one Hub over /ws/logs.
-	eventHub := hub.New(cfg.WebUI.LogBufferSize)
+	// pane both read from this one Hub over /ws/logs. app_log/llm_log get
+	// their own replay-buffer policy (see hub.SourceLimit's doc comment for
+	// why they can't share one) — every other source falls back to a plain
+	// count cap of LogBufferSize.
+	eventHub := hub.New(cfg.WebUI.LogBufferSize, map[string]hub.SourceLimit{
+		"app_log": {MaxBytes: cfg.WebUI.AppLogMaxKB * 1024},
+		"llm_log": {MaxCount: cfg.WebUI.LLMLogMaxBlocks},
+	})
 
 	logger, closeLogs, err := setupLogging(cfg.Logging, eventHub)
 	if err != nil {

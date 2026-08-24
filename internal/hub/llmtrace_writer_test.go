@@ -8,7 +8,7 @@ import (
 )
 
 func TestLLMTraceWriter_PublishesOneEventPerCompletedBlock(t *testing.T) {
-	h := New(10)
+	h := New(10, nil)
 	ch, _, unsubscribe := h.Subscribe(nil)
 	defer unsubscribe()
 
@@ -35,7 +35,7 @@ func TestLLMTraceWriter_PublishesOneEventPerCompletedBlock(t *testing.T) {
 }
 
 func TestLLMTraceWriter_NoEventUntilBlockCompletes(t *testing.T) {
-	h := New(10)
+	h := New(10, nil)
 	ch, _, unsubscribe := h.Subscribe(nil)
 	defer unsubscribe()
 
@@ -54,7 +54,7 @@ func TestLLMTraceWriter_NoEventUntilBlockCompletes(t *testing.T) {
 // aren't guaranteed to land as whole lines any more here than for the plain
 // Writer.
 func TestLLMTraceWriter_BuffersPartialLineAcrossWrites(t *testing.T) {
-	h := New(10)
+	h := New(10, nil)
 	ch, _, unsubscribe := h.Subscribe(nil)
 	defer unsubscribe()
 

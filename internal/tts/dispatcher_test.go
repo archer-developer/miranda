@@ -47,7 +47,7 @@ func (p *fakeProvider) Calls() []string {
 func TestDispatcher_SpeakOne_UsesPrimaryOnSuccess(t *testing.T) {
 	primary := &fakeProvider{}
 	fallback := &fakeProvider{}
-	d := &Dispatcher{primary: primary, fallback: fallback, hub: hub.New(10)}
+	d := &Dispatcher{primary: primary, fallback: fallback, hub: hub.New(10, nil)}
 
 	err := d.speakOne(context.Background(), "привет", "media_player.kitchen")
 	require.NoError(t, err)
@@ -58,7 +58,7 @@ func TestDispatcher_SpeakOne_UsesPrimaryOnSuccess(t *testing.T) {
 func TestDispatcher_SpeakOne_FallsBackOnQuotaExceeded(t *testing.T) {
 	primary := &fakeProvider{errs: []error{fmt.Errorf("wrap: %w", ErrQuotaExceeded)}}
 	fallback := &fakeProvider{}
-	d := &Dispatcher{primary: primary, fallback: fallback, hub: hub.New(10)}
+	d := &Dispatcher{primary: primary, fallback: fallback, hub: hub.New(10, nil)}
 
 	err := d.speakOne(context.Background(), "привет", "media_player.kitchen")
 	require.NoError(t, err)
@@ -69,7 +69,7 @@ func TestDispatcher_SpeakOne_FallsBackOnQuotaExceeded(t *testing.T) {
 func TestDispatcher_SpeakOne_NonQuotaErrorNeverFallsBack(t *testing.T) {
 	primary := &fakeProvider{errs: []error{errors.New("network unreachable")}}
 	fallback := &fakeProvider{}
-	d := &Dispatcher{primary: primary, fallback: fallback, hub: hub.New(10)}
+	d := &Dispatcher{primary: primary, fallback: fallback, hub: hub.New(10, nil)}
 
 	err := d.speakOne(context.Background(), "привет", "media_player.kitchen")
 	require.Error(t, err)
@@ -79,7 +79,7 @@ func TestDispatcher_SpeakOne_NonQuotaErrorNeverFallsBack(t *testing.T) {
 
 func TestDispatcher_SpeakOne_QuotaExceededWithNoFallbackConfiguredReturnsError(t *testing.T) {
 	primary := &fakeProvider{errs: []error{ErrQuotaExceeded}}
-	d := &Dispatcher{primary: primary, fallback: nil, hub: hub.New(10)}
+	d := &Dispatcher{primary: primary, fallback: nil, hub: hub.New(10, nil)}
 
 	err := d.speakOne(context.Background(), "привет", "media_player.kitchen")
 	require.ErrorIs(t, err, ErrQuotaExceeded)
@@ -92,7 +92,7 @@ func TestDispatcher_SpeakOne_QuotaExceededWithNoFallbackConfiguredReturnsError(t
 func TestDispatcher_SpeakEnqueuesAsynchronously(t *testing.T) {
 	release := make(chan struct{})
 	primary := &blockingProvider{release: release}
-	d := NewDispatcher(primary, nil, &stopTrackingHA{}, "kitchen", hub.New(10), nil)
+	d := NewDispatcher(primary, nil, &stopTrackingHA{}, "kitchen", hub.New(10, nil), nil)
 
 	done := make(chan struct{})
 	go func() {
@@ -136,6 +136,6 @@ func (p *blockingProvider) called() bool {
 // through to Player.Stop without panicking; the queue-clearing and
 // cancellation contract is exercised in player_test.go.
 func TestDispatcher_StopDoesNotPanic(t *testing.T) {
-	d := NewDispatcher(&fakeProvider{}, nil, &stopTrackingHA{}, "kitchen", hub.New(10), nil)
+	d := NewDispatcher(&fakeProvider{}, nil, &stopTrackingHA{}, "kitchen", hub.New(10, nil), nil)
 	d.Stop()
 }

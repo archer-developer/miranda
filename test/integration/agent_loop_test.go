@@ -60,7 +60,7 @@ func newHarness(t *testing.T, provider *llmtest.FakeProvider, mcpClients ...mcp.
 	require.NoError(t, err)
 
 	toolManager := mcp.NewManager(nil, mcpClients...)
-	eventHub := hub.New(200)
+	eventHub := hub.New(200, nil)
 
 	orchestrator := agentloop.NewOrchestrator(
 		r, toolManager, historyStore, memoryStore, nil, eventHub, nil,

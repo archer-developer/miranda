@@ -16,7 +16,7 @@
 // vendor/json-formatter-js/).
 import { t } from "../i18n.js";
 import { icon } from "../icons.js";
-import { on, replay } from "../ws.js";
+import { on, replay, LLM_LOG_MAX_BUFFERED } from "../ws.js";
 import { buildTraceRow } from "./logs-trace-view.js";
 
 const TABS = [
@@ -91,7 +91,10 @@ function renderLlmLog() {
 
 /** Live handler for new "llm_log" events while that tab is active — appends
  * exactly one new row per event instead of rebuilding the whole list (which
- * would also collapse whatever row the user currently has open to read). */
+ * would also collapse whatever row the user currently has open to read).
+ * Trims the oldest row(s) past LLM_LOG_MAX_BUFFERED so a tab left open for
+ * a long time doesn't keep growing the DOM forever — see that constant's
+ * doc comment in ../ws.js. */
 function appendLlmEvent(ev) {
   if (ev.source !== "llm_log" || activeSource !== "llm_log" || !ev.data) return;
 
@@ -105,6 +108,9 @@ function appendLlmEvent(ev) {
     paneEl.appendChild(llmListEl);
   }
   llmListEl.appendChild(buildTraceRow(ev.data));
+  while (llmListEl.children.length > LLM_LOG_MAX_BUFFERED) {
+    llmListEl.firstElementChild.remove();
+  }
   if (stick) paneEl.scrollTop = paneEl.scrollHeight;
 }
 

@@ -886,11 +886,28 @@ type TTSConfig struct {
 // WebUIConfig controls the embedded monitoring dashboard.
 type WebUIConfig struct {
 	Enabled bool `yaml:"enabled"`
-	// LogBufferSize is how many recent hub.Event entries are replayed to a
-	// newly connected /ws/logs subscriber. Shared by chat/tool events and
-	// the log-viewer screen's mirrored app/LLM-trace log lines (see
-	// hub.Hub.Writer), so it needs more headroom than a chat-only buffer.
+	// LogBufferSize is the replay-buffer count cap for every hub.Event
+	// source *except* app_log/llm_log (see AppLogMaxKB/LLMLogMaxBlocks
+	// below, which give those two their own policy) — chat/tool/tts/error
+	// events and the like. Also sizes every /ws/logs subscriber's channel
+	// buffer (see hub.Hub.Subscribe), so it needs enough headroom to absorb
+	// a burst (e.g. one Event per streamed assistant reply chunk) without
+	// silently dropping events.
 	LogBufferSize int `yaml:"log_buffer_size"`
+	// AppLogMaxKB caps the "app_log" hub source's replay buffer by total
+	// serialized size in KB (0 disables). app_log events are one short
+	// plain-text line apiece, so a size budget is the natural cap — this
+	// keeps a newly opened Logs tab's "App log" pane small regardless of
+	// how long the process has run without rotating logs.
+	AppLogMaxKB int `yaml:"app_log_max_kb"`
+	// LLMLogMaxBlocks caps the "llm_log" hub source's replay buffer by
+	// number of traced calls — the same granularity the Logs screen's
+	// "LLM trace" tab renders one row per (see hub.Hub.LLMTraceWriter) —
+	// rather than by size, since an individual call's trace can
+	// legitimately be large (a long conversation history) without that
+	// being a reason to drop it. See hub.SourceLimit's doc comment for why
+	// app_log/llm_log need different kinds of cap.
+	LLMLogMaxBlocks int `yaml:"llm_log_max_blocks"`
 	// DefaultLanguage is used for the login page (before we know which user
 	// is signing in) and as the fallback for any user without their own
 	// UserConfig.Language. One of "ru", "be", "en".
@@ -1068,6 +1085,8 @@ func Default() Config {
 		WebUI: WebUIConfig{
 			Enabled:         true,
 			LogBufferSize:   2000,
+			AppLogMaxKB:     10,
+			LLMLogMaxBlocks: 20,
 			DefaultLanguage: "ru",
 		},
 		// Disabled by default — see WebAuthnConfig's doc comment for why

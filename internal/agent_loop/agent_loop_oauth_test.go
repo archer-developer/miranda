@@ -98,7 +98,7 @@ func newTestOrchestratorWithOAuth(t *testing.T, provider *llmtest.FakeProvider, 
 	require.NoError(t, err)
 
 	o := NewOrchestrator(
-		r, mcp.NewManager(nil), h, mem, nil, hub.New(100), registry,
+		r, mcp.NewManager(nil), h, mem, nil, hub.New(100, nil), registry,
 		config.AgentConfig{},
 		config.MemoryConfig{},
 		config.TTSConfig{},

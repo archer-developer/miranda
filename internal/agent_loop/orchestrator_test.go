@@ -137,10 +137,10 @@ func newTestOrchestratorWithTTS(t *testing.T, provider *llmtest.FakeProvider) (*
 		StopSpeechTool: true,
 	}
 	primary := tts.NewTextProvider(yandexCfg, ha, nil)
-	dispatcher := tts.NewDispatcher(primary, nil, ha, "test-kitchen", hub.New(100), nil)
+	dispatcher := tts.NewDispatcher(primary, nil, ha, "test-kitchen", hub.New(100, nil), nil)
 
 	o := NewOrchestrator(
-		r, mcp.NewManager(nil), h, mem, dispatcher, hub.New(100), nil,
+		r, mcp.NewManager(nil), h, mem, dispatcher, hub.New(100, nil), nil,
 		config.AgentConfig{},
 		config.MemoryConfig{ExplicitTool: true},
 		ttsCfg,
@@ -177,7 +177,7 @@ func newTestOrchestrator(t *testing.T, provider *llmtest.FakeProvider, mcpClient
 	toolManager := mcp.NewManager(nil, mcpClients...)
 
 	o := NewOrchestrator(
-		r, toolManager, h, mem, nil, hub.New(100), nil,
+		r, toolManager, h, mem, nil, hub.New(100, nil), nil,
 		config.AgentConfig{},
 		config.MemoryConfig{
 			ExplicitTool: true, AutoSummarize: true, SearchHistoryTool: true,
@@ -364,7 +364,7 @@ func TestOrchestrator_LoadedLazyGroupIsNotFetchedTwice(t *testing.T) {
 	o, _, _ := newTestOrchestrator(t, provider, diary)
 	o.SetLazyMCPServers(map[string]string{"diary": "Personal diary: notes, thoughts, events."})
 
-	h := hub.New(100)
+	h := hub.New(100, nil)
 	o.hub = h
 	_, replay, unsubscribe := h.Subscribe(nil)
 	defer unsubscribe()
@@ -476,7 +476,7 @@ func TestOrchestrator_EscalationIsTransparentToOrchestrator(t *testing.T) {
 	mem, err := memory.New(t.TempDir())
 	require.NoError(t, err)
 
-	o := NewOrchestrator(r, mcp.NewManager(nil), h, mem, nil, hub.New(100), nil,
+	o := NewOrchestrator(r, mcp.NewManager(nil), h, mem, nil, hub.New(100, nil), nil,
 		config.AgentConfig{},
 		config.MemoryConfig{ExplicitTool: true},
 		config.TTSConfig{},
@@ -518,7 +518,7 @@ func TestOrchestrator_EscalatedProviderStaysActiveAcrossToolCall(t *testing.T) {
 	mem, err := memory.New(t.TempDir())
 	require.NoError(t, err)
 
-	o := NewOrchestrator(r, mcp.NewManager(nil, ha), h, mem, nil, hub.New(100), nil,
+	o := NewOrchestrator(r, mcp.NewManager(nil, ha), h, mem, nil, hub.New(100, nil), nil,
 		config.AgentConfig{},
 		config.MemoryConfig{ExplicitTool: true},
 		config.TTSConfig{},
@@ -808,7 +808,7 @@ func newTestOrchestratorWithUsers(t *testing.T, provider *llmtest.FakeProvider, 
 	require.NoError(t, err)
 
 	return NewOrchestrator(
-		r, mcp.NewManager(nil), h, mem, nil, hub.New(100), registry,
+		r, mcp.NewManager(nil), h, mem, nil, hub.New(100, nil), registry,
 		config.AgentConfig{},
 		config.MemoryConfig{ExplicitTool: true},
 		config.TTSConfig{},
@@ -850,7 +850,7 @@ func newTestOrchestratorWithTelegram(t *testing.T, provider *llmtest.FakeProvide
 	require.NoError(t, err)
 
 	o := NewOrchestrator(
-		r, mcp.NewManager(nil), h, mem, nil, hub.New(100), registry,
+		r, mcp.NewManager(nil), h, mem, nil, hub.New(100, nil), registry,
 		config.AgentConfig{},
 		config.MemoryConfig{},
 		config.TTSConfig{},

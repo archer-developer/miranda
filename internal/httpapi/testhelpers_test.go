@@ -49,7 +49,7 @@ func newTestOrchestrator(t *testing.T, provider *llmtest.FakeProvider, mcpClient
 	toolManager := mcp.NewManager(nil, mcpClients...)
 
 	o := agentloop.NewOrchestrator(
-		r, toolManager, h, mem, nil, hub.New(100), nil,
+		r, toolManager, h, mem, nil, hub.New(100, nil), nil,
 		config.AgentConfig{},
 		config.MemoryConfig{
 			ExplicitTool: true, AutoSummarize: true, SearchHistoryTool: true,

@@ -14,9 +14,24 @@ import { connectReconnecting } from "./reconnecting-ws.js";
 const listeners = new Map(); // source -> Set<fn(event)>
 const buffered = new Map(); // source -> event[] (everything seen so far, for late subscribers)
 
+// The server's own per-source replay cap (config.WebUI.LLMLogMaxBlocks,
+// see internal/hub.SourceLimit) only bounds what a *newly connecting* tab
+// receives on WS open. A tab left open for a long time keeps dispatching
+// live "llm_log" events into `buffered` forever otherwise, and each one is
+// a whole traced call rendered as a foldable JSON tree (see
+// screens/logs-trace-view.js) — expensive enough per row that an
+// unbounded backlog can bog the tab down on its own, independent of
+// anything the server ever sent on connect. logs.js's appendLlmEvent
+// applies the same cap to the rendered DOM list, so both stay in sync.
+export const LLM_LOG_MAX_BUFFERED = 100;
+
 function dispatch(ev) {
   if (!buffered.has(ev.source)) buffered.set(ev.source, []);
-  buffered.get(ev.source).push(ev);
+  const arr = buffered.get(ev.source);
+  arr.push(ev);
+  if (ev.source === "llm_log" && arr.length > LLM_LOG_MAX_BUFFERED) {
+    arr.splice(0, arr.length - LLM_LOG_MAX_BUFFERED);
+  }
 
   const fns = listeners.get(ev.source);
   if (fns) for (const fn of fns) fn(ev);
