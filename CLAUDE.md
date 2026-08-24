@@ -150,6 +150,7 @@ flowchart LR
     summarize -->|1-3 sentence recap| conv
     editor["Web UI: GET/PUT /api/memory\n(own user only)"] -->|full overwrite| MEM
     search["search_history tool"] -->|FTS lookup, ended conversations only| conv
+    restore["restore_conversation tool"] -->|close current, then copy\nplain text turns into a new conv| conv
     turn["every turn"] -->|Read| MEM
     turn -->|Append/SetSystemPrompt| conv
     turn -.->|AppendMessage| msg
@@ -163,7 +164,8 @@ Config flags live on `config.MemoryConfig` unless noted.
 | Tool | Config flag | What it does |
 |---|---|---|
 | `remember_this` | `ExplicitTool` | Append one durable fact to memory immediately, mid-conversation. |
-| `search_history` | `SearchHistoryTool` | FTS the user's *ended* conversations; returns each match's stored `Summary`. |
+| `search_history` | `SearchHistoryTool` | FTS the user's *ended* conversations; returns each match's stored `Summary` plus its `conversation_id`. |
+| `restore_conversation` | `SearchHistoryTool` | Resume a past (ended) conversation as the active session: closes the current one exactly like `end_conversation`, starts a fresh conversation, and replays the target conversation's plain user/assistant text turns into it (no tool calls/results) via `history.AppendMessage` — see `internal/agent_loop/restore.go`. Takes an optional `conversation_id` (from a prior `search_history` call); omitted, it resolves to `history.LastEndedConversation` for "давай вернёмся к последнему диалогу". Ownership (`UserID`) and `EndedAt != nil` are re-checked server-side, never trusted from the model's argument. |
 | `end_conversation` | `EndConversationTool` | Close the current session immediately — same `summarizeConversation` path as an idle-timeout close: recap + durable facts are written, conversation stays in history (just excluded from future `OpenConversation` lookups). Use for "let's start a new conversation" — the old one is worth remembering. |
 | `forget_conversation` | `ForgetConversationTool` | Delete the current conversation entirely — no summarization, no memory write, `DeleteConversation` removes messages/tool_calls/FTS rows outright. Use for "forget this"/"start over" — nothing from it should persist anywhere. |
 | `speak_reply` | `config.TTSConfig.SpeakReplyTool` | Dispatch the given `text` to `tts.primary`, even on a non-`ha_assist` source. |

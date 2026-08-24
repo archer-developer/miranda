@@ -21,6 +21,13 @@ import (
 type turnControl struct {
 	endRequested    bool
 	forgetRequested bool
+	// restoreConversationID is set by executeTool when the model calls
+	// restore_conversation, naming the past conversation (already ended) to
+	// bring back as the new active session — "" means no restore was
+	// requested this turn. Deferred exactly like endRequested/
+	// forgetRequested: Handle only acts on it after this turn's own reply is
+	// safely recorded — see Orchestrator.restoreConversation.
+	restoreConversationID string
 	// loadedGroups accumulates which lazy MCP server names load_tool_group
 	// has expanded so far THIS turn — reset implicitly every turn since
 	// turnControl is constructed fresh in Handle. Never persisted to

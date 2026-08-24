@@ -371,6 +371,31 @@ func (s *Store) GetConversation(ctx context.Context, conversationID string) (*Co
 	return c, nil
 }
 
+// LastEndedConversation returns userID's most recently ended conversation
+// (newest by EndedAt), or nil if they have none — backs the
+// restore_conversation tool's "давай вернёмся к последнему диалогу" case,
+// when the user wants the previous conversation resumed without having
+// named it via search_history first. The currently open conversation (if
+// any) is never returned: ended_at IS NULL is excluded, same as
+// SearchConversations.
+func (s *Store) LastEndedConversation(ctx context.Context, userID string) (*Conversation, error) {
+	row := s.db.QueryRowContext(ctx, `
+		SELECT id, user_id, source, started_at, ended_at, COALESCE(summary, ''), COALESCE(system_prompt, '')
+		FROM conversations
+		WHERE user_id = ? AND ended_at IS NOT NULL
+		ORDER BY ended_at DESC
+		LIMIT 1`, userID)
+
+	c, err := scanConversation(row)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("history: query last ended conversation: %w", err)
+	}
+	return c, nil
+}
+
 func scanConversation(row *sql.Row) (*Conversation, error) {
 	var c Conversation
 	var endedAt sql.NullTime

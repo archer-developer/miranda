@@ -46,6 +46,12 @@ const rememberToolName = "remember_this"
 
 const searchHistoryToolName = "search_history"
 
+// restoreConversationToolName names the tool that resumes a past
+// conversation found via search_history (or the most recent one) as the new
+// active session — see turnControl.restoreConversationID and
+// Orchestrator.restoreConversation.
+const restoreConversationToolName = "restore_conversation"
+
 const endConversationToolName = "end_conversation"
 
 const forgetConversationToolName = "forget_conversation"
@@ -87,6 +93,7 @@ func ReservedToolNames() []string {
 	names := []string{
 		rememberToolName,
 		searchHistoryToolName,
+		restoreConversationToolName,
 		endConversationToolName,
 		forgetConversationToolName,
 		speakReplyToolName,
@@ -727,10 +734,10 @@ func (o *Orchestrator) Handle(ctx context.Context, req InputRequest) (InputRespo
 	o.publishChatMessage(userID, convID, history.Message{ID: assistantMsgID, ConversationID: convID, Role: "assistant", Content: finalText, Downloads: downloads})
 
 	// Applied after the reply is recorded (and, via TTS, already spoken) so
-	// an end/forget request never costs the user their answer to this turn.
-	// Both are best-effort: a failure here shouldn't fail a turn the user
-	// already got a correct reply to, just leave the conversation open for
-	// the next sweep/turn to retry against.
+	// an end/forget/restore request never costs the user their answer to
+	// this turn. All three are best-effort: a failure here shouldn't fail a
+	// turn the user already got a correct reply to, just leave the
+	// conversation open for the next sweep/turn to retry against.
 	switch {
 	case control.forgetRequested:
 		if err := o.history.DeleteConversation(ctx, convID); err != nil {
@@ -739,6 +746,8 @@ func (o *Orchestrator) Handle(ctx context.Context, req InputRequest) (InputRespo
 			o.clearConversationMemory(convID)
 			o.hub.Publish(hub.Event{Source: "chat", UserID: userID, Data: ChatEvent{Type: "conversation_deleted", ConversationID: convID}})
 		}
+	case control.restoreConversationID != "":
+		o.restoreConversation(ctx, convID, userID, req.Source, control.restoreConversationID)
 	case control.endRequested:
 		if err := o.summarizeConversation(ctx, convID, userID); err != nil {
 			o.hub.Publish(hub.Event{Source: "error", Message: "end conversation: " + err.Error()})

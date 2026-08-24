@@ -75,7 +75,9 @@ func (o *Orchestrator) availableTools(ctx context.Context, userID string, contro
 		add(llm.ToolDef{
 			Name: searchHistoryToolName,
 			Description: "Search this user's past conversations for something they said earlier — use it when " +
-				"they reference an earlier conversation (e.g. \"помнишь мы говорили о...\", \"remember when we talked about...\").",
+				"they reference an earlier conversation (e.g. \"помнишь мы говорили о...\", \"remember when we talked about...\"). " +
+				"Each result includes a conversation_id — if the user then asks to go back to one of these conversations " +
+				"(e.g. \"давай вернёмся к этому диалогу\"), pass that id to restore_conversation.",
 			Parameters: map[string]any{
 				"type": "object",
 				"properties": map[string]any{
@@ -85,6 +87,29 @@ func (o *Orchestrator) availableTools(ctx context.Context, userID string, contro
 					},
 				},
 				"required": []string{"query"},
+			},
+		})
+
+		add(llm.ToolDef{
+			Name: restoreConversationToolName,
+			Description: "Resume a past conversation as the new active session — use when the user explicitly asks " +
+				"to go back to an earlier dialog (e.g. \"давай вернёмся к диалогу [где мы говорили про ...]\", " +
+				"\"let's go back to that conversation\"). Ends the current conversation normally (it's still summarized " +
+				"and searchable afterward) and replays the past conversation's own text — questions and answers only, " +
+				"no tool activity — as this session's history going forward, so the conversation continues from where " +
+				"it left off. Combine with search_history first when the user describes which conversation they mean " +
+				"(e.g. \"про сушку снеков\") rather than naming it directly.",
+			Parameters: map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"conversation_id": map[string]any{
+						"type": "string",
+						"description": "the conversation_id from a search_history result — omit this (or pass an " +
+							"empty string) when the user asks for the last/most recent past conversation " +
+							"(e.g. \"давай вернёмся к последнему диалогу\") without naming a specific one",
+					},
+				},
+				"required": []string{},
 			},
 		})
 	}

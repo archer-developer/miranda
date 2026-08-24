@@ -64,9 +64,47 @@ func (o *Orchestrator) executeTool(ctx context.Context, userID, conversationID s
 		}
 		var b strings.Builder
 		for _, c := range results {
-			fmt.Fprintf(&b, "[%s] %s\n", c.StartedAt.Format("2006-01-02"), c.Summary)
+			fmt.Fprintf(&b, "conversation_id=%s [%s] %s\n", c.ID, c.StartedAt.Format("2006-01-02"), c.Summary)
 		}
 		return b.String()
+	}
+
+	if tc.Name == restoreConversationToolName {
+		var args struct {
+			ConversationID string `json:"conversation_id"`
+		}
+		if err := json.Unmarshal([]byte(tc.Arguments), &args); err != nil {
+			return fmt.Sprintf("error: invalid arguments: %v", err)
+		}
+
+		targetID := args.ConversationID
+		if targetID == "" {
+			last, err := o.history.LastEndedConversation(ctx, userID)
+			if err != nil {
+				return fmt.Sprintf("error: %v", err)
+			}
+			if last == nil {
+				return "no past conversations found"
+			}
+			targetID = last.ID
+		}
+
+		// Ownership and EndedAt are both re-checked here rather than trusted
+		// from the model's argument: conversation_id is model-supplied input
+		// (normally copied from a search_history result, but nothing stops a
+		// model from inventing one), so a wrong or cross-user id must fail
+		// closed instead of restoring someone else's dialog or the current
+		// (still-open) conversation into itself.
+		target, err := o.history.GetConversation(ctx, targetID)
+		if err != nil {
+			return fmt.Sprintf("error: %v", err)
+		}
+		if target == nil || target.UserID != userID || target.EndedAt == nil {
+			return "error: no such past conversation"
+		}
+
+		control.restoreConversationID = targetID
+		return "restoring that conversation now — it will become the active session"
 	}
 
 	if tc.Name == loadToolGroupToolName {

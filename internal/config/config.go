@@ -506,9 +506,12 @@ type MemoryConfig struct {
 	// SearchHistoryTool exposes a search_history tool the model can call when
 	// the user references an earlier conversation ("помнишь мы говорили о
 	// ...") — a full-text lookup over past (ended) conversations in
-	// internal/history, returning each match's stored summary rather than
-	// raw messages, distinct from the distilled facts in the per-user memory
-	// file.
+	// internal/history, returning each match's stored summary (plus its
+	// conversation_id) rather than raw messages, distinct from the distilled
+	// facts in the per-user memory file. Also gates the companion
+	// restore_conversation tool ("давай вернёмся к диалогу...") — the two are
+	// offered together since restoring only makes sense once search_history
+	// can find something to restore.
 	SearchHistoryTool bool `yaml:"search_history_tool"`
 	// EndConversationTool exposes an end_conversation tool the model can call
 	// when the user explicitly asks to start a new conversation ("давай

@@ -156,7 +156,9 @@ memory:
   # sends back), so this is what actually governs session boundaries.
   session_idle_timeout_minutes: 25
   # Lets the model call search_history when the user references an earlier
-  # conversation ("помнишь мы говорили о...").
+  # conversation ("помнишь мы говорили о..."), and the companion
+  # restore_conversation tool to resume one as the active session ("давай
+  # вернёмся к диалогу...", "давай вернёмся к последнему диалогу").
   search_history_tool: true
   # Lets the model call end_conversation when the user asks to start a new
   # conversation, ending the session immediately instead of waiting for the

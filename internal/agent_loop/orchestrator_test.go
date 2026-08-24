@@ -558,9 +558,12 @@ func TestOrchestrator_SearchHistoryToolFindsPastConversation(t *testing.T) {
 	require.Equal(t, "Да, ты говорил про отпуск в Италии.", resp.Reply)
 
 	// The tool result fed back to the model must contain the earlier
-	// conversation's summary.
+	// conversation's summary, plus its conversation_id — restore_conversation
+	// needs that id to bring the conversation back (see
+	// TestOrchestrator_RestoreConversationToolReplaysTextOnlyHistoryIntoNewSession).
 	lastReqMessages := provider.Requests[len(provider.Requests)-1].Messages
 	require.Contains(t, lastReqMessages[len(lastReqMessages)-1].Content, "trip to Italy")
+	require.Contains(t, lastReqMessages[len(lastReqMessages)-1].Content, "conversation_id=")
 }
 
 func TestOrchestrator_SearchHistoryToolReportsNoMatches(t *testing.T) {
@@ -661,6 +664,184 @@ func TestOrchestrator_ForgetConversationToolDeletesConversationEntirely(t *testi
 	content, err := mem.Read("alex")
 	require.NoError(t, err)
 	require.Empty(t, content)
+}
+
+// newTestHistoryStore opens a standalone history.Store, independent of
+// newTestOrchestrator, so a restore_conversation test can seed a source
+// conversation — and learn its real, uuid-generated id — before scripting a
+// FakeProvider whose canned tool call needs to reference that id.
+func newTestHistoryStore(t *testing.T) *history.Store {
+	t.Helper()
+	h, err := history.Open(filepath.Join(t.TempDir(), "miranda.db"))
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = h.Close() })
+	return h
+}
+
+// newTestOrchestratorWithStore is like newTestOrchestrator but takes an
+// already-open history.Store instead of creating its own — used by the
+// restore_conversation tests below, which need to seed history (via
+// newTestHistoryStore) before the FakeProvider's script can be written,
+// since the script needs to reference a real conversation id.
+func newTestOrchestratorWithStore(t *testing.T, provider *llmtest.FakeProvider, h *history.Store) *Orchestrator {
+	t.Helper()
+
+	r, err := router.New([]llm.Provider{provider}, selfEscalation(provider.Name()), "")
+	require.NoError(t, err)
+
+	mem, err := memory.New(t.TempDir())
+	require.NoError(t, err)
+
+	o := NewOrchestrator(
+		r, mcp.NewManager(nil), h, mem, nil, hub.New(100, nil), nil,
+		config.AgentConfig{},
+		config.MemoryConfig{
+			ExplicitTool: true, AutoSummarize: true, SearchHistoryTool: true,
+			EndConversationTool: true, ForgetConversationTool: true,
+		},
+		config.TTSConfig{},
+		100, "debug",
+	)
+	return o
+}
+
+// TestOrchestrator_RestoreConversationToolReplaysTextOnlyHistoryIntoNewSession
+// is the main restore_conversation flow: given a conversation_id (as the
+// model would have gotten it from a search_history result — see
+// TestOrchestrator_SearchHistoryToolFindsPastConversation), the tool must
+// close the currently open conversation exactly like end_conversation and
+// start a fresh one seeded with the source conversation's plain text turns
+// only — a tool-calling assistant turn (empty Content, only ToolCalls) and
+// the "tool" result answering it must both be dropped, not replayed.
+func TestOrchestrator_RestoreConversationToolReplaysTextOnlyHistoryIntoNewSession(t *testing.T) {
+	ctx := context.Background()
+	h := newTestHistoryStore(t)
+
+	// Seed a past, already-ended conversation directly in history — this
+	// stands in for a real conversation the idle sweep or end_conversation
+	// already closed, with a tool-calling turn mixed into its text turns.
+	sourceID, err := h.StartConversation(ctx, "alex", "cli")
+	require.NoError(t, err)
+	_, err = h.AppendMessage(ctx, sourceID, "user", "как сушить снеки дома?")
+	require.NoError(t, err)
+	_, err = h.AppendAssistantMessage(ctx, sourceID, "", []history.ToolCallRef{{ID: "call-1", Name: "some_tool", Arguments: "{}"}}, nil)
+	require.NoError(t, err)
+	_, err = h.AppendToolResultMessage(ctx, sourceID, "call-1", "tool result payload")
+	require.NoError(t, err)
+	_, err = h.AppendAssistantMessage(ctx, sourceID, "Суши при 60 градусах 6 часов.", nil, nil)
+	require.NoError(t, err)
+	require.NoError(t, h.EndConversationWithSummary(ctx, sourceID, "User asked about drying snacks at home."))
+
+	restoreArgs := fmt.Sprintf(`{"conversation_id":%q}`, sourceID)
+	provider := llmtest.New("local",
+		llmtest.Response{ToolCall: &llm.ToolCall{ID: "call-2", Name: "restore_conversation", Arguments: restoreArgs}},
+		llmtest.Response{Text: "Возвращаемся к разговору о сушке снеков."},
+		// restoreConversation closes the conversation this turn belongs to
+		// exactly like end_conversation, via summarizeConversation — which,
+		// with AutoSummarize on, makes its own background distillation call.
+		llmtest.Response{Text: "## Summary\nUser asked to go back to the drying-snacks conversation.\n## Preferences\n"},
+	)
+	o := newTestOrchestratorWithStore(t, provider, h)
+
+	resp, err := o.Handle(ctx, InputRequest{Source: "cli", UserID: "alex", Text: "давай вернёмся к диалогу про сушку снеков"})
+	require.NoError(t, err)
+	require.Equal(t, "Возвращаемся к разговору о сушке снеков.", resp.Reply)
+
+	// The conversation this turn's reply was recorded under (the one open
+	// when Handle started) must now be closed, same as end_conversation.
+	closed, err := h.GetConversation(ctx, resp.ConversationID)
+	require.NoError(t, err)
+	require.NotNil(t, closed.EndedAt)
+
+	// A brand-new conversation must now be open for the user, seeded with
+	// only the source conversation's plain text turns, in order.
+	open, err := h.OpenConversation(ctx, "alex")
+	require.NoError(t, err)
+	require.NotNil(t, open)
+	require.NotEqual(t, resp.ConversationID, open.ID)
+	require.NotEqual(t, sourceID, open.ID)
+
+	restored, err := h.ConversationMessages(ctx, open.ID)
+	require.NoError(t, err)
+	require.Len(t, restored, 2, "the tool-call and tool-result turns must be dropped")
+	require.Equal(t, "user", restored[0].Role)
+	require.Equal(t, "как сушить снеки дома?", restored[0].Content)
+	require.Equal(t, "assistant", restored[1].Role)
+	require.Equal(t, "Суши при 60 градусах 6 часов.", restored[1].Content)
+}
+
+// TestOrchestrator_RestoreConversationToolDefaultsToLastEndedConversation
+// covers "давай вернёмся к последнему диалогу" — no conversation_id at all,
+// which must resolve to the user's most recently ended conversation via
+// history.LastEndedConversation.
+func TestOrchestrator_RestoreConversationToolDefaultsToLastEndedConversation(t *testing.T) {
+	ctx := context.Background()
+	h := newTestHistoryStore(t)
+
+	sourceID, err := h.StartConversation(ctx, "alex", "cli")
+	require.NoError(t, err)
+	_, err = h.AppendMessage(ctx, sourceID, "user", "какой у нас пароль от wifi?")
+	require.NoError(t, err)
+	_, err = h.AppendAssistantMessage(ctx, sourceID, "Пароль: qwerty123.", nil, nil)
+	require.NoError(t, err)
+	require.NoError(t, h.EndConversationWithSummary(ctx, sourceID, "User asked for the wifi password."))
+
+	provider := llmtest.New("local",
+		llmtest.Response{ToolCall: &llm.ToolCall{ID: "call-1", Name: "restore_conversation", Arguments: `{}`}},
+		llmtest.Response{Text: "Хорошо, вернулись к тому разговору."},
+		llmtest.Response{Text: "## Summary\nUser asked to go back to the wifi-password conversation.\n## Preferences\n"},
+	)
+	o := newTestOrchestratorWithStore(t, provider, h)
+
+	resp, err := o.Handle(ctx, InputRequest{Source: "cli", UserID: "alex", Text: "давай вернёмся к последнему диалогу"})
+	require.NoError(t, err)
+	require.Equal(t, "Хорошо, вернулись к тому разговору.", resp.Reply)
+
+	open, err := h.OpenConversation(ctx, "alex")
+	require.NoError(t, err)
+	require.NotNil(t, open)
+	restored, err := h.ConversationMessages(ctx, open.ID)
+	require.NoError(t, err)
+	require.Len(t, restored, 2)
+	require.Equal(t, "какой у нас пароль от wifi?", restored[0].Content)
+	require.Equal(t, "Пароль: qwerty123.", restored[1].Content)
+}
+
+// TestOrchestrator_RestoreConversationToolRejectsAnotherUsersConversation
+// guards ownership: conversation_id is model-supplied input (normally
+// copied from a search_history result, but nothing stops a model from
+// inventing one), so restoring across users — or restoring the currently
+// open conversation into itself — must fail closed instead of leaking
+// another household member's dialog.
+func TestOrchestrator_RestoreConversationToolRejectsAnotherUsersConversation(t *testing.T) {
+	ctx := context.Background()
+	h := newTestHistoryStore(t)
+
+	othersID, err := h.StartConversation(ctx, "someone-else", "cli")
+	require.NoError(t, err)
+	_, err = h.AppendMessage(ctx, othersID, "user", "чей-то секрет")
+	require.NoError(t, err)
+	require.NoError(t, h.EndConversationWithSummary(ctx, othersID, "Someone else's secret."))
+
+	restoreArgs := fmt.Sprintf(`{"conversation_id":%q}`, othersID)
+	provider := llmtest.New("local",
+		llmtest.Response{ToolCall: &llm.ToolCall{ID: "call-1", Name: "restore_conversation", Arguments: restoreArgs}},
+		llmtest.Response{Text: "Не нашёл такой диалог."},
+	)
+	o := newTestOrchestratorWithStore(t, provider, h)
+
+	resp, err := o.Handle(ctx, InputRequest{Source: "cli", UserID: "alex", Text: "давай вернёмся к диалогу " + othersID})
+	require.NoError(t, err)
+	require.Equal(t, "Не нашёл такой диалог.", resp.Reply)
+
+	// alex's own (still-open) conversation must be untouched — the rejection
+	// must never have set control.restoreConversationID.
+	stillOpen, err := h.GetConversation(ctx, resp.ConversationID)
+	require.NoError(t, err)
+	require.Nil(t, stillOpen.EndedAt)
+
+	lastReqMessages := provider.Requests[len(provider.Requests)-1].Messages
+	require.Contains(t, lastReqMessages[len(lastReqMessages)-1].Content, "no such past conversation")
 }
 
 func TestOrchestrator_SpeaksViaTTSForHAAssistSource(t *testing.T) {
