@@ -34,12 +34,18 @@ func (o *Orchestrator) recordAssistantToolCallMessage(ctx context.Context, userI
 }
 
 func (o *Orchestrator) recordToolCall(ctx context.Context, userID, conversationID string, tc llm.ToolCall, result string) {
-	msgID, err := o.history.AppendToolResultMessage(ctx, conversationID, tc.ID, result)
+	// context.Background() instead of ctx: ctx may already be cancelled if
+	// TurnTimeout fired during executeTool (e.g. a slow MCP call). These are
+	// fast local SQLite writes that must always succeed — without the
+	// tool_result row, history has an assistant tool_use with no matching
+	// result, and every subsequent turn for that conversation is rejected by
+	// Anthropic with "tool_use ids found without tool_result blocks".
+	msgID, err := o.history.AppendToolResultMessage(context.Background(), conversationID, tc.ID, result)
 	if err != nil {
 		o.hub.Publish(hub.Event{Source: "error", Message: "record tool call: " + err.Error()})
 		return
 	}
-	if err := o.history.AppendToolCall(ctx, msgID, tc.Name, "", tc.Arguments, result); err != nil {
+	if err := o.history.AppendToolCall(context.Background(), msgID, tc.Name, "", tc.Arguments, result); err != nil {
 		o.hub.Publish(hub.Event{Source: "error", Message: "record tool call detail: " + err.Error()})
 	}
 	o.publishChatMessage(userID, conversationID, history.Message{ID: msgID, ConversationID: conversationID, Role: "tool", Content: result, ToolCallID: tc.ID})
