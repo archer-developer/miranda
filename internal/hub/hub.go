@@ -40,7 +40,7 @@ type SourceLimit struct {
 type sourceBuf struct {
 	events []Event
 	sizes  []int // eventSize(events[i]), parallel to events
-	bytes  int    // running total of sizes, kept in sync with events/sizes
+	bytes  int   // running total of sizes, kept in sync with events/sizes
 }
 
 // Hub fans Events out to any number of subscribers and retains, per source,
