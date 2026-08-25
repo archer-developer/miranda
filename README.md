@@ -27,18 +27,19 @@ Desktop / Web UI ----> |     agent loop     | <---- Code sandbox
 
 ## Features at a glance
 
-| | |
-|---|---|
-| 🧠 **Any LLM** | Claude, Gemini, or anything OpenAI-compatible (Ollama, vLLM, OpenRouter, ...) — with automatic fallback and escalation |
-| 🏠 **Home Assistant** | Talks over HA's Voice Assist pipeline, and controls HA entities as a tool |
-| 🔊 **Yandex Station** | Speaks replies out loud — built-in voice or a Gemini-rendered one |
-| 💬 **Telegram** | Household members can chat with it from their phone |
-| 🌐 **Web dashboard** | Live logs, dialog history, passwordless login |
-| 🔍 **Web search** | Looks things up online when it doesn't know |
-| ⏰ **Scheduler** | One-off reminders and recurring routines, in plain language |
-| 🧩 **MCP tools** | Anything exposed over MCP — Home Assistant and beyond |
-| 🧾 **Memory** | Remembers facts and past conversations per person |
-| 🕶️ **Redaction** | Pin codes, passwords and API keys are masked before anything is written to disk |
+|                       |                                                                                                                        |
+|-----------------------|------------------------------------------------------------------------------------------------------------------------|
+| 🧠 **Any LLM**        | Claude, Gemini, or anything OpenAI-compatible (Ollama, vLLM, OpenRouter, ...) — with automatic fallback and escalation |
+| 🏠 **Home Assistant** | Talks over HA's Voice Assist pipeline, and controls HA entities as a tool                                              |
+| 🔊 **Yandex Station** | Speaks replies out loud — built-in voice or a Gemini-rendered one                                                      |
+| 💬 **Telegram**       | Household members can chat with it from their phone                                                                    |
+| 🌐 **Web dashboard**  | Live logs, dialog history, passwordless login                                                                          |
+| 🔍 **Web search**     | Looks things up online when it doesn't know                                                                            |
+| ⏰ **Scheduler**      | One-off reminders and recurring routines, in plain language                                                            |
+| 🧩 **MCP tools**      | Anything exposed over MCP — Home Assistant and beyond                                                                  |
+| 🧾 **Memory**         | Remembers facts across conversations, and can resume a specific past conversation on request                          |
+| 📅 **Calendar**       | Checks free/busy time, lists events, creates/updates/deletes them on Google Calendar                                   |
+| 🕶️ **Redaction**      | Pin codes, passwords and API keys are masked before anything is written to disk                                        |
 
 ## Contents
 
@@ -48,6 +49,8 @@ Desktop / Web UI ----> |     agent loop     | <---- Code sandbox
   - [MCP servers](#mcp-servers)
 - [Web tools](#web-tools)
 - [TTS](#tts)
+- [Memory & conversation history](#memory--conversation-history)
+- [Google Calendar](#google-calendar)
 - [Redaction](#redaction)
 - [Logging](#logging)
 - [Web UI](#web-ui)
@@ -249,6 +252,68 @@ tts:
 Every rendered file is cached permanently (content-addressed by model,
 voice, format, and text) — a cache hit skips calling Gemini entirely.
 
+## Memory & conversation history
+
+Two things persist across conversations, and both are per-person:
+
+- **Durable facts** — either saved immediately when the model calls
+  `remember_this` mid-conversation, or folded in by an end-of-session
+  summarization pass (`memory.auto_summarize`) as a safety net. Both write
+  to one markdown file per person (`data/memory/<user_id>.md`), read back
+  into the system prompt on every turn.
+- **Past conversations** — every conversation is kept in the history
+  database after it ends. The model can search them with `search_history`
+  when you reference something from before ("помнишь мы говорили о..."),
+  and resume a specific one as the *active* conversation with
+  `restore_conversation` ("давай вернёмся к тому разговору", or just
+  "к последнему диалогу" for whichever ended most recently).
+
+```yaml
+memory:
+  auto_summarize: true
+  explicit_tool: true # remember_this
+  search_history_tool: true # search_history + restore_conversation
+  session_idle_timeout_minutes: 25 # how long before an idle chat is closed and summarized
+```
+
+A conversation only closes (and becomes searchable/restorable) after it's
+been idle for `session_idle_timeout_minutes`, or the model calls
+`end_conversation` — asking "let's start fresh" doesn't lose it, it just
+ends it. `forget_conversation` is the other case: deletes the current
+conversation outright, no summary kept.
+
+## Google Calendar
+
+Lets Miranda check free/busy time, list events, and create, update, or
+delete events on a household member's own Google Calendar — connected
+per-person via OAuth, not a single shared account.
+
+```yaml
+oauth:
+  enabled: true
+  public_base_url: "https://miranda.example.com" # needs HTTPS, so a reverse proxy in front
+  master_key_env: "OAUTH_MASTER_KEY" # openssl rand -base64 32
+  providers:
+    - name: google_calendar
+      client_id_env: "GOOGLE_OAUTH_CLIENT_ID"
+      client_secret_env: "GOOGLE_OAUTH_CLIENT_SECRET"
+```
+
+1. Create an OAuth 2.0 Client ID (type "Web application") in the [Google
+   Cloud Console](https://console.cloud.google.com/apis/credentials), with
+   a redirect URI of `<public_base_url>/oauth/callback/google_calendar`.
+2. Set `GOOGLE_OAUTH_CLIENT_ID`/`GOOGLE_OAUTH_CLIENT_SECRET` and
+   `OAUTH_MASTER_KEY`, and enable `oauth` as above.
+3. Ask Miranda to connect your calendar — it calls `oauth_authorize` and
+   sends you a one-time link to sign in with Google. Once connected,
+   `calendar_list_calendars`, `calendar_list_events`, `calendar_freebusy`,
+   `calendar_create_event`, `calendar_update_event`, and
+   `calendar_delete_event` are available to every conversation of yours.
+
+This talks to the plain Calendar API v3 REST endpoints directly
+(`internal/calendar`) — not Google's hosted Calendar MCP server, which
+requires enrollment in the Google Workspace Developer Preview Program.
+
 ## Redaction
 
 Miranda masks sensitive values out of text **before writing it to disk**:
@@ -302,10 +367,10 @@ trigger, which is what the rules are built on.
 
 ## Logging
 
-| File | Contents |
-|---|---|
-| `logs/miranda.log` | Everything printed to the terminal, mirrored, size-rotated |
-| `logs/llm.log` | Every LLM request/response — system prompt, messages, tools, reply or error — tagged `conversation=<id>` |
+| File               | Contents                                                                                                 |
+|--------------------|----------------------------------------------------------------------------------------------------------|
+| `logs/miranda.log` | Everything printed to the terminal, mirrored, size-rotated                                               |
+| `logs/llm.log`     | Every LLM request/response — system prompt, messages, tools, reply or error — tagged `conversation=<id>` |
 
 `llm.log` is the tool for "why didn't the model do what I expected" —
 grep one dialog's turns out by its conversation id, across every provider
@@ -404,7 +469,7 @@ password permanently loses access to anything encrypted this way).
 
 ### Language
 
-Russian (default), Belarusian, and English — switch with the header's
+Belarusian (default), Russian and English — switch with the header's
 RU/BE/EN links, or set a per-user default via `language`. UI chrome only;
 what language you can *talk to Miranda in* is unconstrained.
 
@@ -485,12 +550,12 @@ your HA host.
 
 ### Troubleshooting
 
-| Symptom | Likely cause |
-|---|---|
-| Config flow shows "cannot_connect" | Wrong base URL, Miranda not running, or a network path issue. Test `curl http://<host>:8787/healthz` from the HA host. |
-| Assist can't reach Miranda | Same as above, or a non-200 reply — a 401 means the integration's bearer token doesn't match the value of the env var `server.auth_token_env` names. |
-| An entity is missing from Miranda's tools | Not toggled on under Voice Assistants → Expose. |
-| Logs show "mcp: failed to connect, will retry" | Check the MCP Server integration, the URL/port, and that `HA_MCP_TOKEN` is valid. Retries automatically — no restart needed once fixed. |
+| Symptom                                        | Likely cause                                                                                                                                         |
+|------------------------------------------------|------------------------------------------------------------------------------------------------------------------------------------------------------|
+| Config flow shows "cannot_connect"             | Wrong base URL, Miranda not running, or a network path issue. Test `curl http://<host>:8787/healthz` from the HA host.                               |
+| Assist can't reach Miranda                     | Same as above, or a non-200 reply — a 401 means the integration's bearer token doesn't match the value of the env var `server.auth_token_env` names. |
+| An entity is missing from Miranda's tools      | Not toggled on under Voice Assistants → Expose.                                                                                                      |
+| Logs show "mcp: failed to connect, will retry" | Check the MCP Server integration, the URL/port, and that `HA_MCP_TOKEN` is valid. Retries automatically — no restart needed once fixed.              |
 
 ---
 
