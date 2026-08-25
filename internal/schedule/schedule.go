@@ -71,6 +71,32 @@ type TaskRun struct {
 // Store is a SQLite-backed scheduled-task database.
 type Store struct {
 	db *sql.DB
+	// redactor, when set, masks a task's prompt on its way to disk. A
+	// scheduled prompt is ordinary user text ("напомни Ане пин-код 665533")
+	// and lives in two tables indefinitely, so it gets the same treatment as
+	// dialog history. May be nil. See internal/redact.
+	redactor Redactor
+}
+
+// Redactor masks sensitive values out of text on its way to disk. Declared
+// locally rather than imported from internal/redact, matching
+// history.Redactor and memory.Redactor.
+type Redactor interface {
+	Redact(string) string
+}
+
+// SetRedactor installs the redactor applied to every write. Call it before
+// the store is used; it is not safe to change concurrently with writes.
+func (s *Store) SetRedactor(r Redactor) {
+	s.redactor = r
+}
+
+// redact applies the configured redactor, if any.
+func (s *Store) redact(text string) string {
+	if s.redactor == nil {
+		return text
+	}
+	return s.redactor.Redact(text)
 }
 
 // Open creates (if needed) and opens the SQLite database at path, applying
@@ -149,7 +175,7 @@ func (s *Store) Create(ctx context.Context, task Task) (string, error) {
 	id := uuid.NewString()
 	if _, err := s.db.ExecContext(ctx,
 		`INSERT INTO scheduled_tasks (id, user_id, prompt, cron_expr, run_at, next_run_at) VALUES (?, ?, ?, ?, ?, ?)`,
-		id, task.UserID, task.Prompt, nullString(task.CronExpr), nullTime(task.RunAt), utc(task.NextRunAt),
+		id, task.UserID, s.redact(task.Prompt), nullString(task.CronExpr), nullTime(task.RunAt), utc(task.NextRunAt),
 	); err != nil {
 		return "", fmt.Errorf("schedule: create task: %w", err)
 	}
@@ -238,7 +264,7 @@ func (s *Store) RecordRun(ctx context.Context, task Task, status, errMsg string)
 	id := uuid.NewString()
 	if _, err := s.db.ExecContext(ctx,
 		`INSERT INTO scheduled_task_history (id, task_id, user_id, prompt, cron_expr, run_at, status, error) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-		id, task.ID, task.UserID, task.Prompt, nullString(task.CronExpr), nullTime(task.RunAt), status, nullString(errMsg),
+		id, task.ID, task.UserID, s.redact(task.Prompt), nullString(task.CronExpr), nullTime(task.RunAt), status, nullString(errMsg),
 	); err != nil {
 		return fmt.Errorf("schedule: record task run: %w", err)
 	}

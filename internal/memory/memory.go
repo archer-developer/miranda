@@ -33,6 +33,14 @@ func stripLeadingDate(fact string) string {
 	return leadingDateRe.ReplaceAllString(fact, "")
 }
 
+// Redactor masks sensitive values out of text on its way to disk. A
+// one-method interface rather than an import of internal/redact, for the same
+// reason history.Redactor is one: this package stays independent of the
+// engine and testable with a trivial fake.
+type Redactor interface {
+	Redact(string) string
+}
+
 // Store reads and writes per-user memory files under a root directory.
 type Store struct {
 	dir string
@@ -40,6 +48,13 @@ type Store struct {
 	// mu serializes writes per user so a remember_this call and an
 	// end-of-session summarization can't race and clobber each other.
 	mu sync.Mutex
+
+	// redactor, when set, masks the document on its way to disk. Applied in
+	// writeFile rather than in each of Remember/RememberShared/Write/
+	// ReplaceSection, since that is the one function all four funnel through
+	// — memory is the longest-lived sink in Miranda, so it is worth the
+	// choke point being structural. May be nil.
+	redactor Redactor
 }
 
 // New creates a Store rooted at dir, creating the directory if needed.
@@ -48,6 +63,12 @@ func New(dir string) (*Store, error) {
 		return nil, fmt.Errorf("memory: create dir %s: %w", dir, err)
 	}
 	return &Store{dir: dir}, nil
+}
+
+// SetRedactor installs the redactor applied to every write. Call it before
+// the store is used; it is not safe to change concurrently with writes.
+func (s *Store) SetRedactor(r Redactor) {
+	s.redactor = r
 }
 
 func (s *Store) path(userID string) string {
@@ -165,6 +186,13 @@ func (s *Store) writeLocked(userID, content string) error {
 // write-to-tmp then rename, so a crash mid-write never leaves a truncated
 // memory file in place — callers must hold s.mu (writeFile itself doesn't).
 func (s *Store) writeFile(path, content string) error {
+	if s.redactor != nil {
+		// The whole document is re-redacted on every write, not just the
+		// section that changed. Redact is idempotent, so already-masked
+		// entries are unaffected, and this way a fact that predates a lexicon
+		// change gets masked the next time anything touches the file.
+		content = s.redactor.Redact(content)
+	}
 	tmp := path + ".tmp"
 	if err := os.WriteFile(tmp, []byte(content), 0o644); err != nil {
 		return fmt.Errorf("memory: write %s: %w", path, err)

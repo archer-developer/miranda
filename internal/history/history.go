@@ -106,9 +106,42 @@ type Conversation struct {
 	SystemPrompt string `json:"system_prompt,omitempty"`
 }
 
+// Redactor masks sensitive values out of text on its way to disk. Declared
+// here as a one-method interface rather than importing internal/redact so
+// this package keeps no dependency on the engine and can be tested with a
+// trivial fake — the same reason Store takes it through a setter rather than
+// a constructor argument.
+type Redactor interface {
+	Redact(string) string
+}
+
 // Store is a SQLite-backed dialog history database.
 type Store struct {
 	db *sql.DB
+	// redactor, when set, is applied to every piece of free text on its way
+	// into the database — message content, tool arguments and results, system
+	// prompts, and recaps. This is the single choke point that makes it
+	// impossible for a new write path to forget to redact: SearchMessages and
+	// the FTS shadow tables follow automatically, because they only ever see
+	// what was already stored. May be nil, meaning redaction is disabled.
+	redactor Redactor
+}
+
+// SetRedactor installs the redactor applied to every write. Post-construction
+// rather than an Open argument, matching the optional-dependency style used
+// for router.SetTracer and the Orchestrator's own Set* methods. Call it
+// before the store is used; it is not safe to change concurrently with
+// writes.
+func (s *Store) SetRedactor(r Redactor) {
+	s.redactor = r
+}
+
+// redact applies the configured redactor, if any.
+func (s *Store) redact(text string) string {
+	if s.redactor == nil {
+		return text
+	}
+	return s.redactor.Redact(text)
 }
 
 // Open creates (if needed) and opens the SQLite database at path, applying
@@ -288,7 +321,7 @@ func (s *Store) EndConversation(ctx context.Context, conversationID string) erro
 // its recap, atomically — the summarization pass's normal write path.
 func (s *Store) EndConversationWithSummary(ctx context.Context, conversationID, summary string) error {
 	_, err := s.db.ExecContext(ctx,
-		`UPDATE conversations SET ended_at = CURRENT_TIMESTAMP, summary = ? WHERE id = ?`, summary, conversationID)
+		`UPDATE conversations SET ended_at = CURRENT_TIMESTAMP, summary = ? WHERE id = ?`, s.redact(summary), conversationID)
 	if err != nil {
 		return fmt.Errorf("history: end conversation with summary: %w", err)
 	}
@@ -300,7 +333,7 @@ func (s *Store) EndConversationWithSummary(ctx context.Context, conversationID, 
 // base-persona + memory snapshot actually sent to the model.
 func (s *Store) SetSystemPrompt(ctx context.Context, conversationID, prompt string) error {
 	_, err := s.db.ExecContext(ctx,
-		`UPDATE conversations SET system_prompt = ? WHERE id = ?`, prompt, conversationID)
+		`UPDATE conversations SET system_prompt = ? WHERE id = ?`, s.redact(prompt), conversationID)
 	if err != nil {
 		return fmt.Errorf("history: set system prompt: %w", err)
 	}
@@ -461,7 +494,7 @@ func (s *Store) IdleConversations(ctx context.Context, idleFor time.Duration) ([
 func (s *Store) AppendMessage(ctx context.Context, conversationID, role, content string) (int64, error) {
 	res, err := s.db.ExecContext(ctx,
 		`INSERT INTO messages (conversation_id, role, content) VALUES (?, ?, ?)`,
-		conversationID, role, content)
+		conversationID, role, s.redact(content))
 	if err != nil {
 		return 0, fmt.Errorf("history: append message: %w", err)
 	}
@@ -479,7 +512,16 @@ func (s *Store) AppendMessage(ctx context.Context, conversationID, role, content
 func (s *Store) AppendAssistantMessage(ctx context.Context, conversationID, content string, toolCalls []ToolCallRef, downloads []DownloadRef) (int64, error) {
 	var toolCallsJSON, downloadsJSON sql.NullString
 	if len(toolCalls) > 0 {
-		b, err := json.Marshal(toolCalls)
+		// Arguments are model-authored free text and routinely echo back
+		// whatever the user just said, so they get the same treatment as
+		// message content. Copied rather than redacted in place: the caller
+		// still needs the originals for the rest of this turn.
+		stored := make([]ToolCallRef, len(toolCalls))
+		copy(stored, toolCalls)
+		for i := range stored {
+			stored[i].Arguments = s.redact(stored[i].Arguments)
+		}
+		b, err := json.Marshal(stored)
 		if err != nil {
 			return 0, fmt.Errorf("history: encode tool calls: %w", err)
 		}
@@ -494,7 +536,7 @@ func (s *Store) AppendAssistantMessage(ctx context.Context, conversationID, cont
 	}
 	res, err := s.db.ExecContext(ctx,
 		`INSERT INTO messages (conversation_id, role, content, tool_calls_json, downloads_json) VALUES (?, 'assistant', ?, ?, ?)`,
-		conversationID, content, toolCallsJSON, downloadsJSON)
+		conversationID, s.redact(content), toolCallsJSON, downloadsJSON)
 	if err != nil {
 		return 0, fmt.Errorf("history: append assistant message: %w", err)
 	}
@@ -507,7 +549,7 @@ func (s *Store) AppendAssistantMessage(ctx context.Context, conversationID, cont
 func (s *Store) AppendToolResultMessage(ctx context.Context, conversationID, toolCallID, content string) (int64, error) {
 	res, err := s.db.ExecContext(ctx,
 		`INSERT INTO messages (conversation_id, role, content, tool_call_id) VALUES (?, 'tool', ?, ?)`,
-		conversationID, content, toolCallID)
+		conversationID, s.redact(content), toolCallID)
 	if err != nil {
 		return 0, fmt.Errorf("history: append tool result message: %w", err)
 	}
@@ -518,7 +560,7 @@ func (s *Store) AppendToolResultMessage(ctx context.Context, conversationID, too
 func (s *Store) AppendToolCall(ctx context.Context, messageID int64, toolName, mcpServer, requestJSON, responseJSON string) error {
 	_, err := s.db.ExecContext(ctx,
 		`INSERT INTO tool_calls (message_id, tool_name, mcp_server, request_json, response_json) VALUES (?, ?, ?, ?, ?)`,
-		messageID, toolName, mcpServer, requestJSON, responseJSON)
+		messageID, toolName, mcpServer, s.redact(requestJSON), s.redact(responseJSON))
 	if err != nil {
 		return fmt.Errorf("history: append tool call: %w", err)
 	}

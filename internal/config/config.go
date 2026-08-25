@@ -31,6 +31,7 @@ type Config struct {
 	FileUpload FileUploadConfig `yaml:"file_upload"`
 	OAuth      OAuthConfig      `yaml:"oauth"`
 	Backup     BackupConfig     `yaml:"backup"`
+	Redact     RedactConfig     `yaml:"redact"`
 	Users      []UserConfig     `yaml:"users"`
 }
 
@@ -784,6 +785,59 @@ type WebFetchToolConfig struct {
 	Enabled bool `yaml:"enabled"`
 }
 
+// RedactConfig controls the masking of sensitive values before text is
+// written to disk — the SQLite dialog log, the markdown memory files,
+// scheduled-task prompts, and the llm.log / anomalies traces. See
+// internal/redact for the engine and for what the boundary deliberately does
+// *not* cover (the in-flight request to the model still carries the user's
+// original words, so the assistant can act on a secret it was just told).
+//
+// This struct is shape-identical to redact.Config so cmd/miranda can convert
+// between them with a plain Go struct conversion — the same mirroring
+// convention used for miranda-llm's option structs (see this package's
+// CLAUDE.md). Keep the two in sync field for field.
+type RedactConfig struct {
+	// Enabled defaults true: unlike most gated features this needs no API
+	// key or URL, and silently writing unmasked secrets to disk is the worse
+	// failure mode of the two.
+	Enabled bool `yaml:"enabled"`
+	// MaxMaskLength caps how many asterisks one masked value becomes, so a
+	// redacted private key does not turn into a wall of them.
+	MaxMaskLength int `yaml:"max_mask_length"`
+	// WindowRunes is how far past a trigger word a value may *start* and
+	// still be treated as that trigger's value. Counted in runes, so the
+	// window is the same size in Russian as in English.
+	WindowRunes int `yaml:"window_runes"`
+	// Triggers are regexp fragments, not literals, so the lexicon can spell
+	// Russian morphology directly without a stemmer — `пин[-\s]?код[\p{L}]*`
+	// covers пинкод / пин-код / пин-кода / пин-кодом. Matching is
+	// case-insensitive, including for Cyrillic.
+	//
+	// As with `users` and `mcp.servers`, YAML replaces a list wholesale
+	// rather than merging it, so overriding this drops the built-in lexicon
+	// entirely. config.yaml.dist carries the full default list so an override
+	// can start as a copy-paste. To merely add a rule, prefer ExtraPatterns.
+	Triggers []string `yaml:"triggers"`
+	// TriggerExclusions suppress a trigger that matched inside a longer
+	// phrase. A trigger preceded by a letter or digit is already rejected as
+	// a mid-word match ("код" inside "промокод"), so this list is for the
+	// cases that check cannot see: hyphenated compounds like "штрих-код",
+	// where the preceding character is punctuation, and phrases like
+	// "код ошибки".
+	TriggerExclusions []string `yaml:"trigger_exclusions"`
+	// Formats names the self-identifying rules to switch on — values whose
+	// shape alone is evidence, needing no trigger word. The rules themselves
+	// are code (see internal/redact's registry, which also validates these
+	// names at startup), because several need a Go-level check a regexp
+	// cannot express, such as the card rule's Luhn checksum.
+	Formats []string `yaml:"formats"`
+	// ExtraPatterns are deployment-specific regexps, appended to the built-in
+	// rules rather than replacing them. When a pattern has a capture group,
+	// only group 1 is masked, so it can match context and redact just part of
+	// it. Compiled at startup by validateRedactPatterns.
+	ExtraPatterns []string `yaml:"extra_patterns"`
+}
+
 // YandexStationConfig configures the Yandex Station-specific TTS parameters.
 type YandexStationConfig struct {
 	ChunkMaxChars      int `yaml:"chunk_max_chars"`
@@ -1133,6 +1187,74 @@ func Default() Config {
 			Dir:             "./data/backups",
 			IntervalMinutes: 24 * 60,
 			RetentionCount:  7,
+		},
+		// On by default, unlike the other gated features above: this one
+		// needs no key or URL, and the failure mode of leaving it off —
+		// pin codes and passwords written verbatim into logs/llm.log and the
+		// dialog database, permanently — is worse than the failure mode of
+		// leaving it on, which is an over-eager mask in a log file.
+		Redact: RedactConfig{
+			Enabled:       true,
+			MaxMaskLength: 32,
+			WindowRunes:   40,
+			// Regexp fragments, matched case-insensitively (Cyrillic
+			// included). The trailing [\p{L}]* on the Russian stems is what
+			// stands in for a stemmer: it absorbs any case ending, so one
+			// entry covers пин-код / пин-кода / пин-кодом.
+			Triggers: []string{
+				`пин[-\s]?код[\p{L}]*`,
+				// Bare "пин" is safe alongside the compound above only
+				// because a trigger followed by a letter is rejected — it
+				// cannot fire inside "пингвин". See redact.endsWord.
+				`пин`,
+				`pin[-\s]?code`,
+				`\bpin\b`,
+				`парол[\p{L}]*`,
+				`password`,
+				`passphrase`,
+				`код[\p{L}]*`,
+				`\bcode\b`,
+				`секрет[\p{L}]*`,
+				`\bsecret\b`,
+				`ключ[\p{L}]*`,
+				`\bapi[-_\s]?key\b`,
+				`токен[\p{L}]*`,
+				`\btoken\b`,
+				`cvv`,
+				`cvc`,
+				`сид[-\s]?фраз[\p{L}]*`,
+				`seed[-\s]?phrase`,
+				`мнемоник[\p{L}]*`,
+				`mnemonic`,
+				`паспорт[\p{L}]*`,
+				`снилс`,
+				`\bинн\b`,
+			},
+			// A trigger preceded by a letter or digit is already rejected as
+			// a mid-word match, which handles "промокод" on its own. These
+			// are the cases that check cannot see: compounds whose separator
+			// is punctuation, and multi-word phrases.
+			TriggerExclusions: []string{
+				`штрих[-\s]?код[\p{L}]*`,
+				`qr[-\s]?код[\p{L}]*`,
+				`qr[-\s]?code`,
+				`почтов[\p{L}]*\s+код[\p{L}]*`,
+				`код[\p{L}]*\s+ошибки`,
+				`код[\p{L}]*\s+город[\p{L}]*`,
+				`код[\p{L}]*\s+стран[\p{L}]*`,
+				`код[\p{L}]*\s+региона`,
+				`error\s+code`,
+				`zip\s?code`,
+				`area\s+code`,
+			},
+			// Every rule in internal/redact's registry. Names are validated
+			// at startup, so a typo here fails the boot rather than silently
+			// disabling a rule.
+			Formats: []string{
+				"card", "jwt", "api_key", "telegram_token",
+				"bearer", "private_key", "snils", "iban",
+			},
+			ExtraPatterns: nil,
 		},
 		// No default Users: web UI login is mandatory and fails closed until
 		// config.yaml lists at least one account (see internal/users).

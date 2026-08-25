@@ -457,6 +457,111 @@ telegram:
   # TelegramConfig.RegisterWebhook in internal/config/config.go.
   register_webhook: true
 
+# Masks sensitive values out of text before it is written to disk — the
+# SQLite dialog log (including its FTS index), the markdown memory files,
+# scheduled-task prompts, and logs/llm.log + logs/anomalies/. Detection is
+# deterministic: a trigger lexicon plus a short proximity window, and a set of
+# self-identifying formats. See internal/redact for the engine.
+#
+#   "пин-код от телефона Ани 665533"  ->  "пин-код от телефона Ани ******"
+#
+# The boundary is the *disk*, not the network. The in-flight request still
+# carries the user's original words to the model, so the assistant can act on
+# a secret it was just told — but the next turn replays the conversation from
+# SQLite, so it reads the masked text and no longer knows the value. Masking
+# is irreversible: there is no vault and no un-masking path.
+#
+# On by default, unlike the other gated features above: this one needs no key
+# or URL, and writing pin codes verbatim into a permanent log is the worse
+# failure mode of the two.
+redact:
+  enabled: true
+  # Asterisks one masked value becomes, at most. The whole matched span is
+  # always replaced; this only bounds how many stars stand in for it, so a
+  # redacted private key doesn't become a wall of them.
+  max_mask_length: 32
+  # How far past a trigger word a value may *start* and still count as that
+  # trigger's value, in runes. 40 is sized off the example above, which puts
+  # 18 characters of ordinary Russian between "пин-код" and the number. This
+  # does not bound how *long* a value may be — a long API key right after
+  # "пароль:" is still masked whole.
+  window_runes: 40
+  # Regexp fragments, not literals, matched case-insensitively (Cyrillic
+  # included). The trailing [\p{L}]* on the Russian stems stands in for a
+  # stemmer: one entry covers пин-код / пин-кода / пин-кодом.
+  #
+  # NOTE: as with `users` and `mcp.servers`, YAML replaces a list wholesale
+  # rather than merging it — uncommenting this drops the built-in lexicon
+  # entirely, so copy the whole list if you override it. To merely *add* a
+  # rule, use extra_patterns below instead. The list here is the shipped
+  # default, verbatim from internal/config.Default().
+  # A trigger is also rejected when a letter *follows* it, which is what
+  # makes a bare stem like 'пин' safe to list: it cannot fire inside
+  # "пингвин". A following digit is still allowed, so "пин1234" is caught.
+  # triggers:
+  #   - 'пин[-\s]?код[\p{L}]*'
+  #   - 'пин'
+  #   - 'pin[-\s]?code'
+  #   - '\bpin\b'
+  #   - 'парол[\p{L}]*'
+  #   - 'password'
+  #   - 'passphrase'
+  #   - 'код[\p{L}]*'
+  #   - '\bcode\b'
+  #   - 'секрет[\p{L}]*'
+  #   - '\bsecret\b'
+  #   - 'ключ[\p{L}]*'
+  #   - '\bapi[-_\s]?key\b'
+  #   - 'токен[\p{L}]*'
+  #   - '\btoken\b'
+  #   - 'cvv'
+  #   - 'cvc'
+  #   - 'сид[-\s]?фраз[\p{L}]*'
+  #   - 'seed[-\s]?phrase'
+  #   - 'мнемоник[\p{L}]*'
+  #   - 'mnemonic'
+  #   - 'паспорт[\p{L}]*'
+  #   - 'снилс'
+  #   - '\bинн\b'
+  #
+  # Suppress a trigger that matched inside a longer phrase. A trigger
+  # preceded by a letter or digit is already rejected as a mid-word match, so
+  # "код" inside "промокод" needs no entry here — this list is for the cases
+  # that check cannot see: hyphenated compounds, where the preceding
+  # character is punctuation, and multi-word phrases.
+  # trigger_exclusions:
+  #   - 'штрих[-\s]?код[\p{L}]*'
+  #   - 'qr[-\s]?код[\p{L}]*'
+  #   - 'qr[-\s]?code'
+  #   - 'почтов[\p{L}]*\s+код[\p{L}]*'
+  #   - 'код[\p{L}]*\s+ошибки'
+  #   - 'код[\p{L}]*\s+город[\p{L}]*'
+  #   - 'код[\p{L}]*\s+стран[\p{L}]*'
+  #   - 'код[\p{L}]*\s+региона'
+  #   - 'error\s+code'
+  #   - 'zip\s?code'
+  #   - 'area\s+code'
+  #
+  # Self-identifying values, masked with no trigger word needed. The rules
+  # themselves are code (several need a check a regexp can't express — the
+  # card rule verifies a Luhn checksum), so this only switches them on. An
+  # unknown name here fails startup rather than silently doing nothing.
+  #   card            13-19 digits with a valid Luhn checksum
+  #   jwt             eyJ........
+  #   api_key         sk-/sk-ant-/ghp_/AIza/xox?- prefixed keys
+  #   telegram_token  <bot id>:<35-char secret>
+  #   bearer          the credential after "Bearer ", keeping the label
+  #   private_key     the body between PEM markers, keeping the markers
+  #   snils           ###-###-### ##
+  #   iban
+  formats: [card, jwt, api_key, telegram_token, bearer, private_key, snils, iban]
+  # Deployment-specific patterns, *appended* to the built-in rules rather
+  # than replacing them. With a capture group, only group 1 is masked, so a
+  # pattern can match context and redact just part of it. Compiled at
+  # startup, so a broken regexp fails the boot.
+  extra_patterns: []
+  # - 'ACME-(\d{6})'
+
 # Web UI login is mandatory — with no users listed here, the dashboard is
 # unreachable (fails closed by design, not a bug). Generate a password hash
 # with `go run ./cmd/hashpw <password>`; plaintext passwords are never

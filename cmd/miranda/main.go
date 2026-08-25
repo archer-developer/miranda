@@ -38,6 +38,7 @@ import (
 	"github.com/archer-developer/miranda/internal/mcp"
 	"github.com/archer-developer/miranda/internal/memory"
 	"github.com/archer-developer/miranda/internal/oauth2"
+	"github.com/archer-developer/miranda/internal/redact"
 	"github.com/archer-developer/miranda/internal/schedule"
 	"github.com/archer-developer/miranda/internal/session"
 	"github.com/archer-developer/miranda/internal/tavily"
@@ -251,16 +252,35 @@ func run(cfg config.Config, logger *slog.Logger, eventHub *hub.Hub, configDir st
 	// safe despite the tracer being installed once, globally, below.
 	llmTracer := &llmtrace.ContextTracer{Default: llmtrace.New(io.MultiWriter(llmTraceFile, eventHub.LLMTraceWriter("llm_log")))}
 
+	// Built before any store that will use it, so a bad lexicon or an unknown
+	// format-rule name fails the boot rather than surfacing on the first
+	// message that would have been masked. A nil redactor (redaction turned
+	// off) is a working pass-through, so every SetRedactor call below is
+	// unconditional. Note this is the *opposite* of the webauthnSvc case
+	// further down: there a nil pointer in an interface is a footgun, here it
+	// is the intended design — (*redact.Redactor).Redact has a nil-receiver
+	// path, so the non-nil interface wrapping a nil pointer behaves exactly
+	// as a disabled redactor should.
+	redactor, err := redact.New(redact.Config(cfg.Redact))
+	if err != nil {
+		return err
+	}
+	if redactor == nil {
+		logger.Warn("redaction is disabled — pin codes, passwords and API keys will be written verbatim to the dialog history, memory files and logs/llm.log")
+	}
+
 	historyStore, err := history.Open(cfg.Storage.SQLitePath)
 	if err != nil {
 		return err
 	}
 	defer func() { _ = historyStore.Close() }()
+	historyStore.SetRedactor(redactor)
 
 	memoryStore, err := memory.New(cfg.Storage.MemoryDir)
 	if err != nil {
 		return err
 	}
+	memoryStore.SetRedactor(redactor)
 
 	var scheduleStore *schedule.Store
 	if cfg.Schedule.Enabled {
@@ -269,6 +289,7 @@ func run(cfg config.Config, logger *slog.Logger, eventHub *hub.Hub, configDir st
 			return err
 		}
 		defer func() { _ = scheduleStore.Close() }()
+		scheduleStore.SetRedactor(redactor)
 	}
 
 	// Created here (rather than at its previous spot right before
@@ -286,7 +307,14 @@ func run(cfg config.Config, logger *slog.Logger, eventHub *hub.Hub, configDir st
 	if err != nil {
 		return err
 	}
-	llmRouter.SetTracer(llmTracer)
+	// Masking wraps the *outer* ContextTracer rather than its Default. That
+	// one placement covers every consumer of a trace at once, because
+	// ContextTracer fans out below this point: logs/llm.log, the web UI's
+	// live LLM-trace tab, and the per-turn anomaly.Recorder that Handle
+	// attaches via ctx — which in turn is what keeps logs/anomalies/ clean.
+	// Wrapping Default instead would leave the ctx-attached recorder
+	// receiving the unmasked dump.
+	llmRouter.SetTracer(&redact.Tracer{Next: llmTracer, Redactor: redactor})
 
 	toolManager := connectMCP(ctx, cfg.MCP.Servers, logger)
 
@@ -362,6 +390,7 @@ func run(cfg config.Config, logger *slog.Logger, eventHub *hub.Hub, configDir st
 		cfg.Agent, cfg.Memory, cfg.TTS, ttsChunkMaxChars(cfg.TTS), defaultUserID,
 	)
 	orchestrator.SetLogger(logger)
+	orchestrator.SetRedactor(redactor)
 	// Unconditional, unlike medical-card's own equivalent wiring — Miranda's
 	// llm.log is always on (no debug-only gate), so there's always a real
 	// tracer for a turn's Recorder to tee onto. See agentloop.AnomalyConfig.

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"slices"
+	"strings"
 	"sync"
 	"time"
 
@@ -21,6 +22,7 @@ import (
 	"github.com/archer-developer/miranda/internal/mcp"
 	"github.com/archer-developer/miranda/internal/memory"
 	"github.com/archer-developer/miranda/internal/oauth2"
+	"github.com/archer-developer/miranda/internal/redact"
 	"github.com/archer-developer/miranda/internal/replyformat"
 	"github.com/archer-developer/miranda/internal/schedule"
 	"github.com/archer-developer/miranda/internal/telegram"
@@ -231,7 +233,10 @@ type Orchestrator struct {
 	// request/response trace, not in the app log/journal or the web UI's
 	// live Logs screen (this logger is wired to mirror into both — see
 	// cmd/miranda.setupLogging).
-	logger           *slog.Logger
+	logger *slog.Logger
+	// redactor is set via SetRedactor and used only to report how much a turn
+	// masked — the actual masking is the stores' job. nil means no reporting.
+	redactor         *redact.Redactor
 	users            *users.Registry // may be nil: falls back to the raw user id in the system prompt
 	memoryCfg        config.MemoryConfig
 	ttsCfg           config.TTSConfig
@@ -470,6 +475,38 @@ func (o *Orchestrator) SetLogger(logger *slog.Logger) {
 	o.logger = logger
 }
 
+// SetRedactor wires in the redactor for observability only. The stores do
+// their own masking (see history.Store.SetRedactor) — this copy exists purely
+// so a turn can report *how much* it redacted, which is otherwise invisible:
+// the masking happens deep inside a store, and over-masking is the failure
+// mode worth being able to notice. Optional, nil-safe, same posture as every
+// other Set*.
+func (o *Orchestrator) SetRedactor(r *redact.Redactor) {
+	o.redactor = r
+}
+
+// logRedactions reports how many values this turn's user text would have
+// masked, and under which rules — never the values themselves, which is the
+// entire reason redact.Finding carries offsets instead of text.
+//
+// Gated on the logger actually being at debug level, so the extra scan costs
+// nothing in normal operation.
+func (o *Orchestrator) logRedactions(ctx context.Context, convID, text string) {
+	if o.redactor == nil || o.logger == nil || !o.logger.Enabled(ctx, slog.LevelDebug) {
+		return
+	}
+	_, findings := o.redactor.RedactWithFindings(text)
+	if len(findings) == 0 {
+		return
+	}
+	rules := make([]string, 0, len(findings))
+	for _, f := range findings {
+		rules = append(rules, f.Rule)
+	}
+	o.logger.Debug("orchestrator: redacted sensitive values before storing turn",
+		"conversationId", convID, "count", len(findings), "rules", strings.Join(rules, ","))
+}
+
 // MCPServerExtension bundles the config-driven, per-MCP-server behaviors
 // executeTool applies around a tool call routed to that server — replacing
 // what used to be three separate maps (encryption-key allowlist, session-id
@@ -642,6 +679,8 @@ func (o *Orchestrator) Handle(ctx context.Context, req InputRequest) (InputRespo
 	// used in the current turn's LLM message — not in history, since
 	// future replays don't re-send the image bytes.
 	userContent, imageParts := o.processAttachments(userID, req.Text, req.Attachments)
+
+	o.logRedactions(ctx, convID, userContent)
 
 	userMsgID, err := o.history.AppendMessage(ctx, convID, "user", userContent)
 	if err != nil {

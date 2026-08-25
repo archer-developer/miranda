@@ -43,6 +43,9 @@ Two independent stores back everything conversation- and memory-related:
 | Written by | `AppendMessage`/`AppendToolCall` every turn; `EndConversationWithSummary` on session close | `remember_this` tool (append); summarization pass (replace `## Preferences`); web UI editor (full overwrite) |
 | Read by | `search_history` tool (past, ended conversations only); web UI dialog browser (own conversations only) | Every turn, injected into the system prompt |
 
+Both are written through `internal/redact` — see **Redaction** below. Neither
+holds a raw pin code or password, even though the model saw one.
+
 ### Session ownership
 
 Session continuity is **server-owned, keyed only on user identity** —
@@ -145,17 +148,27 @@ flowchart LR
         preferences["## Preferences\n(replaced wholesale)"]
     end
 
-    remember_this["remember_this tool"] -->|append fact| remembered
-    summarize["idle sweep / end_conversation\n(summarizeConversation)"] -->|durable facts| preferences
-    summarize -->|1-3 sentence recap| conv
-    editor["Web UI: GET/PUT /api/memory\n(own user only)"] -->|full overwrite| MEM
+    remember_this["remember_this tool"] -->|append fact| redact
+    summarize["idle sweep / end_conversation\n(summarizeConversation)"] -->|durable facts| redact
+    summarize -->|1-3 sentence recap| redact
+    editor["Web UI: GET/PUT /api/memory\n(own user only)"] -->|full overwrite| redact
+    turn["every turn"] -->|Read| MEM
+    turn -->|Append/SetSystemPrompt| redact
+    turn -.->|AppendMessage| redact
+
+    redact{{"internal/redact\nmasks on the way to disk"}} --> remembered
+    redact --> preferences
+    redact --> conv
+    redact -.-> msg
+
     search["search_history tool"] -->|FTS lookup, ended conversations only| conv
     restore["restore_conversation tool"] -->|close current, then copy\nplain text turns into a new conv| conv
-    turn["every turn"] -->|Read| MEM
-    turn -->|Append/SetSystemPrompt| conv
-    turn -.->|AppendMessage| msg
     msg -.->|kept in sync via triggers| fts
 ```
+
+Every arrow into a store passes through `internal/redact` first — see
+**Redaction** below. `fts` is masked for free: it is populated by triggers on
+`messages`, so it only ever sees text that was already stored.
 
 ### Tools available to the model
 
@@ -183,6 +196,72 @@ MCP server extensions (encryption-key injection, session-id injection,
 file-download proxying) are bundled per server into `MCPServerExtension` —
 see `internal/mcp/CLAUDE.md` and `docs/adr/`.
 
+### Redaction
+
+`internal/redact` masks sensitive values out of text **before it reaches
+disk** — `"пин-код от телефона Ани 665533"` is stored as `"пин-код от
+телефона Ани ******"`. On by default (`config.RedactConfig`, unlike most
+gated features it needs no key or URL).
+
+**The boundary is the disk, not the network.** The in-flight request still
+carries the user's original words to the model, so the assistant can act on a
+secret it was just told. The next turn replays the conversation from SQLite,
+so it reads the masked text and no longer knows the value. This is deliberate;
+masking is irreversible, and there is no vault, no reveal in the web UI, and
+no un-masking CLI.
+
+Detection is deterministic — no model call, no map iteration, and `Redact` is
+idempotent so text copied sink-to-sink (e.g. `restore.go`) is not
+progressively mangled. Two rule families:
+
+- **Anchored**: a trigger word from the lexicon plus something value-shaped
+  within `window_runes` after it. This is what catches a bare six-digit
+  number, which no standalone pattern could flag without also flagging "мне 45
+  лет". The lexicon is *configuration* (`config.Default()`), and a trigger
+  preceded by a letter or digit is rejected as a mid-word match — that alone
+  handles "промокод"; `trigger_exclusions` covers what it can't see
+  (hyphenated compounds, phrases like "код ошибки").
+- **Format**: self-identifying values needing no trigger — Luhn-checked card,
+  JWT, prefixed API keys, PEM block, SNILS, IBAN. These are *code*, in this
+  package's registry; config only names which are on, and an unknown name
+  fails startup.
+
+Wired at the **sinks**, never at the call sites, so no future write path can
+forget:
+
+| Sink | Where |
+|---|---|
+| SQLite messages, tool calls, system prompts, recaps (and the FTS index, via triggers) | `history.Store.SetRedactor` — applied inside every `Append*`/`Set*` method |
+| `data/memory/*.md` | `memory.Store.SetRedactor` — applied in `writeFile`, the one function all four write paths funnel through |
+| `schedule` DB `prompt` (both tables) | `schedule.Store.SetRedactor` |
+| `logs/llm.log`, the web UI's live LLM-trace tab, **and** `logs/anomalies/` | `redact.Tracer` wrapping the **outer** `llmtrace.ContextTracer` in `cmd/miranda` — that one placement covers all three, because `ContextTracer` fans out below it (wrapping its `Default` instead would leave the ctx-attached `anomaly.Recorder` unmasked) |
+
+`internal/backup` needs nothing: it copies databases that are already masked.
+No `logger.*` call carries message text, so `logs/miranda.log` is clean by
+construction. Out of scope by design: the hub publishes to `/ws/chat` and
+`/ws/logs`, which are RAM plus the browser, not disk.
+
+Every value span is guaranteed free of `"` and `\`, and the mask character
+needs no escaping — that is what makes masking a marshalled request in
+`llm.log` structurally unable to produce invalid JSON, rather than merely
+unlikely to.
+
+**The accepted limit**: a bare value with no trigger word near it and no
+self-identifying format is *not* masked — `{"ok":"665533"}` stays as it is,
+because that number is indistinguishable from "мне 45 лет" without a model
+call, and masking every number a household assistant hears is worse. In
+practice the surrounding text carries the trigger (a tool result echoes the
+fact it just saved), which is why the end-to-end sweep passes on realistic
+data. `internal/redact.TestUntriggeredValueIsNotMasked` pins this down so the
+sweep isn't read as a stronger promise than it is.
+
+`TestSecretNeverReachesDisk` (`internal/redact/disk_boundary_test.go`) is the
+test that checks the actual promise: it drives every store with the shipped
+lexicon and then blind-walks the data directory looking for the raw value. It
+deliberately greps files rather than checking a list of columns, so a new
+table or a new sink that forgets to redact fails it without anyone remembering
+to extend it.
+
 ### Logging
 
 Two size-rotated files under `config.Logging.Dir` (`./logs` by default;
@@ -200,7 +279,11 @@ see `internal/config.LoggingConfig`):
   via the web UI's Logs screen "LLM trace" tab — both the CLI and the web
   UI's backend (`internal/hub.Hub.LLMTraceWriter`) parse this format through
   the same shared `miranda-llm/llmtrace/analyze` package, so neither service
-  maintains its own copy of that logic.
+  maintains its own copy of that logic. Note the blocks are **redacted** —
+  `redact.Tracer` masks each dump before `llmtrace` frames it, so a `*****`
+  in a trace is a real secret that was masked, not a bug. Turn
+  `redact.enabled` off temporarily if a trace is genuinely unreadable
+  because of it.
 
 ### Reviewing `logs/anomalies/`
 

@@ -38,6 +38,7 @@ Desktop / Web UI ----> |     agent loop     | <---- Code sandbox
 | ⏰ **Scheduler** | One-off reminders and recurring routines, in plain language |
 | 🧩 **MCP tools** | Anything exposed over MCP — Home Assistant and beyond |
 | 🧾 **Memory** | Remembers facts and past conversations per person |
+| 🕶️ **Redaction** | Pin codes, passwords and API keys are masked before anything is written to disk |
 
 ## Contents
 
@@ -47,6 +48,7 @@ Desktop / Web UI ----> |     agent loop     | <---- Code sandbox
   - [MCP servers](#mcp-servers)
 - [Web tools](#web-tools)
 - [TTS](#tts)
+- [Redaction](#redaction)
 - [Logging](#logging)
 - [Web UI](#web-ui)
   - [Login](#login)
@@ -247,6 +249,57 @@ tts:
 Every rendered file is cached permanently (content-addressed by model,
 voice, format, and text) — a cache hit skips calling Gemini entirely.
 
+## Redaction
+
+Miranda masks sensitive values out of text **before writing it to disk**:
+
+```
+you say:     пин-код от телефона Ани 665533
+gets stored: пин-код от телефона Ани ******
+```
+
+This covers the dialog database (and its search index), the memory files,
+scheduled-task prompts, `logs/llm.log` and `logs/anomalies/`. It's on by
+default — turn it off with `redact.enabled: false`.
+
+**The boundary is the disk, not the network.** The request Miranda sends to
+the model still contains what you actually typed, so the assistant can act on
+a pin code you just gave it. But the next turn replays the conversation from
+the database, so from then on it sees the mask. Masking is one-way: there is
+no vault, no "reveal" button, and no un-masking command.
+
+Detection is deterministic — no second model call, and the same input always
+gives the same output. Two kinds of rules:
+
+- **Trigger + nearby value** — a word like `пин-код`, `пароль`, `password`,
+  `cvv` followed by something value-shaped within ~40 characters. This is what
+  catches a bare six-digit number, which no pattern could flag on its own
+  without also flagging "мне 45 лет". Russian case endings are handled, and
+  "промокод" is correctly *not* a match for "код".
+- **Self-identifying formats** — no trigger needed: card numbers (verified by
+  Luhn checksum, so ordinary long numbers are safe), JWTs, `sk-`/`ghp_`/`AIza`
+  API keys, `Bearer` credentials, PEM private key blocks, SNILS, IBAN.
+
+Tune the trigger lexicon, the exclusion list and the window in the `redact:`
+section of `config.yaml.dist`. To add one deployment-specific pattern without
+replacing the built-in lexicon, use `extra_patterns`:
+
+```yaml
+redact:
+  extra_patterns:
+    - 'ACME-(\d{6})'   # with a capture group, only group 1 is masked
+```
+
+If a rule masks too much, the trigger lexicon is the first thing to narrow —
+and `log_level: debug` reports how many values each turn masked, and under
+which rules, without ever logging the values themselves.
+
+**What it won't catch.** A bare value with no trigger word near it and no
+recognisable format is left alone — a lone `665533` in the middle of nothing
+is indistinguishable from "мне 45 лет", and the alternative is masking every
+number you ever say. In normal use the words around a secret supply the
+trigger, which is what the rules are built on.
+
 ## Logging
 
 | File | Contents |
@@ -257,6 +310,9 @@ voice, format, and text) — a cache hit skips calling Gemini entirely.
 `llm.log` is the tool for "why didn't the model do what I expected" —
 grep one dialog's turns out by its conversation id, across every provider
 hop including escalation.
+
+Both files are redacted (see [Redaction](#redaction)), so a run of `*` in a
+trace is a masked secret rather than a bug.
 
 ## Web UI
 
