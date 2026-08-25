@@ -68,8 +68,25 @@ type UserConfig struct {
 
 // ServerConfig controls the unified command interface / web UI HTTP server.
 type ServerConfig struct {
-	HTTPAddr  string `yaml:"http_addr"`
-	AuthToken string `yaml:"auth_token"`
+	HTTPAddr string `yaml:"http_addr"`
+	// AuthTokenEnv names the environment variable holding the bearer token
+	// required on POST /api/v1/input and GET /ws/logs — never the token
+	// itself, same *_env convention as every other secret in this codebase.
+	//
+	// Worth knowing what an unset token means here, because it is not the
+	// usual "feature stays off": an empty token disables the bearer check
+	// entirely and every request is accepted (see
+	// httpapi.Server.bearerAuthorized). That is fine for a LAN-only dev box
+	// and decidedly not fine anywhere reachable from outside, so cmd/miranda
+	// warns loudly at startup when it resolves to empty.
+	AuthTokenEnv string `yaml:"auth_token_env"`
+	// AuthToken is the pre-*_env spelling, which held the token inline. It
+	// is kept solely so validateServerAuthToken can *reject* it: dropping
+	// the field outright would make YAML silently ignore the old key, and a
+	// deployment that had a token set would come back up with authentication
+	// quietly switched off. Failing the boot is the only safe way to migrate
+	// a credential.
+	AuthToken string `yaml:"auth_token,omitempty"`
 	// TLS optionally adds a second, HTTPS listener alongside HTTPAddr — see
 	// TLSConfig. Plain HTTP on HTTPAddr keeps working unconditionally either
 	// way; enabling TLS never disables it.
@@ -985,8 +1002,12 @@ type AgentConfig struct {
 func Default() Config {
 	return Config{
 		Server: ServerConfig{
-			HTTPAddr:  ":8787",
-			AuthToken: "",
+			HTTPAddr: ":8787",
+			// Named by default so enabling auth needs no config.yaml edit at
+			// all — just set MIRANDA_AUTH_TOKEN in the environment (or .env)
+			// and restart. Same posture as TavilyConfig.APIKeyEnv.
+			AuthTokenEnv: "MIRANDA_AUTH_TOKEN",
+			AuthToken:    "",
 			TLS: TLSConfig{
 				Enabled:  false,
 				Addr:     ":8443",
@@ -1360,7 +1381,33 @@ func Load(paths ...string) (Config, error) {
 	if err := validateOAuthServers(cfg); err != nil {
 		return cfg, err
 	}
+	if err := validateServerAuthToken(cfg); err != nil {
+		return cfg, err
+	}
 	return cfg, nil
+}
+
+// validateServerAuthToken rejects the retired inline `server.auth_token`
+// key. Secrets in this codebase are always named by a *_env field, never
+// written into YAML, and this one was the lone exception until it moved to
+// AuthTokenEnv.
+//
+// The check exists rather than the field simply being deleted because of how
+// the failure would otherwise look: YAML ignores keys with no matching
+// struct field, so a deployment that had a token configured would restart
+// perfectly happily with AuthTokenEnv unset — which does not mean "no token
+// required", it means the bearer check is skipped and every request is
+// accepted (httpapi.Server.bearerAuthorized). A credential migration that
+// can silently disable authentication has to fail loudly instead.
+func validateServerAuthToken(cfg Config) error {
+	if cfg.Server.AuthToken == "" {
+		return nil
+	}
+	return fmt.Errorf("config: server.auth_token is no longer supported — it held a secret inline. " +
+		"Move the value into an environment variable and name it with server.auth_token_env " +
+		"(default: MIRANDA_AUTH_TOKEN), then remove server.auth_token from config.yaml. " +
+		"Refusing to start: leaving it in place would look like it still works, while the " +
+		"bearer check would in fact be disabled")
 }
 
 // validateMCPServerNames rejects two enabled mcp.servers entries sharing a

@@ -484,7 +484,20 @@ func run(cfg config.Config, logger *slog.Logger, eventHub *hub.Hub, configDir st
 		webHandler = wh
 	}
 
-	server := httpapi.NewServer(orchestrator, eventHub, cfg.Server.AuthToken, webHandler, logger, usersRegistry, sessions)
+	// An empty token does not mean "no token required" — it disables the
+	// bearer check outright, so POST /api/v1/input (commands, including
+	// anything reachable through the HA MCP server) and GET /ws/logs (the
+	// full text of every conversation) accept anyone who can open a socket.
+	// That is a reasonable default for a LAN-only dev box and a bad one
+	// anywhere else, and nothing about the listener's address distinguishes
+	// the two, so say so at every startup rather than only in the docs.
+	authToken := os.Getenv(cfg.Server.AuthTokenEnv)
+	if authToken == "" {
+		logger.Warn("no auth token configured — POST /api/v1/input and GET /ws/logs accept unauthenticated requests on every listener, including the HTTPS one",
+			"env", cfg.Server.AuthTokenEnv, "http_addr", cfg.Server.HTTPAddr, "tls_enabled", cfg.Server.TLS.Enabled, "tls_addr", cfg.Server.TLS.Addr)
+	}
+
+	server := httpapi.NewServer(orchestrator, eventHub, authToken, webHandler, logger, usersRegistry, sessions)
 	// handleInput logs the raw request body before auth and parsing, which
 	// makes it the earliest sink for user text anywhere in the process —
 	// earlier than the stores, and it reaches the systemd journal, which our

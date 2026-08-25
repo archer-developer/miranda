@@ -461,7 +461,8 @@ your HA host.
 1. Copy `ha-integration/miranda` into HA's `custom_components/` directory
    and restart HA.
 2. **Settings → Devices & Services → Add Integration** → **"Miranda"**.
-   Fill in the base URL (and bearer token, if `server.auth_token` is set).
+   Fill in the base URL and the bearer token (the value of whichever env var
+   `server.auth_token_env` names — `MIRANDA_AUTH_TOKEN` by default).
    Validated live against Miranda's `/healthz` before saving.
 3. **Settings → Voice Assistants**, set **Conversation agent** to
    **Miranda**. Voice replies are spoken back through both the pipeline's
@@ -487,7 +488,7 @@ your HA host.
 | Symptom | Likely cause |
 |---|---|
 | Config flow shows "cannot_connect" | Wrong base URL, Miranda not running, or a network path issue. Test `curl http://<host>:8787/healthz` from the HA host. |
-| Assist can't reach Miranda | Same as above, or a non-200 reply — a 401 means the bearer token doesn't match `server.auth_token`. |
+| Assist can't reach Miranda | Same as above, or a non-200 reply — a 401 means the integration's bearer token doesn't match the value of the env var `server.auth_token_env` names. |
 | An entity is missing from Miranda's tools | Not toggled on under Voice Assistants → Expose. |
 | Logs show "mcp: failed to connect, will retry" | Check the MCP Server integration, the URL/port, and that `HA_MCP_TOKEN` is valid. Retries automatically — no restart needed once fixed. |
 
