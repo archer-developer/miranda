@@ -521,8 +521,78 @@ function skeleton() {
   return wrap;
 }
 
+/** isConnected guard: scrollToBottomSettling()'s delayed calls (below) can
+ * still be pending when the screen unmounts (or unmounts and remounts) —
+ * scrollEl itself isn't nulled out by unmount(), so without this a late
+ * timeout would silently scroll a detached, invisible copy of the old DOM
+ * tree. Harmless either way (no error, nothing the user could see), but
+ * skipping the write is cheap and avoids the pointless work — same
+ * staleness-guarding spirit as send()'s renderGeneration check above. */
 function scrollToBottom() {
+  if (!scrollEl?.isConnected) return;
   scrollEl.scrollTop = scrollEl.scrollHeight;
+}
+
+/** True while the composer's textarea is the focused element — i.e. an
+ * on-screen keyboard is presumably open (or about to be) on a touch
+ * device. Gates onViewportResize() below so a visualViewport resize caused
+ * by something unrelated to the keyboard (address-bar show/hide,
+ * orientation change) while the user is just scrolled through history,
+ * composer untouched, never forces an unwanted jump to the bottom. */
+function composerHasFocus() {
+  return document.activeElement === textEl;
+}
+
+/** Calls scrollToBottom() immediately, then again a few times over the
+ * next third of a second. Mirrors index.html's own head-level resetScroll
+ * timeout ladder (same 50/150/350ms schedule) for the same reason: the
+ * on-screen keyboard's open animation — and thus the point at which
+ * #chat-scroll's box has actually finished shrinking to the true space
+ * above it (index.html's --app-height sync) — can settle a beat after the
+ * triggering event, especially on Android Chrome (see onComposerFocus's
+ * doc comment). A single synchronous call right after focus/resize would
+ * often catch a still-animating keyboard and pin to a "bottom" that's
+ * about to move again. */
+function scrollToBottomSettling() {
+  scrollToBottom();
+  setTimeout(scrollToBottom, 50);
+  setTimeout(scrollToBottom, 150);
+  setTimeout(scrollToBottom, 350);
+}
+
+/** Handles the composer gaining focus — the moment the on-screen keyboard
+ * starts opening. index.html's --app-height sync already shrinks
+ * #chat-scroll's own box to the true visible area above the keyboard
+ * (window.visualViewport.height, the one signal that reflects it
+ * everywhere — see that file's head-script comment), but shrinking the box
+ * alone doesn't move an already-set scrollTop: the last message that was
+ * pinned to the bottom of the *tall*, pre-keyboard viewport ends up above
+ * the new, shorter one instead — exactly the reported bug. Re-asserting
+ * "scrolled to the bottom" here, unconditionally, mirrors the same
+ * unconditional-on-focusin precedent index.html's own resetScroll already
+ * sets for the analogous iOS document-scroll quirk, and matches how every
+ * mainstream chat surface (WhatsApp, Telegram, iMessage) treats tapping
+ * the composer as "show me the latest message" — a deliberate, harmless
+ * no-op on desktop, where the thread is already at the bottom in the
+ * common case and no keyboard changes the available height anyway. */
+function onComposerFocus() {
+  scrollToBottomSettling();
+}
+
+/** The Android Chrome counterpart to onComposerFocus() above. On some
+ * Android/Chrome versions the keyboard's actual occlusion only lands in
+ * visualViewport's own `resize` event a beat after the composer's `focus`
+ * event fires — classic-`window.innerHeight` doesn't shrink for the
+ * keyboard at all (the reason visualViewport exists in the first place),
+ * so this is the one live signal that tracks the keyboard animating open
+ * or closed, or being swapped for a different keyboard (emoji picker,
+ * autocomplete bar) that changes height mid-session. Gated to
+ * composerHasFocus() so a resize while the user isn't composing — or once
+ * they've tapped away and the keyboard is closing — never fights whatever
+ * scroll position they've since chosen; that's "normal scroll behavior
+ * resuming" once the keyboard closes, and needs no code of its own. */
+function onViewportResize() {
+  if (composerHasFocus()) scrollToBottom();
 }
 
 function clearMessages() {
@@ -968,11 +1038,14 @@ export function mount(container) {
              beside it, so it stays glued to the bottom of the scrolling
              thread no matter how far up the user has scrolled through
              history — the standard pattern for an always-visible chat
-             input bar. The on-screen-keyboard gap fix lives elsewhere
-             (index.html's <head> script, 'resetScroll') and is unrelated to
-             this placement. backdrop-blur matches the header (see
-             index.html) since this bar genuinely overlaps scrolled message
-             content instead of sitting beside it. -->
+             input bar. The on-screen-keyboard *document*-scroll gap fix
+             lives elsewhere (index.html's <head> script, 'resetScroll') and
+             is unrelated to this placement; keeping the last *message*
+             visible above the keyboard once #chat-scroll itself has shrunk
+             to the true space above it is this screen's own job — see
+             onComposerFocus/onViewportResize below. backdrop-blur matches
+             the header (see index.html) since this bar genuinely overlaps
+             scrolled message content instead of sitting beside it. -->
         <div class="sticky bottom-0 border-t border-(--color-border) bg-(--color-bg)/80 backdrop-blur supports-[backdrop-filter]:bg-(--color-bg)/60" id="chat-composer">
           <!-- pb-[max(0.75rem,env(safe-area-inset-bottom))]: on an installed
                iOS PWA (viewport-fit=cover in index.html's <head>) the inset
@@ -1014,6 +1087,18 @@ export function mount(container) {
   formEl.addEventListener("submit", onSubmit);
   textEl.addEventListener("keydown", onKeydown);
   textEl.addEventListener("input", autoResize);
+  // Keeps the last message visible above the on-screen keyboard — see
+  // onComposerFocus/onViewportResize's own doc comments above for why both
+  // are needed together. The visualViewport listener is intentionally on
+  // `window.visualViewport`, not textEl, so it also catches the keyboard
+  // resizing (not just opening/closing) while already focused — e.g.
+  // switching to an emoji picker — removed again in unmount() since it
+  // outlives this screen otherwise.
+  textEl.addEventListener("focus", onComposerFocus);
+  if (window.visualViewport) {
+    window.visualViewport.addEventListener("resize", onViewportResize);
+    window.visualViewport.addEventListener("scroll", onViewportResize);
+  }
 
   // Attach button opens the hidden file picker.
   attachBtn.addEventListener("click", () => fileInput.click());
@@ -1070,6 +1155,13 @@ export function unmount() {
   unsubscribeReconnect?.();
   unsubscribeTurnStatus?.();
   chatTurnStatus.stopPolling();
+  // window.visualViewport, unlike textEl, isn't torn down by the next
+  // mount()'s innerHTML rebuild — its listeners must be removed explicitly
+  // or a remount would stack a second onViewportResize on top of the first.
+  if (window.visualViewport) {
+    window.visualViewport.removeEventListener("resize", onViewportResize);
+    window.visualViewport.removeEventListener("scroll", onViewportResize);
+  }
   // Discard any pending attachment so a remounted screen starts clean.
   clearAttachment();
   pendingAttachment = null;
