@@ -28,7 +28,13 @@ commands, and the HA integration.
   non-obvious logic) — this project intentionally diverges from a
   terse/no-comments default; see repo history for why.
 - No Docker, no cgo. Single static Go binary (`CGO_ENABLED=0`), pure-Go
-  SQLite (`modernc.org/sqlite`). Keep new dependencies cgo-free.
+  SQLite (`modernc.org/sqlite`). Keep new dependencies cgo-free **and
+  permissively licensed** — today every one is Apache-2.0/MIT/ISC. Miranda
+  itself ships under the PolyForm Noncommercial License 1.0.0 (see
+  `LICENSE`), which is a restriction Miranda's own copyright holder is free
+  to impose; pulling in a copyleft dependency (GPL/AGPL/LGPL/MPL) would
+  impose terms *on* Miranda instead, so check a new module's license before
+  adding it.
 - Config: every field has a Go-level default in `internal/config.Default()`;
   `config.yaml` only needs to override what differs.
 

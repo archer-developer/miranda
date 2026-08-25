@@ -63,7 +63,7 @@ Desktop / Web UI ----> |     agent loop     | <---- Code sandbox
 - [Telegram bot](#telegram-bot)
 - [Scheduled tasks](#scheduled-tasks)
 - [Database backups](#database-backups)
-- [How it works](#how-it-works)
+- [License](#license)
 
 ---
 
@@ -614,3 +614,25 @@ Run it locally the same way, from the repo root after `go build`:
 ```bash
 ./miranda backup
 ```
+
+## License
+
+Miranda is licensed under the **[PolyForm Noncommercial License 1.0.0](LICENSE)**.
+
+**Free for noncommercial use.** Run it at home, for your family, study it,
+modify it, share your changes — no permission needed, no strings. The same
+goes for charities, schools, universities, public research bodies, and
+government institutions, however they are funded.
+
+**Commercial use needs a separate license.** Building a paid product or
+service on this code, bundling it into something you sell, or running it as
+part of a commercial offering is not covered by these terms.
+
+Commercial licenses are available — open an issue or email
+<archer.developer@gmail.com>. Asking is welcome; the answer is not
+automatically no.
+
+Note that this makes Miranda *source-available*, not open source in the OSI
+sense — the noncommercial restriction is exactly what the OSI definition
+disallows. Dependencies keep their own permissive licenses (Apache-2.0, MIT,
+ISC) and are unaffected.
