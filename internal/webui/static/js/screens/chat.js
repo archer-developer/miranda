@@ -40,6 +40,18 @@ let pendingAttachment = null; // {file_id, filename, mime_type, size_bytes}
 // event) gets there first; see CLAUDE.md's "Session ownership".
 const rendered = new Map();
 
+// The merge group currently at the tail of the thread — { role, minuteKey,
+// wrap, pill, timeSpan } — or null when the thread is empty or the last
+// bubble isn't eligible to receive more lines (see renderChatMessage()).
+// Consulted every time a new message is about to be rendered, from any of
+// the three paths that add one (loadHistory's batch render, upsertMessage's
+// live WS events, send()'s own optimistic bubbles): a same-sender message
+// landing in the same clock minute is folded into this bubble as an extra
+// line instead of starting a new one, so a burst of back-to-back
+// tool-narration messages collapses into one bubble with a single trailing
+// timestamp rather than one noisy near-identical bubble per message.
+let lastGroup = null;
+
 // The `rendered` key of the current turn's own optimistic user bubble,
 // while it's still waiting for its real id — set by send(), consumed by
 // upsertMessage() if the WS event for that exact message arrives before
@@ -132,6 +144,20 @@ function formatTime(iso) {
   }
 }
 
+/** Groups messages for merge purposes: same calendar minute in the
+ * viewer's local time (matching what formatTime() actually displays, so
+ * two messages that render the same "20:18" always group together and
+ * never split across a UTC-boundary quirk). Returns null for a missing or
+ * unparsable timestamp — treated as "never merges" by renderChatMessage(),
+ * which covers the optimistic bubble send() renders before the server has
+ * confirmed a real timestamp for it. */
+function minuteKey(iso) {
+  if (!iso) return null;
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return null;
+  return `${d.getFullYear()}-${d.getMonth()}-${d.getDate()}-${d.getHours()}-${d.getMinutes()}`;
+}
+
 /** Scale an image File down to at most maxPx on both axes and return a compact
  * JPEG data URL for an inline thumbnail. Resolves to null on any canvas error
  * so the caller can silently fall back to a chip-only render. */
@@ -218,51 +244,142 @@ function bubble(role, text, timeIso, downloads, blocks) {
     }
   }
 
-  // The text bubble itself is built as a plain node first (its content is
-  // populated either by renderInlineText() or a nested lit-html render()),
-  // then interpolated as a Node into the outer template below — lit-html
-  // accepts a real DOM Node as a child value directly.
+  // `pill` — the rounded, colored content box — and `timeSpan` are built as
+  // plain nodes first, then interpolated as Nodes into the outer template
+  // below (lit-html accepts a real DOM Node as a child value directly), and
+  // returned to the caller alongside `wrap`: renderChatMessage() holds onto
+  // these references so a later same-sender, same-minute message can be
+  // folded into this exact bubble via appendBubbleLine()/appendBubbleContent()
+  // instead of starting a whole new one.
   let textNode = nothing;
+  let pill = null;
   if (displayText) {
-    const b = document.createElement("div");
-    b.className =
+    pill = document.createElement("div");
+    pill.className =
       role === "user"
-        ? "max-w-[85%] whitespace-pre-wrap rounded-2xl rounded-br-md bg-(--color-accent) px-4 py-2.5 text-sm leading-relaxed text-white sm:max-w-[75%]"
-        : // space-y-2: an 8px gap between block-level children (multiple
-          // <p>/<ul> from blocksTemplate) — harmless no-op for the
-          // renderInlineText() fallback, whose only element children
-          // (<code> spans) are inline and unaffected by margin-top.
-          "max-w-[85%] whitespace-pre-wrap rounded-2xl rounded-bl-md border border-(--color-border) bg-(--color-surface)/70 px-4 py-2.5 text-sm leading-relaxed text-(--color-text) sm:max-w-[75%] space-y-2";
-    if (blocks && blocks.length > 0) {
-      render(blocksTemplate(blocks), b);
-    } else if (role === "user") {
-      // renderInlineText()'s default <code> style (bg-(--color-surface-2))
-      // is tuned for a neutral surface and is nearly invisible against this
-      // bubble's solid bg-(--color-accent) blue — a translucent white
-      // treatment instead, same idea as attachmentChip's own blue-bubble
-      // variant in downloads.js. No text-color override: inherits this
-      // bubble's text-white.
-      renderInlineText(b, displayText, "rounded border border-white/20 bg-white/15 px-1 py-0.5 font-mono text-[0.85em] break-all");
-    } else {
-      renderInlineText(b, displayText);
-    }
-    textNode = b;
+        ? // space-y-2: an 8px gap between this pill's line(s) — either
+          // multiple <p>/<ul> from a single message's blocksTemplate, or
+          // multiple merged messages' own line wrappers (see
+          // appendBubbleContent) — harmless no-op for a single plain-text
+          // line, whose only element children (<code> spans) are inline.
+          "max-w-[85%] whitespace-pre-wrap rounded-2xl rounded-br-md bg-(--color-accent) px-4 py-2.5 text-sm leading-relaxed text-white sm:max-w-[75%] space-y-2"
+        : "max-w-[85%] whitespace-pre-wrap rounded-2xl rounded-bl-md border border-(--color-border) bg-(--color-surface)/70 px-4 py-2.5 text-sm leading-relaxed text-(--color-text) sm:max-w-[75%] space-y-2";
+    appendBubbleContent(pill, role, displayText, blocks);
+    textNode = pill;
   }
 
   const downloadNodes = (downloads ?? []).map(({ file_id, filename, size_bytes }) =>
     downloadChip(file_id, filename, size_bytes ?? null)
   );
 
-  render(
-    html`${attachmentNodes}${textNode}${downloadNodes}${
-      timeIso
-        ? html`<span class="mt-1 px-1 text-xs text-(--color-text-muted)">${formatTime(timeIso)}</span>`
-        : nothing
-    }`,
-    wrap
-  );
+  let timeSpan = null;
+  let timeNode = nothing;
+  if (timeIso) {
+    timeSpan = document.createElement("span");
+    timeSpan.className = "mt-1 px-1 text-xs text-(--color-text-muted)";
+    timeSpan.textContent = formatTime(timeIso);
+    timeNode = timeSpan;
+  }
 
-  return wrap;
+  render(html`${attachmentNodes}${textNode}${downloadNodes}${timeNode}`, wrap);
+
+  return { wrap, pill, timeSpan };
+}
+
+/** Renders one message's text as a new line inside `pill` — either the
+ * parsed block structure (blocksTemplate) or the plain-text/backtick
+ * fallback (renderInlineText). Shared by bubble()'s first line and
+ * appendBubbleLine()'s merged lines, so every line inside a bubble (whether
+ * it's a single-message bubble or a merged one) goes through the exact same
+ * rendering path. Each line gets its own space-y-2 wrapper so a single
+ * message's own multi-block content (e.g. several <p>/<ul> from
+ * blocksTemplate) keeps its internal spacing once nested a level deeper
+ * than pill's own space-y-2 (which now spaces *lines* apart, not blocks). */
+function appendBubbleContent(pill, role, displayText, blocks) {
+  const line = document.createElement("div");
+  line.className = "space-y-2";
+  if (blocks && blocks.length > 0) {
+    render(blocksTemplate(blocks), line);
+  } else if (role === "user") {
+    // renderInlineText()'s default <code> style (bg-(--color-surface-2)) is
+    // tuned for a neutral surface and is nearly invisible against this
+    // bubble's solid bg-(--color-accent) blue — a translucent white
+    // treatment instead, same idea as attachmentChip's own blue-bubble
+    // variant in downloads.js. No text-color override: inherits the
+    // bubble's text-white.
+    renderInlineText(line, displayText, "rounded border border-white/20 bg-white/15 px-1 py-0.5 font-mono text-[0.85em] break-all");
+  } else {
+    renderInlineText(line, displayText);
+  }
+  pill.appendChild(line);
+}
+
+/** True when a message is eligible to merge with (or receive a merge from)
+ * a neighboring same-sender message — i.e. it's plain text with no file
+ * download/attachment riding along. A message carrying a downloadChip or
+ * attachmentChip gets its own standalone bubble instead, so that chip stays
+ * visually tied to the one message it belongs to rather than floating
+ * inside a merged multi-message bubble. */
+function isMergeableCandidate(role, text, downloads) {
+  if (!text) return false;
+  if ((downloads?.length ?? 0) > 0) return false;
+  if (role === "user" && text.includes("<attachment>")) return false;
+  return true;
+}
+
+/** Folds another message's text into `group`'s already-rendered pill as an
+ * additional line. Returns false (nothing rendered) if the group has no
+ * pill to append to, or if the message turns out to have no visible text
+ * once a user message's attachment marker is stripped — in either case the
+ * caller falls back to a fresh standalone bubble. */
+function appendBubbleLine(group, role, text, blocks) {
+  if (!group.pill) return false;
+  const displayText = role === "user" ? extractAttachmentBlocks(text).displayText : text;
+  if (!displayText) return false;
+  appendBubbleContent(group.pill, role, displayText, blocks);
+  return true;
+}
+
+/**
+ * Single entry point for adding one message to the visible thread — used by
+ * loadHistory()'s initial batch render, upsertMessage()'s live WS events,
+ * and send()'s own optimistic bubbles, so all three share the same grouping
+ * behavior instead of three copies of it.
+ *
+ * When the message is plain text (isMergeableCandidate) and lands in the
+ * same clock minute as the bubble currently at the tail of the thread, from
+ * the same sender, it's folded into that bubble as an extra line instead of
+ * starting a new one — this is what collapses a burst of back-to-back
+ * tool-narration messages ("Загружу инструменты для учёта питания." /
+ * "Найду нужные продукты в базе." / ...) into a single bubble with one
+ * trailing timestamp, instead of one near-identical bubble per message.
+ *
+ * id (when given) is history.Message.ID or a "local:" temp key — recorded
+ * in `rendered` against whichever DOM node ends up representing it (a fresh
+ * bubble, or a shared merged one), so the existing per-id dedupe in
+ * upsertMessage()/send() keeps working even though several ids can now
+ * point at the same node.
+ */
+function renderChatMessage(role, text, timeIso, downloads, blocks, id) {
+  const key = minuteKey(timeIso);
+  const mergeable = isMergeableCandidate(role, text, downloads);
+
+  if (mergeable && key !== null && lastGroup && lastGroup.role === role && lastGroup.minuteKey === key) {
+    if (appendBubbleLine(lastGroup, role, text, blocks)) {
+      // Reflects the newest message's time, not the group's first — the
+      // one timestamp left visible should describe when the bubble's
+      // content was last added to, matching how a person reads it.
+      if (lastGroup.timeSpan) lastGroup.timeSpan.textContent = formatTime(timeIso);
+      if (id != null) rendered.set(id, lastGroup.wrap);
+      return lastGroup.wrap;
+    }
+  }
+
+  const group = bubble(role, text, timeIso, downloads, blocks);
+  messagesEl.appendChild(group.wrap);
+  if (id != null) rendered.set(id, group.wrap);
+  lastGroup = mergeable && key !== null && group.pill ? { role, minuteKey: key, ...group } : null;
+  return group.wrap;
 }
 
 /** The three-dot "Miranda is thinking" indicator shown while a request is in
@@ -413,6 +530,7 @@ function clearMessages() {
   rendered.clear();
   pendingUserKey = null;
   thinkingEl = null; // detached by the innerHTML wipe above
+  lastGroup = null; // its bubble was just wiped along with everything else
   clearInterval(elapsedTimer);
   elapsedTimer = null;
   renderGeneration++;
@@ -562,6 +680,9 @@ async function handleFileSelected(file) {
     clearAttachment();
     messagesEl.querySelector("[data-empty-state]")?.remove();
     messagesEl.appendChild(errorBubble(String(err), () => handleFileSelected(file)));
+    // An error bubble is never part of a merge group, and nothing after it
+    // should be folded backwards into whatever bubble preceded it.
+    lastGroup = null;
   } finally {
     setUploading(false);
     if (fileInput) fileInput.value = "";
@@ -593,9 +714,7 @@ function upsertMessage(message, blocks) {
   if (message.role === "assistant") notifyReplyArrivedViaWS();
 
   messagesEl.querySelector("[data-empty-state]")?.remove();
-  const node = bubble(message.role, message.content, message.created_at, message.downloads, blocks);
-  messagesEl.appendChild(node);
-  rendered.set(message.id, node);
+  renderChatMessage(message.role, message.content, message.created_at, message.downloads, blocks, message.id);
   scrollToBottom();
 }
 
@@ -650,9 +769,7 @@ async function loadHistory() {
           // m.blocks is a top-level sibling of m.content/m.role/m.id on
           // each flattened message object (see webui's messageView) —
           // only present (non-empty) when m.role === "assistant".
-          const node = bubble(m.role, m.content, m.created_at, m.downloads, m.blocks);
-          messagesEl.appendChild(node);
-          rendered.set(m.id, node);
+          renderChatMessage(m.role, m.content, m.created_at, m.downloads, m.blocks, m.id);
         }
         scrollToBottom();
         lastRole = chatMessages.at(-1).role;
@@ -702,18 +819,19 @@ async function send(text) {
   clearAttachment();
 
   messagesEl.querySelector("[data-empty-state]")?.remove();
-  const userNode = bubble("user", text);
+  // Keyed under a temporary id until the response tells us the real
+  // history.Message.ID — see the `rendered`/`pendingUserKey` doc comments
+  // above. No timeIso yet either (assigned once the server confirms this
+  // message and a reload/WS echo re-renders it with a real timestamp), so
+  // renderChatMessage() never merges this bubble into anything — see
+  // minuteKey()'s null-timeIso case.
+  const tempKey = `local:${Date.now()}:${Math.random()}`;
+  const userNode = renderChatMessage("user", text, null, null, null, tempKey);
   // Chips for the attachment aren't in `text` yet (the server injects file
   // blocks after processing) — render them immediately from the local snapshot.
   for (const att of attachments) {
     userNode.prepend(attachmentChip(att.filename, att.size_bytes ?? null, att.previewDataURL ?? null));
   }
-  messagesEl.appendChild(userNode);
-  // Keyed under a temporary id until the response tells us the real
-  // history.Message.ID — see the `rendered`/`pendingUserKey` doc comments
-  // above.
-  const tempKey = `local:${Date.now()}:${Math.random()}`;
-  rendered.set(tempKey, userNode);
   pendingUserKey = tempKey;
   scrollToBottom();
 
@@ -742,6 +860,7 @@ async function send(text) {
       // thread that's moved on.
       messagesEl.querySelector("[data-empty-state]")?.remove();
       messagesEl.appendChild(errorBubble(String(res.status), () => send(text)));
+      lastGroup = null; // see handleFileSelected's identical comment above
     } else if (renderGeneration !== myGeneration) {
       // The thread this bubble belonged to is gone (cleared by a
       // conversation_deleted/ended event that arrived over chat-ws.js while
@@ -762,9 +881,7 @@ async function send(text) {
       // rendered the bubble, don't render it a second time.
       if (!rendered.has(data.assistant_message_id)) {
         // data.blocks is already top-level, sibling of data.reply.
-        const assistantNode = bubble("assistant", data.reply, new Date().toISOString(), data.downloads, data.blocks);
-        messagesEl.appendChild(assistantNode);
-        rendered.set(data.assistant_message_id, assistantNode);
+        renderChatMessage("assistant", data.reply, new Date().toISOString(), data.downloads, data.blocks, data.assistant_message_id);
       }
     }
   } catch (err) {
@@ -797,6 +914,7 @@ async function send(text) {
       if (lastRole === "user") {
         messagesEl.querySelector("[data-empty-state]")?.remove();
         messagesEl.appendChild(errorBubble(String(err), () => send(text)));
+        lastGroup = null; // see handleFileSelected's identical comment above
       }
     }
   } finally {
