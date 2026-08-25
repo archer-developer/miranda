@@ -1,5 +1,7 @@
 # Miranda
 
+![Miranda poster](docs/poster.png)
+
 **A full personal assistant for your home and family — not just a Home Assistant voice add-on.**
 
 Miranda controls your smart home (Home Assistant, noolite), keeps a
@@ -180,11 +182,12 @@ can't run code, escalate for that") instead of a generic "too complex" default.
 becomes a set of tools the model can call — Home Assistant (see below) is
 one example among many. A few purpose-built ones pair well with Miranda:
 
-| Server | Adds |
-|---|---|
-| [miranda-code-execution-sandbox](https://github.com/archer-developer/miranda-code-execution-sandbox) | Sandboxed Python/bash execution, plus the file upload/download the web UI uses |
-| [miranda-diary](https://github.com/archer-developer/miranda-diary) | Personal journal entries |
-| [miranda-yazio](https://github.com/archer-developer/miranda-yazio) | Nutrition/calorie tracking via YAZIO |
+| Server                                                                                               | Adds                                                                                                                        |
+|------------------------------------------------------------------------------------------------------|-----------------------------------------------------------------------------------------------------------------------------|
+| [miranda-code-execution-sandbox](https://github.com/archer-developer/miranda-code-execution-sandbox) | Sandboxed Python/bash execution, plus the file upload/download the web UI uses                                              |
+| [miranda-diary](https://github.com/archer-developer/miranda-diary)                                   | Personal journal entries, story anything with biomecric encryption                                                          |
+| [miranda-yazio](https://github.com/archer-developer/miranda-yazio)                                   | Nutrition/calorie tracking via YAZIO                                                                                        |
+| [miranda-medical-card](https://github.com/archer-developer/miranda-medical-card)                     | Scan and collect all your medical data in one place and ask AI about it. Plan you meds, vactination and other medical needs |
 
 ```yaml
 mcp:
