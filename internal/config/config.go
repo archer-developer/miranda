@@ -1165,7 +1165,7 @@ func Default() Config {
 			LogBufferSize:   2000,
 			AppLogMaxKB:     10,
 			LLMLogMaxBlocks: 20,
-			DefaultLanguage: "ru",
+			DefaultLanguage: "be",
 		},
 		// Disabled by default — see WebAuthnConfig's doc comment for why
 		// there's no safe auto-detected RPID/RPOrigins.

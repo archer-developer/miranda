@@ -433,7 +433,7 @@ web_ui:
   # Shared by chat/tool events and the Logs screen's mirrored app/LLM-trace
   # log lines, so it needs more headroom than a chat-only buffer.
   log_buffer_size: 2000
-  default_language: "ru" # ru | be | en — used for the login page and any user without their own `language`
+  default_language: "be" # ru | be | en — used for the login page and any user without their own `language`
 
 webauthn:
   # Optional passwordless/biometric ("passkey") login — off by default,
@@ -602,7 +602,7 @@ users:
     avatar: "" # https URL, or a path served under /static/avatars/
     ha_user_id: ""
     telegram_name: ""
-    language: "ru"
+    language: "be"
     timezone: "Europe/Minsk" # IANA timezone for scheduled tasks; defaults to server's local timezone
   - username: anna
     password_hash: "$2a$10$cR6srtGvKY2swOq0Nd.lvuuplR.Retvj3PBX6PyLiFIzMBVE10FLi" # "555"
@@ -610,5 +610,5 @@ users:
     avatar: ""
     ha_user_id: ""
     telegram_name: ""
-    language: "ru"
+    language: "be"
     timezone: "Europe/Minsk"

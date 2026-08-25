@@ -15,13 +15,13 @@ import (
 var localesFS embed.FS
 
 // Default is used whenever a request's resolved language isn't one of
-// Languages, and matches the project's Russian-first default elsewhere
+// Languages, and matches the project's Belarusian-first default elsewhere
 // (web_ui.default_language in config.yaml).
-const Default = "ru"
+const Default = "be"
 
 // Languages are the supported locale codes, in the order they should appear
 // in the UI's language switcher.
-var Languages = []string{"ru", "be", "en"}
+var Languages = []string{"be", "ru", "en"}
 
 var catalog map[string]map[string]string
 

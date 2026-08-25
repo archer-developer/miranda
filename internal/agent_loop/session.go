@@ -265,11 +265,11 @@ var turnFailureReplies = map[string]string{
 }
 
 // turnFailureReply returns the fallback reply text for userID's configured
-// language, falling back to "ru" (config.Default's own DefaultLanguage) when
+// language, falling back to "be" (config.Default's own DefaultLanguage) when
 // there's no registry, no match, or an unrecognized language code — the same
 // "better to fall back sensibly than say nothing" reasoning as userLocation.
 func (o *Orchestrator) turnFailureReply(userID string) string {
-	lang := "ru"
+	lang := "be"
 	if o.users != nil {
 		if u, ok := o.users.Get(userID); ok && u.Language != "" {
 			lang = u.Language
@@ -278,5 +278,5 @@ func (o *Orchestrator) turnFailureReply(userID string) string {
 	if s, ok := turnFailureReplies[lang]; ok {
 		return s
 	}
-	return turnFailureReplies["ru"]
+	return turnFailureReplies["be"]
 }
