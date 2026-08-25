@@ -485,6 +485,11 @@ func run(cfg config.Config, logger *slog.Logger, eventHub *hub.Hub, configDir st
 	}
 
 	server := httpapi.NewServer(orchestrator, eventHub, cfg.Server.AuthToken, webHandler, logger, usersRegistry, sessions)
+	// handleInput logs the raw request body before auth and parsing, which
+	// makes it the earliest sink for user text anywhere in the process —
+	// earlier than the stores, and it reaches the systemd journal, which our
+	// own log rotation does not govern.
+	server.SetRedactor(redactor)
 	if ttsAudioHandler != nil {
 		server.SetTTSAudioHandler(ttsAudioHandler)
 	}

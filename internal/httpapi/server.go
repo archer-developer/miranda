@@ -33,6 +33,32 @@ type Server struct {
 	telegram      *TelegramWebhook // set via SetTelegramWebhook; nil means the channel is disabled
 	upload        *uploadConfig    // set via SetUploadHandler; nil means POST /api/upload, GET /files/{id}, and GET /api/files/{file_id} are not registered
 	oauthCallback *OAuthCallback   // set via SetOAuthCallback; nil means the OAuth2 callback route is not registered
+	// redactor masks the raw request body before it is logged. Set via
+	// SetRedactor; nil means no masking. Unlike the stores, this one guards a
+	// *log* line rather than a database — see handleInput for why the body is
+	// logged at all.
+	redactor Redactor
+}
+
+// Redactor masks sensitive values out of text before it is logged. Declared
+// locally rather than imported from internal/redact, matching
+// history.Redactor / memory.Redactor / schedule.Redactor.
+type Redactor interface {
+	Redact(string) string
+}
+
+// SetRedactor installs the redactor applied to logged request bodies. Call it
+// before the server starts serving.
+func (s *Server) SetRedactor(r Redactor) {
+	s.redactor = r
+}
+
+// redact applies the configured redactor, if any.
+func (s *Server) redact(text string) string {
+	if s.redactor == nil {
+		return text
+	}
+	return s.redactor.Redact(text)
 }
 
 // uploadConfig holds the static configuration for the upload/download
@@ -143,16 +169,24 @@ func (s *Server) handleHealthz(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleInput(w http.ResponseWriter, r *http.Request) {
-	// Logged raw and first — before auth, before parsing — so a
-	// misconfigured HA integration (wrong token, unexpected payload shape,
-	// wrong field names) is still fully visible in logs/miranda.log instead
-	// of silently 401ing or 400ing with nothing to go on.
+	// Logged first — before auth, before parsing — so a misconfigured HA
+	// integration (wrong token, unexpected payload shape, wrong field names)
+	// is still fully visible in logs/miranda.log instead of silently 401ing
+	// or 400ing with nothing to go on. The body's *shape* is what makes this
+	// line useful for that, so redacting the values inside it costs nothing
+	// diagnostically.
+	//
+	// This line is a genuine sink and not an incidental one: s.logger writes
+	// to logs/miranda.log, to stdout (hence the systemd journal, which our
+	// own rotation settings do not govern), and to the hub's app_log tab. It
+	// is also the *earliest* point user text appears anywhere, ahead of the
+	// stores that do their own masking.
 	body, err := io.ReadAll(r.Body)
 	if err != nil {
 		http.Error(w, "failed to read request body", http.StatusBadRequest)
 		return
 	}
-	s.logger.Info("received input request", "remote_addr", r.RemoteAddr, "body", string(body))
+	s.logger.Info("received input request", "remote_addr", r.RemoteAddr, "body", s.redact(string(body)))
 
 	sessionUser, authenticated := s.authorize(r)
 	if !authenticated {
