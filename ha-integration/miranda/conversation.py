@@ -53,7 +53,15 @@ class MirandaConversationEntity(conversation.ConversationEntity):
         self, user_input: conversation.ConversationInput
     ) -> conversation.ConversationResult:
         base_url = self._entry.data[CONF_BASE_URL]
-        token = self._entry.data.get(CONF_AUTH_TOKEN) or ""
+        # Options win over the value stored at setup, so a token added or
+        # rotated later via "Configure" takes effect without re-adding the
+        # integration. Falls back to data for entries created before the
+        # options flow offered this field. An empty string in options is a
+        # deliberate "no token", not a missing key, so it is honoured.
+        token = (
+            self._entry.options.get(CONF_AUTH_TOKEN, self._entry.data.get(CONF_AUTH_TOKEN, ""))
+            or ""
+        )
         timeout = self._entry.options.get(CONF_TIMEOUT, DEFAULT_TIMEOUT)
 
         headers = {"Content-Type": "application/json"}

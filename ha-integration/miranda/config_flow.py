@@ -13,6 +13,7 @@ from homeassistant import config_entries
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.data_entry_flow import FlowResult
+from homeassistant.helpers import selector
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 
 from .const import (
@@ -27,10 +28,17 @@ from .const import (
 
 _LOGGER = logging.getLogger(__name__)
 
+def _token_selector() -> selector.TextSelector:
+    """A masked input, so the token isn't left readable on screen."""
+    return selector.TextSelector(
+        selector.TextSelectorConfig(type=selector.TextSelectorType.PASSWORD)
+    )
+
+
 STEP_USER_SCHEMA = vol.Schema(
     {
         vol.Required(CONF_BASE_URL, default=DEFAULT_BASE_URL): str,
-        vol.Optional(CONF_AUTH_TOKEN, default=""): str,
+        vol.Optional(CONF_AUTH_TOKEN, default=""): _token_selector(),
     }
 )
 
@@ -78,10 +86,24 @@ class MirandaConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
 
 class MirandaOptionsFlow(config_entries.OptionsFlow):
-    """Options: currently just the per-request HTTP timeout."""
+    """Options: the per-request HTTP timeout, and the bearer token.
+
+    The token is here as well as in the initial config step because it is
+    the one setting that has to change *after* setup: Miranda can be
+    installed with no token (the default) and have one added later, and a
+    rotated token must be enterable without deleting and re-adding the
+    integration. Without this, "Configure" showed only the timeout and there
+    was no way to set a token at all short of removing the entry.
+    """
 
     def __init__(self, config_entry: ConfigEntry) -> None:
         self._config_entry = config_entry
+
+    def _current_token(self) -> str:
+        """The token in effect: an options override, else what setup stored."""
+        return self._config_entry.options.get(
+            CONF_AUTH_TOKEN, self._config_entry.data.get(CONF_AUTH_TOKEN, "")
+        )
 
     async def async_step_init(self, user_input: dict[str, Any] | None = None) -> FlowResult:
         if user_input is not None:
@@ -93,6 +115,11 @@ class MirandaOptionsFlow(config_entries.OptionsFlow):
                     CONF_TIMEOUT,
                     default=self._config_entry.options.get(CONF_TIMEOUT, DEFAULT_TIMEOUT),
                 ): vol.Coerce(int),
+                # Pre-filled with the current value so saving the form
+                # without touching this field keeps the token rather than
+                # silently clearing it — async_create_entry replaces the
+                # whole options dict, so an absent field means "no token".
+                vol.Optional(CONF_AUTH_TOKEN, default=self._current_token()): _token_selector(),
             }
         )
         return self.async_show_form(step_id="init", data_schema=schema)
