@@ -24,6 +24,12 @@ type AnomalyConfig struct {
 	// anomalous turn (see llmtrace/anomaly.FileName) — created lazily on
 	// first use.
 	Dir string
+	// MaxAge is how long to keep a file under Dir before CleanOldAnomalies
+	// deletes it. Unlike miranda.log/llm.log, anomaly files aren't
+	// size-rotated by lumberjack — one is written per anomalous turn and
+	// otherwise kept forever, so a long-lived process with frequent
+	// anomalies grows Dir unbounded without this. Zero means no cleanup.
+	MaxAge time.Duration
 }
 
 func (c AnomalyConfig) enabled() bool { return c.Dir != "" }
@@ -103,6 +109,43 @@ func writeAnomalyFile(dir string, found []anomaly.Anomaly, blocks []analyze.Bloc
 		return "", fmt.Errorf("orchestrator: close anomaly file: %w", err)
 	}
 	return path, nil
+}
+
+// CleanOldAnomalies deletes files under o.anomaly.Dir whose modification
+// time is older than o.anomaly.MaxAge — see AnomalyConfig.MaxAge for why
+// this exists (anomaly files aren't size-rotated the way miranda.log/llm.log
+// are). A no-op if anomaly detection is disabled (Dir == "") or MaxAge is
+// zero (no age-based cleanup configured). Meant to be called periodically by
+// a background sweep (see cmd/miranda's sweepAnomalies), not per-turn.
+func (o *Orchestrator) CleanOldAnomalies() error {
+	if !o.anomaly.enabled() || o.anomaly.MaxAge <= 0 {
+		return nil
+	}
+
+	entries, err := os.ReadDir(o.anomaly.Dir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return fmt.Errorf("orchestrator: read anomalies dir %s: %w", o.anomaly.Dir, err)
+	}
+
+	cutoff := time.Now().Add(-o.anomaly.MaxAge)
+	for _, e := range entries {
+		if e.IsDir() {
+			continue
+		}
+		info, err := e.Info()
+		if err != nil {
+			continue // file may have been removed concurrently; nothing to clean up
+		}
+		if info.ModTime().Before(cutoff) {
+			if err := os.Remove(filepath.Join(o.anomaly.Dir, e.Name())); err != nil {
+				return fmt.Errorf("orchestrator: remove old anomaly file %s: %w", e.Name(), err)
+			}
+		}
+	}
+	return nil
 }
 
 func anomalyKinds(found []anomaly.Anomaly) []string {

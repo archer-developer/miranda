@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 
@@ -151,4 +152,54 @@ func TestHandle_ExceedingMaxIterations_WritesAnomalyFileAndWarns(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, entries, 1)
 	require.Contains(t, entries[0].Name(), "iteration_cap")
+}
+
+func TestCleanOldAnomalies_DeletesOnlyFilesOlderThanMaxAge(t *testing.T) {
+	dir := t.TempDir()
+	provider := llmtest.New("local", llmtest.Response{Text: "hi"})
+	o, _, _ := newTestOrchestrator(t, provider)
+	o.SetAnomalyConfig(AnomalyConfig{Dir: dir, MaxAge: 24 * time.Hour})
+
+	oldFile := filepath.Join(dir, "old_unknown_tool.log")
+	freshFile := filepath.Join(dir, "fresh_unknown_tool.log")
+	require.NoError(t, os.WriteFile(oldFile, []byte("old"), 0o644))
+	require.NoError(t, os.WriteFile(freshFile, []byte("fresh"), 0o644))
+	require.NoError(t, os.Chtimes(oldFile, time.Now().Add(-48*time.Hour), time.Now().Add(-48*time.Hour)))
+
+	require.NoError(t, o.CleanOldAnomalies())
+
+	_, err := os.Stat(oldFile)
+	require.True(t, os.IsNotExist(err), "file older than MaxAge should be removed")
+	_, err = os.Stat(freshFile)
+	require.NoError(t, err, "file within MaxAge should be kept")
+}
+
+func TestCleanOldAnomalies_NoopWhenMaxAgeZeroOrDisabled(t *testing.T) {
+	dir := t.TempDir()
+	provider := llmtest.New("local", llmtest.Response{Text: "hi"})
+	o, _, _ := newTestOrchestrator(t, provider)
+
+	oldFile := filepath.Join(dir, "old_unknown_tool.log")
+	require.NoError(t, os.WriteFile(oldFile, []byte("old"), 0o644))
+	require.NoError(t, os.Chtimes(oldFile, time.Now().Add(-48*time.Hour), time.Now().Add(-48*time.Hour)))
+
+	// MaxAge left at zero (anomaly detection disabled entirely, matching the
+	// zero-value default from SetAnomalyConfig never being called).
+	require.NoError(t, o.CleanOldAnomalies())
+	_, err := os.Stat(oldFile)
+	require.NoError(t, err, "cleanup must be a no-op when MaxAge is unset")
+
+	// Dir configured but MaxAge still zero — same expectation.
+	o.SetAnomalyConfig(AnomalyConfig{Dir: dir})
+	require.NoError(t, o.CleanOldAnomalies())
+	_, err = os.Stat(oldFile)
+	require.NoError(t, err, "cleanup must be a no-op when MaxAge is unset even with Dir configured")
+}
+
+func TestCleanOldAnomalies_MissingDirIsNoOp(t *testing.T) {
+	provider := llmtest.New("local", llmtest.Response{Text: "hi"})
+	o, _, _ := newTestOrchestrator(t, provider)
+	o.SetAnomalyConfig(AnomalyConfig{Dir: filepath.Join(t.TempDir(), "never-created"), MaxAge: 24 * time.Hour})
+
+	require.NoError(t, o.CleanOldAnomalies())
 }

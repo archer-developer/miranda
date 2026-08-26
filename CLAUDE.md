@@ -267,6 +267,12 @@ out anomaly kind(s) even before opening the trace itself. The `anomaly-review` C
 this exact workflow (fetch + analyze flagged turns from `logs/anomalies/`, local or on the production
 server) — invoke it instead of repeating the steps above by hand.
 
+Unlike `miranda.log`/`llm.log`, files under `logs/anomalies/` aren't size-rotated by lumberjack — one is
+written per anomalous turn. A background sweep (`sweepAnomalies` in `cmd/miranda/main.go`, hourly —
+`anomalySweepInterval`) deletes files older than `config.LoggingConfig.AnomalyMaxAgeDays` (default 30
+days; 0 disables cleanup) via `Orchestrator.CleanOldAnomalies`, so a long-lived process doesn't grow that
+directory unbounded even though review of it stays manual.
+
 ### Web UI API surface
 
 - `GET /api/dialogs`, `GET /api/dialogs/{id}` — read-only, always scoped

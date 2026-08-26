@@ -368,6 +368,13 @@ type LoggingConfig struct {
 	// MaxAgeDays is how long to keep a rotated backup regardless of
 	// MaxBackups. 0 means no age-based cleanup.
 	MaxAgeDays int `yaml:"max_age_days"`
+	// AnomalyMaxAgeDays is how long to keep a flagged turn's file under
+	// logs/anomalies/ before it's deleted. Unlike miranda.log/llm.log,
+	// anomaly files aren't size-rotated — one is written per anomalous turn
+	// and otherwise kept forever (see agentloop.AnomalyConfig), so without
+	// this a long-lived process with frequent anomalies grows that directory
+	// unbounded. 0 means no age-based cleanup.
+	AnomalyMaxAgeDays int `yaml:"anomaly_max_age_days"`
 }
 
 // LLMProvider describes one configured model backend: OpenAI-compatible
@@ -1028,11 +1035,12 @@ func Default() Config {
 			OAuthSQLitePath:    "./data/oauth.db",
 		},
 		Logging: LoggingConfig{
-			Dir:        "./logs",
-			Level:      "info",
-			MaxSizeMB:  10,
-			MaxBackups: 5,
-			MaxAgeDays: 30,
+			Dir:               "./logs",
+			Level:             "info",
+			MaxSizeMB:         10,
+			MaxBackups:        5,
+			MaxAgeDays:        30,
+			AnomalyMaxAgeDays: 30,
 		},
 		LLM: LLMConfig{
 			Providers:       nil,

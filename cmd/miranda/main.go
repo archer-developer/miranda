@@ -71,6 +71,12 @@ const idleSweepInterval = time.Minute
 // recurrence, this is just the polling cadence (see sweepScheduledTasks).
 const scheduleSweepInterval = time.Minute
 
+// anomalySweepInterval is how often the background sweeper deletes
+// logs/anomalies/ files older than config.LoggingConfig.AnomalyMaxAgeDays.
+// Age-based cleanup doesn't need per-minute polling the way idle-session or
+// due-task checks do, so this runs far less often (see sweepAnomalies).
+const anomalySweepInterval = time.Hour
+
 // webauthnCeremonyTTL bounds how long a pending passkey registration/login
 // ceremony (the gap between its begin and finish HTTP calls) stays valid —
 // comfortably above the WebAuthn library's own ~60s ceremony timeout.
@@ -397,6 +403,7 @@ func run(cfg config.Config, logger *slog.Logger, eventHub *hub.Hub, configDir st
 	orchestrator.SetAnomalyConfig(agentloop.AnomalyConfig{
 		LLMLogPath: filepath.Join(cfg.Logging.Dir, "llm.log"),
 		Dir:        filepath.Join(cfg.Logging.Dir, "anomalies"),
+		MaxAge:     time.Duration(cfg.Logging.AnomalyMaxAgeDays) * 24 * time.Hour,
 	})
 	if cfg.Telegram.Enabled {
 		orchestrator.SetTelegram(telegram.NewSender(tgClient, tgChats), cfg.Telegram)
@@ -553,6 +560,7 @@ func run(cfg config.Config, logger *slog.Logger, eventHub *hub.Hub, configDir st
 	go sweepIdleSessions(ctx, orchestrator, cfg.Memory, logger)
 	go sweepScheduledTasks(ctx, orchestrator, cfg.Schedule, logger)
 	go sweepBackups(ctx, cfg.Backup, cfg.Storage, configDir, dotEnvPath, logger)
+	go sweepAnomalies(ctx, orchestrator, logger)
 
 	return serveUntilInterrupted(ctx, httpServer, httpsServer, cfg.Server.TLS, logger)
 }
@@ -600,6 +608,29 @@ func sweepScheduledTasks(ctx context.Context, o *agentloop.Orchestrator, cfg con
 		case <-ticker.C:
 			if err := o.RunScheduledTasks(ctx, logger); err != nil {
 				logger.Error("scheduled task sweep failed", "error", err)
+			}
+		}
+	}
+}
+
+// sweepAnomalies periodically deletes logs/anomalies/ files older than
+// config.LoggingConfig.AnomalyMaxAgeDays (see Orchestrator.CleanOldAnomalies)
+// — a no-op tick if AnomalyMaxAgeDays is 0 (no age-based cleanup configured).
+// Unlike miranda.log/llm.log, anomaly files aren't size-rotated by
+// lumberjack, so without this sweep a long-lived process with frequent
+// anomalies grows that directory unbounded. Exits once ctx is cancelled at
+// shutdown.
+func sweepAnomalies(ctx context.Context, o *agentloop.Orchestrator, logger *slog.Logger) {
+	ticker := time.NewTicker(anomalySweepInterval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			if err := o.CleanOldAnomalies(); err != nil {
+				logger.Error("anomaly cleanup sweep failed", "error", err)
 			}
 		}
 	}
