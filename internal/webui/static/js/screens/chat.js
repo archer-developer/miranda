@@ -222,6 +222,16 @@ function uploadWithProgress(blob, filename, onProgress) {
  * InputResponse.Downloads / ChatEvent.Message.Downloads) — an array of
  * {file_id, filename, size_bytes, mime_type}, never parsed out of text.
  *
+ * attachments is downloads' inbound counterpart — the message's own
+ * structured upload list (history.Message.Attachments / InputResponse.Attachments /
+ * ChatEvent.Message.Attachments), an array of {filename, size_bytes,
+ * mime_type, thumbnail_data_url}, one entry per <attachment> marker in
+ * `text` in the same order — never sourced from extractAttachmentBlocks's
+ * own parse of that marker (see downloads.js's doc comments on both
+ * functions for why). Only ever set for a user message; attachmentChip
+ * renders a thumbnail when thumbnail_data_url is present, a plain chip
+ * otherwise.
+ *
  * blocks is the server-parsed markdown-lite structure for this message
  * (internal/replyformat's Block[] — see webui's messageView.Blocks /
  * InputResponse.Blocks / ChatEvent.Blocks). Only ever set for an assistant
@@ -230,17 +240,16 @@ function uploadWithProgress(blob, filename, onProgress) {
  * (which never get server-computed blocks) and the rare WS-race edge case
  * where a live event's blocks haven't arrived yet — falls back to the
  * original renderInlineText() (backtick-only) path, unchanged. */
-function bubble(role, text, timeIso, downloads, blocks) {
+function bubble(role, text, timeIso, downloads, attachments, blocks) {
   const wrap = document.createElement("div");
   wrap.className = `flex flex-col ${role === "user" ? "items-end" : "items-start"}`;
 
   let displayText = text;
   const attachmentNodes = [];
   if (role === "user") {
-    const { displayText: dt, attachments } = extractAttachmentBlocks(text);
-    displayText = dt;
-    for (const { filename, sizeBytes } of attachments) {
-      attachmentNodes.push(attachmentChip(filename, sizeBytes ?? null));
+    displayText = extractAttachmentBlocks(text).displayText;
+    for (const att of attachments ?? []) {
+      attachmentNodes.push(attachmentChip(att.filename, att.size_bytes ?? null, att.thumbnail_data_url ?? null));
     }
   }
 
@@ -359,8 +368,12 @@ function appendBubbleLine(group, role, text, blocks) {
  * bubble, or a shared merged one), so the existing per-id dedupe in
  * upsertMessage()/send() keeps working even though several ids can now
  * point at the same node.
+ *
+ * attachments is passed straight through to bubble() — see its doc comment
+ * above. A message carrying one is never mergeable (isMergeableCandidate
+ * excludes it), so appendBubbleLine's merge path below never needs it.
  */
-function renderChatMessage(role, text, timeIso, downloads, blocks, id) {
+function renderChatMessage(role, text, timeIso, downloads, blocks, id, attachments) {
   const key = minuteKey(timeIso);
   const mergeable = isMergeableCandidate(role, text, downloads);
 
@@ -375,7 +388,7 @@ function renderChatMessage(role, text, timeIso, downloads, blocks, id) {
     }
   }
 
-  const group = bubble(role, text, timeIso, downloads, blocks);
+  const group = bubble(role, text, timeIso, downloads, attachments, blocks);
   messagesEl.appendChild(group.wrap);
   if (id != null) rendered.set(id, group.wrap);
   lastGroup = mergeable && key !== null && group.pill ? { role, minuteKey: key, ...group } : null;
@@ -784,7 +797,7 @@ function upsertMessage(message, blocks) {
   if (message.role === "assistant") notifyReplyArrivedViaWS();
 
   messagesEl.querySelector("[data-empty-state]")?.remove();
-  renderChatMessage(message.role, message.content, message.created_at, message.downloads, blocks, message.id);
+  renderChatMessage(message.role, message.content, message.created_at, message.downloads, blocks, message.id, message.attachments);
   scrollToBottom();
 }
 
@@ -838,8 +851,10 @@ async function loadHistory() {
         for (const m of chatMessages) {
           // m.blocks is a top-level sibling of m.content/m.role/m.id on
           // each flattened message object (see webui's messageView) —
-          // only present (non-empty) when m.role === "assistant".
-          renderChatMessage(m.role, m.content, m.created_at, m.downloads, m.blocks, m.id);
+          // only present (non-empty) when m.role === "assistant". m.attachments
+          // is the same kind of sibling, only present (non-empty) for a user
+          // message that included an upload — see bubble()'s doc comment.
+          renderChatMessage(m.role, m.content, m.created_at, m.downloads, m.blocks, m.id, m.attachments);
         }
         scrollToBottom();
         lastRole = chatMessages.at(-1).role;

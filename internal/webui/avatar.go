@@ -6,16 +6,16 @@ import (
 	"encoding/hex"
 	"fmt"
 	"image"
-	"image/color"
 	"image/draw"
 	_ "image/gif" // image.Decode format registration
 	"image/jpeg"
 	_ "image/png" // image.Decode format registration
-	"math"
 	"net/http"
 	"os"
 	"path/filepath"
 	"regexp"
+
+	"github.com/archer-developer/miranda/internal/imageutil"
 )
 
 const (
@@ -97,7 +97,7 @@ func (h *Handler) handlePostAvatar(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	thumb := resizeBilinear(cropToSquare(src), avatarSize, avatarSize)
+	thumb := imageutil.ResizeBilinear(cropToSquare(src), avatarSize, avatarSize)
 
 	var buf bytes.Buffer
 	if err := jpeg.Encode(&buf, thumb, &jpeg.Options{Quality: 90}); err != nil {
@@ -181,74 +181,4 @@ func cropToSquare(img image.Image) image.Image {
 	dst := image.NewRGBA(image.Rect(0, 0, side, side))
 	draw.Draw(dst, dst.Bounds(), img, rect.Min, draw.Src)
 	return dst
-}
-
-// resizeBilinear resamples src to exactly width x height using bilinear
-// interpolation. Deliberately hand-rolled rather than pulling in
-// golang.org/x/image/draw: the input is already center-cropped to a square
-// close to avatarSize (client-side cropping in avatar-crop.js typically
-// exports ~480px), so this only ever does a modest downscale, where
-// bilinear is indistinguishable from fancier filters — not worth a new
-// dependency for.
-func resizeBilinear(src image.Image, width, height int) *image.RGBA {
-	bounds := src.Bounds()
-	srcW, srcH := bounds.Dx(), bounds.Dy()
-	dst := image.NewRGBA(image.Rect(0, 0, width, height))
-
-	for y := 0; y < height; y++ {
-		srcY := (float64(y)+0.5)*float64(srcH)/float64(height) - 0.5
-		y0, fy := splitFrac(srcY, srcH)
-		for x := 0; x < width; x++ {
-			srcX := (float64(x)+0.5)*float64(srcW)/float64(width) - 0.5
-			x0, fx := splitFrac(srcX, srcW)
-
-			c00 := rgba64At(src, bounds, x0, y0)
-			c10 := rgba64At(src, bounds, x0+1, y0)
-			c01 := rgba64At(src, bounds, x0, y0+1)
-			c11 := rgba64At(src, bounds, x0+1, y0+1)
-
-			dst.Set(x, y, bilerp(c00, c10, c01, c11, fx, fy))
-		}
-	}
-	return dst
-}
-
-// splitFrac splits a source-space coordinate into a clamped base index and
-// its fractional offset (0..1) toward the next index, for bilinear
-// sampling at the low/high edges of [0, size).
-func splitFrac(v float64, size int) (int, float64) {
-	base := int(math.Floor(v))
-	frac := v - float64(base)
-	if base < 0 {
-		base, frac = 0, 0
-	}
-	if base > size-1 {
-		base, frac = size-1, 0
-	}
-	return base, frac
-}
-
-func rgba64At(img image.Image, bounds image.Rectangle, x, y int) color.RGBA64 {
-	if x >= bounds.Dx() {
-		x = bounds.Dx() - 1
-	}
-	if y >= bounds.Dy() {
-		y = bounds.Dy() - 1
-	}
-	r, g, b, a := img.At(bounds.Min.X+x, bounds.Min.Y+y).RGBA()
-	return color.RGBA64{R: uint16(r), G: uint16(g), B: uint16(b), A: uint16(a)}
-}
-
-func bilerp(c00, c10, c01, c11 color.RGBA64, fx, fy float64) color.RGBA {
-	lerpU16 := func(a, b uint16, f float64) float64 {
-		return float64(a) + (float64(b)-float64(a))*f
-	}
-	lerpF64 := func(a, b, f float64) float64 {
-		return a + (b-a)*f
-	}
-	r := lerpF64(lerpU16(c00.R, c10.R, fx), lerpU16(c01.R, c11.R, fx), fy)
-	g := lerpF64(lerpU16(c00.G, c10.G, fx), lerpU16(c01.G, c11.G, fx), fy)
-	b := lerpF64(lerpU16(c00.B, c10.B, fx), lerpU16(c01.B, c11.B, fx), fy)
-	a := lerpF64(lerpU16(c00.A, c10.A, fx), lerpU16(c01.A, c11.A, fx), fy)
-	return color.RGBA{R: uint8(r / 257), G: uint8(g / 257), B: uint8(b / 257), A: uint8(a / 257)}
 }

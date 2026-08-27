@@ -55,6 +55,18 @@ type Message struct {
 	// <download>...</download> markers, stripped/re-appended on every
 	// read).
 	Downloads []DownloadRef `json:"downloads,omitempty"`
+	// Attachments is set on a Role == "user" message that included one or
+	// more pre-uploaded files (see agentloop.processAttachments) — the
+	// inbound counterpart to Downloads above, and kept out of Content for
+	// the same reason: Content is replayed to the model as conversation
+	// history on every later turn, and a thumbnail's base64 bytes have no
+	// business bloating that prompt on every future turn. The in-text
+	// <attachment>{json}</attachment> marker still goes into Content
+	// separately (see agentloop.appendAttachmentMarker) because the model
+	// itself needs that file's URI for later tool calls — this field exists
+	// purely for the web UI to render a chip/thumbnail from, without
+	// depending on that marker or on the attachments store's short TTL.
+	Attachments []AttachmentRef `json:"attachments,omitempty"`
 }
 
 // DownloadRef is the durable record of one file the model retrieved via a
@@ -68,6 +80,27 @@ type DownloadRef struct {
 	Filename  string `json:"filename"`
 	SizeBytes int64  `json:"size_bytes,omitempty"`
 	MIMEType  string `json:"mime_type,omitempty"`
+}
+
+// AttachmentRef is the durable, UI-facing record of one file the user
+// uploaded and attached to their own message — see Message.Attachments for
+// why it's structural rather than folded into Content. Unlike a download's
+// FileID, there is no live link back to the original bytes here: an
+// upload's attachments.Store record is evicted after its TTL (one hour by
+// default, no override like a download's record gets), so ThumbnailDataURL
+// is generated once, server-side, at upload-processing time — specifically
+// so a reloaded conversation still has something to show long after the
+// original upload is gone.
+type AttachmentRef struct {
+	Filename  string `json:"filename"`
+	SizeBytes int64  `json:"size_bytes,omitempty"`
+	MIMEType  string `json:"mime_type,omitempty"`
+	// ThumbnailDataURL is a small "data:image/jpeg;base64,..." preview. Only
+	// set for an image attachment whose bytes were still available and
+	// decodable at upload-processing time; empty for any other attachment
+	// type, or when thumbnail generation failed — the client falls back to
+	// a plain chip exactly as it already does for a non-image file.
+	ThumbnailDataURL string `json:"thumbnail_data_url,omitempty"`
 }
 
 // ToolCallRef is the durable record of one tool invocation the model
@@ -250,6 +283,11 @@ func (s *Store) migrate(ctx context.Context) error {
 	// downloads_json holds Message.Downloads — see its doc comment for why
 	// this is a separate column rather than folded into content.
 	if err := s.ensureColumn(ctx, "messages", "downloads_json", "TEXT"); err != nil {
+		return err
+	}
+	// attachments_json holds Message.Attachments — the inbound counterpart
+	// to downloads_json above.
+	if err := s.ensureColumn(ctx, "messages", "attachments_json", "TEXT"); err != nil {
 		return err
 	}
 	return nil
@@ -501,6 +539,42 @@ func (s *Store) AppendMessage(ctx context.Context, conversationID, role, content
 	return res.LastInsertId()
 }
 
+// AppendUserMessage records a user turn, optionally along with the files it
+// attached (attachments may be empty — see Message.Attachments for why
+// these are never folded into content). The inbound counterpart to
+// AppendAssistantMessage's downloads parameter.
+func (s *Store) AppendUserMessage(ctx context.Context, conversationID, content string, attachments []AttachmentRef) (int64, error) {
+	var attachmentsJSON sql.NullString
+	if len(attachments) > 0 {
+		// Filename is client-supplied free text (the browser's original
+		// filename) and gets the same redaction treatment as Content — e.g.
+		// a user could name a file "пин-код-665533.jpg". Copied rather than
+		// redacted in place, mirroring AppendAssistantMessage's ToolCallRef
+		// handling below: the caller may still hold onto attachments for
+		// the rest of this turn (e.g. publishChatMessage). ThumbnailDataURL
+		// is opaque base64 JPEG data — deliberately never run through the
+		// redactor, which operates on natural-language/format patterns and
+		// has nothing meaningful to find in an image's bytes.
+		stored := make([]AttachmentRef, len(attachments))
+		copy(stored, attachments)
+		for i := range stored {
+			stored[i].Filename = s.redact(stored[i].Filename)
+		}
+		b, err := json.Marshal(stored)
+		if err != nil {
+			return 0, fmt.Errorf("history: encode attachments: %w", err)
+		}
+		attachmentsJSON = sql.NullString{String: string(b), Valid: true}
+	}
+	res, err := s.db.ExecContext(ctx,
+		`INSERT INTO messages (conversation_id, role, content, attachments_json) VALUES (?, 'user', ?, ?)`,
+		conversationID, s.redact(content), attachmentsJSON)
+	if err != nil {
+		return 0, fmt.Errorf("history: append user message: %w", err)
+	}
+	return res.LastInsertId()
+}
+
 // AppendAssistantMessage records an assistant turn, optionally along with
 // the tool calls it requested (toolCalls may be empty for a plain text
 // reply) and the files it retrieved this turn (downloads may be empty too —
@@ -572,7 +646,7 @@ func (s *Store) AppendToolCall(ctx context.Context, messageID int64, toolName, m
 // so the full turn — not just its text — can be reconstructed.
 func (s *Store) ConversationMessages(ctx context.Context, conversationID string) ([]Message, error) {
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT id, conversation_id, role, content, created_at, COALESCE(tool_call_id, ''), COALESCE(tool_calls_json, ''), COALESCE(downloads_json, '')
+		`SELECT id, conversation_id, role, content, created_at, COALESCE(tool_call_id, ''), COALESCE(tool_calls_json, ''), COALESCE(downloads_json, ''), COALESCE(attachments_json, '')
 		 FROM messages WHERE conversation_id = ? ORDER BY id ASC`,
 		conversationID)
 	if err != nil {
@@ -643,7 +717,7 @@ func scanConversations(rows *sql.Rows) ([]Conversation, error) {
 // misinterpreted as an FTS5 operator and error out the search.
 func (s *Store) SearchMessages(ctx context.Context, userID, query string, limit int) ([]Message, error) {
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT m.id, m.conversation_id, m.role, m.content, m.created_at, COALESCE(m.tool_call_id, ''), COALESCE(m.tool_calls_json, ''), COALESCE(m.downloads_json, '')
+		SELECT m.id, m.conversation_id, m.role, m.content, m.created_at, COALESCE(m.tool_call_id, ''), COALESCE(m.tool_calls_json, ''), COALESCE(m.downloads_json, ''), COALESCE(m.attachments_json, '')
 		FROM messages_fts
 		JOIN messages m ON m.id = messages_fts.rowid
 		JOIN conversations c ON c.id = m.conversation_id
@@ -674,8 +748,8 @@ func scanMessages(rows *sql.Rows) ([]Message, error) {
 	var out []Message
 	for rows.Next() {
 		var m Message
-		var toolCallsJSON, downloadsJSON string
-		if err := rows.Scan(&m.ID, &m.ConversationID, &m.Role, &m.Content, &m.CreatedAt, &m.ToolCallID, &toolCallsJSON, &downloadsJSON); err != nil {
+		var toolCallsJSON, downloadsJSON, attachmentsJSON string
+		if err := rows.Scan(&m.ID, &m.ConversationID, &m.Role, &m.Content, &m.CreatedAt, &m.ToolCallID, &toolCallsJSON, &downloadsJSON, &attachmentsJSON); err != nil {
 			return nil, fmt.Errorf("history: scan message: %w", err)
 		}
 		if toolCallsJSON != "" {
@@ -686,6 +760,11 @@ func scanMessages(rows *sql.Rows) ([]Message, error) {
 		if downloadsJSON != "" {
 			if err := json.Unmarshal([]byte(downloadsJSON), &m.Downloads); err != nil {
 				return nil, fmt.Errorf("history: decode downloads for message %d: %w", m.ID, err)
+			}
+		}
+		if attachmentsJSON != "" {
+			if err := json.Unmarshal([]byte(attachmentsJSON), &m.Attachments); err != nil {
+				return nil, fmt.Errorf("history: decode attachments for message %d: %w", m.ID, err)
 			}
 		}
 		out = append(out, m)

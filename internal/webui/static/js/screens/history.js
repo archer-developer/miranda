@@ -47,19 +47,20 @@ function renderMessages(container, messages) {
 
     // m.downloads is the message's own structured file list (see
     // downloads.js's top-of-file comment) — rendered directly, nothing to
-    // parse out of content. extractAttachmentBlocks still strips the
-    // server's <attachment>{json}</attachment> marker (internal/httpapi/
-    // attachments.go's appendAttachmentMarker) from a *user* message's
-    // content before display — otherwise a past conversation containing an
-    // upload would show the raw marker/content-block text verbatim instead
-    // of a chip (see downloads.js).
+    // parse out of content. m.attachments is its inbound counterpart (see
+    // downloads.js's extractAttachmentBlocks doc comment) — also rendered
+    // directly, one attachmentChip per entry, using each entry's own
+    // thumbnail_data_url for the preview. extractAttachmentBlocks is still
+    // used, but only to strip the server's <attachment>{json}</attachment>
+    // marker (internal/httpapi/attachments.go's appendAttachmentMarker) out
+    // of a *user* message's displayed content — otherwise a past
+    // conversation containing an upload would show the raw marker/
+    // content-block text verbatim instead of a chip.
     let content = m.content;
     const downloads = m.downloads ?? [];
-    let attachments = [];
+    const attachments = m.attachments ?? [];
     if (m.role === "user") {
-      const extracted = extractAttachmentBlocks(content);
-      content = extracted.displayText;
-      attachments = extracted.attachments;
+      content = extractAttachmentBlocks(content).displayText;
     }
 
     // Content is untrusted user/assistant text — rendered via renderInlineText
@@ -75,8 +76,8 @@ function renderMessages(container, messages) {
     for (const { file_id, filename, size_bytes } of downloads) {
       line.appendChild(downloadChip(file_id, filename, size_bytes ?? null));
     }
-    for (const { filename, sizeBytes } of attachments) {
-      line.appendChild(attachmentChip(filename, sizeBytes ?? null));
+    for (const att of attachments) {
+      line.appendChild(attachmentChip(att.filename, att.size_bytes ?? null, att.thumbnail_data_url ?? null));
     }
     container.appendChild(line);
   }

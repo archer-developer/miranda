@@ -298,6 +298,49 @@ func TestAppendAssistantMessage_NilDownloadsRoundTripAsEmpty(t *testing.T) {
 	require.Empty(t, msgs[0].Downloads)
 }
 
+// TestAppendUserMessage_AttachmentsRoundTripSeparateFromContent mirrors
+// TestAppendAssistantMessage_DownloadsRoundTripSeparateFromContent for the
+// inbound direction: Attachments must round-trip via their own column,
+// leaving Content exactly what was passed in.
+func TestAppendUserMessage_AttachmentsRoundTripSeparateFromContent(t *testing.T) {
+	ctx := context.Background()
+	s := openTestStore(t)
+
+	convID, err := s.StartConversation(ctx, "alex", "web_ui")
+	require.NoError(t, err)
+
+	const content = "вот фото <attachment>{...}</attachment>"
+	atts := []AttachmentRef{{Filename: "cat.jpg", SizeBytes: 284213, MIMEType: "image/jpeg", ThumbnailDataURL: "data:image/jpeg;base64,AAAA"}}
+	_, err = s.AppendUserMessage(ctx, convID, content, atts)
+	require.NoError(t, err)
+
+	msgs, err := s.ConversationMessages(ctx, convID)
+	require.NoError(t, err)
+	require.Len(t, msgs, 1)
+	require.Equal(t, content, msgs[0].Content, "content must be exactly what was passed in")
+	require.Equal(t, atts, msgs[0].Attachments)
+}
+
+// TestAppendUserMessage_NilAttachmentsRoundTripAsEmpty covers the common
+// case (a plain-text turn with no upload) alongside the above: Attachments
+// must decode as nil/empty, not error, when attachments_json was never set
+// for the row.
+func TestAppendUserMessage_NilAttachmentsRoundTripAsEmpty(t *testing.T) {
+	ctx := context.Background()
+	s := openTestStore(t)
+
+	convID, err := s.StartConversation(ctx, "alex", "web_ui")
+	require.NoError(t, err)
+
+	_, err = s.AppendUserMessage(ctx, convID, "просто текст", nil)
+	require.NoError(t, err)
+
+	msgs, err := s.ConversationMessages(ctx, convID)
+	require.NoError(t, err)
+	require.Len(t, msgs, 1)
+	require.Empty(t, msgs[0].Attachments)
+}
+
 func TestMigrate_IsIdempotentAcrossReopens(t *testing.T) {
 	ctx := context.Background()
 	path := filepath.Join(t.TempDir(), "miranda.db")

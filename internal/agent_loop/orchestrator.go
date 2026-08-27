@@ -166,6 +166,13 @@ type InputResponse struct {
 	// out of Reply. See history.Message.Downloads for why files are never
 	// represented in Reply's own text.
 	Downloads []history.DownloadRef `json:"downloads,omitempty"`
+	// Attachments carries the user's own uploaded-file thumbnails/metadata
+	// structurally, the same shape history.Message.Attachments persists —
+	// the inbound counterpart to Downloads above, populated by
+	// processAttachments for this turn's own user message. See
+	// history.Message.Attachments for why it's never represented in Reply
+	// or in the user's own stored Content text.
+	Attachments []history.AttachmentRef `json:"attachments,omitempty"`
 	// Blocks is the web UI's rendering of the assistant's own reply text
 	// (before any voice-stripping/download-footnote transform applied to
 	// Reply — see replyformat.Parse), computed on read rather than
@@ -678,15 +685,15 @@ func (o *Orchestrator) Handle(ctx context.Context, req InputRequest) (InputRespo
 	// imageParts carries base64 image blocks for vision models and is only
 	// used in the current turn's LLM message — not in history, since
 	// future replays don't re-send the image bytes.
-	userContent, imageParts := o.processAttachments(userID, req.Text, req.Attachments)
+	userContent, imageParts, attachmentRefs := o.processAttachments(userID, req.Text, req.Attachments)
 
 	o.logRedactions(ctx, convID, userContent)
 
-	userMsgID, err := o.history.AppendMessage(ctx, convID, "user", userContent)
+	userMsgID, err := o.history.AppendUserMessage(ctx, convID, userContent, attachmentRefs)
 	if err != nil {
 		return InputResponse{}, fmt.Errorf("orchestrator: record user message: %w", err)
 	}
-	o.publishChatMessage(userID, convID, history.Message{ID: userMsgID, ConversationID: convID, Role: "user", Content: userContent})
+	o.publishChatMessage(userID, convID, history.Message{ID: userMsgID, ConversationID: convID, Role: "user", Content: userContent, Attachments: attachmentRefs})
 
 	stableSystem, volatileSystem := o.buildSystemPrompt(userID, sharedMem, memContent)
 	if err := o.history.SetSystemPrompt(ctx, convID, stableSystem+"\n\n"+volatileSystem); err != nil {
@@ -813,6 +820,7 @@ func (o *Orchestrator) Handle(ctx context.Context, req InputRequest) (InputRespo
 		UserMessageID:      userMsgID,
 		AssistantMessageID: assistantMsgID,
 		Downloads:          downloads,
+		Attachments:        attachmentRefs,
 		Blocks:             replyformat.Parse(finalText),
 	}, nil
 }

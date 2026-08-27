@@ -64,7 +64,17 @@ export function downloadChip(fileId, filename, size) {
  * images, or the "[Файл ... не найден ...]" notice when the referenced
  * file_id was invalid/expired) — none of these are meant for a human to
  * read verbatim in the chat UI. Returns the cleaned text plus one
- * descriptor per <attachment> marker to render as a chip instead.
+ * descriptor per <attachment> marker parsed from it.
+ *
+ * The `attachments` array returned here is NOT what chips render from —
+ * `uri` in particular points at attachments.Store's short-TTL
+ * (one-hour-default) proxy URL, fine for the model's own later tool calls
+ * but useless for a reload/history view once it expires. Every call site
+ * renders chips from the message's own structured `attachments` field
+ * (history.Message.Attachments / InputResponse.Attachments /
+ * ChatEvent.Message.Attachments — see internal/attachments/CLAUDE.md's "UI
+ * rendering" section) instead; this function's job stays scoped to
+ * stripping the marker text out of what's displayed.
  */
 export function extractAttachmentBlocks(text) {
   const attachments = [];
@@ -94,11 +104,21 @@ export function extractAttachmentBlocks(text) {
 }
 
 /** A file attachment shown inside a user bubble in place of the raw
- * content it was uploaded from — see extractAttachmentBlocks. Images
- * render as a thumbnail when previewDataURL is available (only ever true
- * for the client's own just-sent attachment, from its local blob — a
- * reloaded/historical message has no local pixels to show and always
- * renders the compact chip instead), other files as a compact chip. */
+ * content it was uploaded from — see extractAttachmentBlocks for what's
+ * stripped out of the message text to make room for this. Renders an
+ * image thumbnail when previewDataURL is truthy, a compact chip
+ * otherwise; this function doesn't care where previewDataURL came from —
+ * every call site sources it in priority order: (a) a local,
+ * optimistic-only data URL this tab generated client-side from the File
+ * object the user just picked (chat.js's thumbnailDataURL(), held on
+ * pendingAttachment.previewDataURL) for the narrow window before the
+ * server has processed the upload and no structured data exists yet; else
+ * (b) attachments[i].thumbnail_data_url off the message's own structured
+ * `attachments` field (see extractAttachmentBlocks's doc comment above),
+ * which covers the just-sent bubble once it reconciles with the server's
+ * response, every later WS-delivered message, and every reload/history
+ * view — this is what fixed a reload previously downgrading an image
+ * attachment to a plain chip. */
 export function attachmentChip(filename, size, previewDataURL) {
   const el = document.createElement("div");
   if (previewDataURL) {

@@ -37,12 +37,30 @@ always pass the `fileUri` verbatim.
 
 **UI rendering:** `processAttachments` appends one
 `<attachment>{json}</attachment>` marker per file (fields: `filename`,
-`mime_type`, `size_bytes`, `uri`, `note`). `downloads.js`'s
-`extractAttachmentBlocks` (shared by `screens/chat.js` and
-`screens/history.js`) strips this and renders a chip. **The marker is a
-structured tag, not prose** — an earlier version matched an exact Russian
-sentence, and it silently broke (chip disappeared, raw text leaked) the
-moment that sentence's wording changed in the same diff.
+`mime_type`, `size_bytes`, `uri`, `note`) into the message's own model-facing
+`Content` — the model needs `uri` for later tool calls. `downloads.js`'s
+`extractAttachmentBlocks` strips this marker out of *displayed* text only.
+**The marker is a structured tag, not prose** — an earlier version matched
+an exact Russian sentence, and it silently broke (chip disappeared, raw text
+leaked) the moment that sentence's wording changed in the same diff.
+
+Rendering itself, however, is sourced from a *separate* structural field,
+not from the marker: `processAttachments` also returns
+`[]history.AttachmentRef` (`filename`, `size_bytes`, `mime_type`, and, for a
+decodable image, a small server-generated `thumbnail_data_url`), persisted
+on the user's own message as `Message.Attachments` — the inbound
+counterpart to `Message.Downloads` below. This exists because the marker's
+`uri` (`GET /files/{id}`) is backed by `attachments.Store`'s short TTL (one
+hour by default, no override the way a download's record gets) — hot-linking
+it for a reload/history view would work briefly then 404 forever after.
+Baking a thumbnail into `Message.Attachments` once, at upload-processing
+time (`internal/imageutil.ThumbnailJPEG`, same pure-Go bilinear resize code
+`internal/webui/avatar.go` uses for profile pictures), makes the preview
+durable independent of the store's TTL. `screens/chat.js` and
+`screens/history.js` render every attachment chip from this field — the
+single source both the just-sent optimistic bubble and any later
+reload/history view read from, instead of each guessing at loosely
+duplicated data pulled from the in-text marker.
 
 ## File download proxy (external MCP service → browser)
 

@@ -8,12 +8,25 @@ import (
 
 	llm "github.com/archer-developer/miranda-llm"
 	"github.com/archer-developer/miranda/internal/attachments"
+	"github.com/archer-developer/miranda/internal/history"
+	"github.com/archer-developer/miranda/internal/imageutil"
 )
 
 // textAttachmentThreshold is the maximum number of bytes of a text file that
 // get inlined verbatim into the user message. Content beyond this is
 // truncated with a "[...truncated...]" marker to avoid blowing up the prompt.
 const textAttachmentThreshold = 10_000
+
+// thumbnailMaxPx and thumbnailJPEGQuality govern the size of the
+// server-generated preview stored on history.AttachmentRef.ThumbnailDataURL
+// — chosen to match the web UI's own client-side optimistic thumbnail
+// (static/js/screens/chat.js's thumbnailDataURL(file, 240) at JPEG quality
+// 0.8) exactly, so there's no visible quality jump between the just-sent
+// bubble and the same message once reloaded from the server.
+const (
+	thumbnailMaxPx       = 240
+	thumbnailJPEGQuality = 80
+)
 
 // processAttachments builds the enriched user message content from the bare
 // user text and the list of pre-uploaded file attachments (resolved via
@@ -42,15 +55,25 @@ const textAttachmentThreshold = 10_000
 //     only used in the current turn's LLM message (llm.Message.Parts) and are
 //     never stored in history — future replay turns won't re-send image bytes.
 //
+//   - attachmentRefs: one history.AttachmentRef per successfully resolved
+//     attachment, for the caller to store on the user's Message structurally
+//     (see Message.Attachments) — the web UI's sole source of truth for
+//     rendering a chip/thumbnail, independent of both the in-text marker
+//     above and the attachments store's own short TTL. Images get a small
+//     server-generated thumbnail baked in (see imageutil.ThumbnailJPEG); any
+//     other attachment gets a ref with no thumbnail, same as a non-image
+//     file already renders as a plain chip client-side.
+//
 // userID is the identity of the requesting user; only attachments uploaded by
 // that same session are accepted — a different user's file_id is treated as
 // not found to prevent cross-user data leakage.
 //
 // If o.attachStore is nil (file_upload.enabled is false), Attachments in req
-// are silently ignored and userContent == userText, imageParts == nil.
-func (o *Orchestrator) processAttachments(userID, userText string, atts []Attachment) (userContent string, imageParts []llm.ContentPart) {
+// are silently ignored and userContent == userText, imageParts == nil,
+// attachmentRefs == nil.
+func (o *Orchestrator) processAttachments(userID, userText string, atts []Attachment) (userContent string, imageParts []llm.ContentPart, attachmentRefs []history.AttachmentRef) {
 	if o.attachStore == nil || len(atts) == 0 {
-		return userText, nil
+		return userText, nil, nil
 	}
 
 	var sb strings.Builder
@@ -68,6 +91,8 @@ func (o *Orchestrator) processAttachments(userID, userText string, atts []Attach
 			continue
 		}
 
+		ref := history.AttachmentRef{Filename: rec.Filename, SizeBytes: rec.Size, MIMEType: rec.MIMEType}
+
 		switch {
 		case mimeTypePrefix(rec.MIMEType) == "image" && rec.Data != nil:
 			// Vision: send the image as an inline block to the LLM and add a
@@ -80,6 +105,12 @@ func (o *Orchestrator) processAttachments(userID, userText string, atts []Attach
 			fmt.Fprintf(&sb, "\n\n[Изображение: %q (%s)]", rec.Filename, rec.MIMEType)
 			appendAttachmentMarker(&sb, rec, o.fileURI(rec.FileID),
 				"Файл также доступен по адресу %s, если какому-то инструменту нужен сам файл, а не только его содержимое здесь.")
+
+			if thumb, err := imageutil.ThumbnailJPEG(rec.Data, thumbnailMaxPx, thumbnailJPEGQuality); err == nil {
+				ref.ThumbnailDataURL = "data:image/jpeg;base64," + base64.StdEncoding.EncodeToString(thumb)
+			} else if o.logger != nil {
+				o.logger.Warn("processAttachments: thumbnail generation failed", "filename", rec.Filename, "error", err)
+			}
 
 		case isTextMIME(rec.MIMEType) && rec.Data != nil:
 			// Inline text: embed the file content in the message so the model
@@ -103,9 +134,11 @@ func (o *Orchestrator) processAttachments(userID, userText string, atts []Attach
 			appendAttachmentMarker(&sb, rec, o.fileURI(rec.FileID),
 				"Если вызываемому инструменту нужен этот файл — передай ему именно %s (обычно это аргумент вроде fileUri в его схеме); никогда не пытайся передать содержимое файла напрямую в аргументах вызова.")
 		}
+
+		attachmentRefs = append(attachmentRefs, ref)
 	}
 
-	return sb.String(), imageParts
+	return sb.String(), imageParts, attachmentRefs
 }
 
 // attachmentMarker is the JSON payload of an <attachment>...</attachment>

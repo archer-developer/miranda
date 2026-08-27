@@ -1,8 +1,12 @@
 package agentloop
 
 import (
+	"bytes"
 	"encoding/json"
+	"image"
+	"image/png"
 	"regexp"
+	"strings"
 	"testing"
 	"time"
 
@@ -27,29 +31,45 @@ func TestProcessAttachments_BinaryFileGetsFileURINotSandboxInstructions(t *testi
 	o, store := newAttachmentTestOrchestrator(t, "http://192.168.1.50:8787")
 	store.Put(attachments.Record{UserID: "alex", FileID: "abc123", Filename: "scan.pdf", MIMEType: "application/pdf", Size: 10, Data: []byte("%PDF-bytes")})
 
-	content, imageParts := o.processAttachments("alex", "отправь в медкарту", []Attachment{{FileID: "abc123", Filename: "scan.pdf"}})
+	content, imageParts, attachmentRefs := o.processAttachments("alex", "отправь в медкарту", []Attachment{{FileID: "abc123", Filename: "scan.pdf"}})
 
 	require.Nil(t, imageParts)
 	require.Contains(t, content, "http://192.168.1.50:8787/files/abc123")
 	require.NotContains(t, content, "sandbox", "must not mention the old sandbox-specific instruction")
 	require.NotContains(t, content, "create_session", "must not mention the old sandbox tool-call sequence")
+	require.Len(t, attachmentRefs, 1)
+	require.Equal(t, "scan.pdf", attachmentRefs[0].Filename)
+	require.Empty(t, attachmentRefs[0].ThumbnailDataURL, "non-image attachments never get a thumbnail")
 }
 
 func TestProcessAttachments_ImageGetsBothInlineAndFileURI(t *testing.T) {
 	o, store := newAttachmentTestOrchestrator(t, "http://192.168.1.50:8787")
 	store.Put(attachments.Record{UserID: "alex", FileID: "img1", Filename: "photo.png", MIMEType: "image/png", Data: []byte("pngbytes")})
 
-	content, imageParts := o.processAttachments("alex", "что на фото?", []Attachment{{FileID: "img1", Filename: "photo.png"}})
+	content, imageParts, attachmentRefs := o.processAttachments("alex", "что на фото?", []Attachment{{FileID: "img1", Filename: "photo.png"}})
 
 	require.Len(t, imageParts, 1, "still inlined for vision")
 	require.Contains(t, content, "http://192.168.1.50:8787/files/img1", "also gets a fetchable URI for tools that need the file itself")
+	require.Len(t, attachmentRefs, 1)
+	require.Empty(t, attachmentRefs[0].ThumbnailDataURL, "undecodable test fixture bytes: thumbnail generation fails gracefully")
+}
+
+func TestProcessAttachments_ImageGetsDurableThumbnail(t *testing.T) {
+	o, store := newAttachmentTestOrchestrator(t, "http://192.168.1.50:8787")
+	store.Put(attachments.Record{UserID: "alex", FileID: "img1", Filename: "photo.png", MIMEType: "image/png", Data: fakePNG(t, 480, 320)})
+
+	_, _, attachmentRefs := o.processAttachments("alex", "что на фото?", []Attachment{{FileID: "img1", Filename: "photo.png"}})
+
+	require.Len(t, attachmentRefs, 1)
+	require.True(t, strings.HasPrefix(attachmentRefs[0].ThumbnailDataURL, "data:image/jpeg;base64,"),
+		"a decodable image gets a durable inline thumbnail regardless of the attachments store's own TTL")
 }
 
 func TestProcessAttachments_TextFileGetsBothInlineAndFileURI(t *testing.T) {
 	o, store := newAttachmentTestOrchestrator(t, "http://192.168.1.50:8787")
 	store.Put(attachments.Record{UserID: "alex", FileID: "txt1", Filename: "notes.txt", MIMEType: "text/plain", Data: []byte("hello world")})
 
-	content, _ := o.processAttachments("alex", "", []Attachment{{FileID: "txt1", Filename: "notes.txt"}})
+	content, _, _ := o.processAttachments("alex", "", []Attachment{{FileID: "txt1", Filename: "notes.txt"}})
 
 	require.Contains(t, content, "hello world", "still inlined")
 	require.Contains(t, content, "http://192.168.1.50:8787/files/txt1")
@@ -59,9 +79,20 @@ func TestProcessAttachments_NoFileURIWhenPublicBaseURLUnset(t *testing.T) {
 	o, store := newAttachmentTestOrchestrator(t, "")
 	store.Put(attachments.Record{UserID: "alex", FileID: "abc123", Filename: "scan.pdf", MIMEType: "application/pdf", Data: []byte("%PDF-bytes")})
 
-	content, _ := o.processAttachments("alex", "отправь в медкарту", []Attachment{{FileID: "abc123", Filename: "scan.pdf"}})
+	content, _, _ := o.processAttachments("alex", "отправь в медкарту", []Attachment{{FileID: "abc123", Filename: "scan.pdf"}})
 
 	require.NotContains(t, content, "/files/abc123")
+}
+
+// fakePNG encodes a minimal solid-color PNG of the given dimensions — real
+// enough for image.Decode/imageutil.ThumbnailJPEG to succeed on, unlike the
+// other tests' placeholder "pngbytes" fixture.
+func fakePNG(t *testing.T, w, h int) []byte {
+	t.Helper()
+	img := image.NewRGBA(image.Rect(0, 0, w, h))
+	var buf bytes.Buffer
+	require.NoError(t, png.Encode(&buf, img))
+	return buf.Bytes()
 }
 
 func TestFileURI_TrimsTrailingSlashOnBaseURL(t *testing.T) {
@@ -81,7 +112,7 @@ func TestProcessAttachments_EmitsWellFormedAttachmentMarker(t *testing.T) {
 	o, store := newAttachmentTestOrchestrator(t, "http://192.168.1.50:8787")
 	store.Put(attachments.Record{UserID: "alex", FileID: "abc123", Filename: "scan.pdf", MIMEType: "application/pdf", Size: 411910, Data: []byte("%PDF-bytes")})
 
-	content, _ := o.processAttachments("alex", "отправь в медкарту", []Attachment{{FileID: "abc123", Filename: "scan.pdf"}})
+	content, _, _ := o.processAttachments("alex", "отправь в медкарту", []Attachment{{FileID: "abc123", Filename: "scan.pdf"}})
 
 	matches := attachmentMarkerPattern.FindAllStringSubmatch(content, -1)
 	require.Len(t, matches, 1, "exactly one <attachment> marker for one attachment")
