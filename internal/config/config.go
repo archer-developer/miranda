@@ -387,14 +387,13 @@ type LLMProvider struct {
 
 	// APIKeyEnvs lists environment variable names, each expected to hold
 	// one API key (never the key itself — same *_env convention as every
-	// other secret in this codebase). All three provider types share this
-	// one field for schema consistency, but only "gemini" actually rotates
-	// across more than one entry (miranda-llm/gemini cycles through every
-	// resolved key on a quota/server error — see GeminiRotationConfig).
-	// "anthropic" and "openai_compat" use only APIKeyEnvs[0]: those SDKs
-	// take a single credential per client and aren't being changed to
-	// rotate — extra entries beyond the first are silently ignored for
-	// those two types (see cmd/miranda/main.go's firstAPIKey).
+	// other secret in this codebase). Every provider type rotates across
+	// however many entries resolve to a set env var — miranda-llm/gemini,
+	// miranda-llm/anthropic, and miranda-llm/openaicompat each hold one
+	// client per resolved key and cycle on a retryable error (quota/
+	// per-key auth, never a 5xx — see each package's own isRetryable doc
+	// comment) — tuned by GeminiRotationConfig for all three alike despite
+	// the name (a historical holdover from when only gemini rotated).
 	APIKeyEnvs []string `yaml:"api_key_envs,omitempty"`
 
 	// AnthropicTools enables Claude's own server-executed tools. Only

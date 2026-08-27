@@ -711,9 +711,13 @@ func buildProviders(ctx context.Context, configs []config.LLMProvider, logger *s
 	for _, c := range configs {
 		switch c.Type {
 		case "anthropic":
-			providers = append(providers, anthropic.New(c.Name, c.Model, firstAPIKey(c.APIKeyEnvs), anthropic.ToolsConfig(c.AnthropicTools)))
+			p, err := anthropic.New(c.Name, c.Model, c.APIKeyEnvs, anthropic.ToolsConfig(c.AnthropicTools), anthropic.RotationConfig(c.GeminiRotation), logger)
+			if err != nil {
+				return nil, fmt.Errorf("main: build anthropic provider %q: %w", c.Name, err)
+			}
+			providers = append(providers, p)
 		case "openai_compat":
-			providers = append(providers, openaicompat.New(c.Name, c.BaseURL, c.Model, firstAPIKey(c.APIKeyEnvs)))
+			providers = append(providers, openaicompat.New(c.Name, c.BaseURL, c.Model, c.APIKeyEnvs, openaicompat.RotationConfig(c.GeminiRotation), logger))
 		case "gemini":
 			p, err := gemini.New(ctx, c.Name, c.Model, c.APIKeyEnvs, gemini.ToolsConfig(c.GeminiTools), gemini.RotationConfig(c.GeminiRotation), logger)
 			if err != nil {
@@ -728,20 +732,6 @@ func buildProviders(ctx context.Context, configs []config.LLMProvider, logger *s
 		return nil, fmt.Errorf("main: no llm.providers configured in config.yaml")
 	}
 	return providers, nil
-}
-
-// firstAPIKey resolves the first non-empty env var in envs. anthropic/
-// openai_compat providers take a single credential — APIKeyEnvs is a list
-// on config.LLMProvider only for schema consistency with gemini's
-// multi-key rotation (see that field's doc comment); any entries beyond
-// the first are ignored for those two provider types.
-func firstAPIKey(envs []string) string {
-	for _, e := range envs {
-		if v := os.Getenv(e); v != "" {
-			return v
-		}
-	}
-	return ""
 }
 
 // validateEscalationToolNames rejects a config where any provider's
