@@ -28,6 +28,23 @@ const (
 	thumbnailJPEGQuality = 80
 )
 
+// modelImageMaxPx and modelImageJPEGQuality bound the image actually sent to
+// the LLM for vision. A phone camera photo is typically 3000-4000px on its
+// long edge and several MB — far beyond what any vision model's own
+// encoder resolves at (Gemini tiles into ~768px crops; Anthropic's own
+// guidance is that nothing is gained past ~1568px on the long edge). Since
+// runAgentLoop now re-sends this image on every tool-call iteration of the
+// agent loop rather than just once (see its own doc comment — an earlier
+// version dropped it after the first call, which silently blinded vision
+// the moment any tool ran first), keeping this bounded matters for
+// traffic/tokens on every one of those iterations, not just the first.
+// 1536 sits in the middle of that no-further-benefit range, still with
+// enough headroom to read a nutrition label's fine print.
+const (
+	modelImageMaxPx       = 1536
+	modelImageJPEGQuality = 90
+)
+
 // processAttachments builds the enriched user message content from the bare
 // user text and the list of pre-uploaded file attachments (resolved via
 // o.attachStore). It returns:
@@ -98,9 +115,21 @@ func (o *Orchestrator) processAttachments(userID, userText string, atts []Attach
 			// Vision: send the image as an inline block to the LLM and add a
 			// short history placeholder so future replay turns know an image
 			// was discussed, even though they won't see the pixels themselves.
+			// Resized down to modelImageMaxPx first (see its doc comment) —
+			// falls back to the untouched original on any decode error
+			// (e.g. a format imageutil doesn't recognize) rather than
+			// dropping the image outright.
+			imageData := rec.Data
+			imageMIME := rec.MIMEType
+			if resized, err := imageutil.ThumbnailJPEG(rec.Data, modelImageMaxPx, modelImageJPEGQuality); err == nil {
+				imageData = resized
+				imageMIME = "image/jpeg"
+			} else if o.logger != nil {
+				o.logger.Warn("processAttachments: model image resize failed, sending original", "filename", rec.Filename, "error", err)
+			}
 			imageParts = append(imageParts, llm.ContentPart{
-				ImageBase64: base64.StdEncoding.EncodeToString(rec.Data),
-				MIMEType:    rec.MIMEType,
+				ImageBase64: base64.StdEncoding.EncodeToString(imageData),
+				MIMEType:    imageMIME,
 			})
 			fmt.Fprintf(&sb, "\n\n[Изображение: %q (%s)]", rec.Filename, rec.MIMEType)
 			appendAttachmentMarker(&sb, rec, o.fileURI(rec.FileID),

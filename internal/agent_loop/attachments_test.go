@@ -2,6 +2,8 @@ package agentloop
 
 import (
 	"bytes"
+	"context"
+	"encoding/base64"
 	"encoding/json"
 	"image"
 	"image/png"
@@ -12,6 +14,7 @@ import (
 
 	"github.com/stretchr/testify/require"
 
+	llm "github.com/archer-developer/miranda-llm"
 	"github.com/archer-developer/miranda-llm/llmtest"
 	"github.com/archer-developer/miranda/internal/attachments"
 )
@@ -63,6 +66,84 @@ func TestProcessAttachments_ImageGetsDurableThumbnail(t *testing.T) {
 	require.Len(t, attachmentRefs, 1)
 	require.True(t, strings.HasPrefix(attachmentRefs[0].ThumbnailDataURL, "data:image/jpeg;base64,"),
 		"a decodable image gets a durable inline thumbnail regardless of the attachments store's own TTL")
+}
+
+// TestProcessAttachments_ImageIsResizedForModel guards modelImageMaxPx: a
+// phone-camera-sized image must come out smaller before it's base64-encoded
+// for the LLM, not sent at its original size (see attachments.go's doc
+// comment on modelImageMaxPx/modelImageJPEGQuality for the token/traffic
+// reasoning).
+func TestProcessAttachments_ImageIsResizedForModel(t *testing.T) {
+	o, store := newAttachmentTestOrchestrator(t, "http://192.168.1.50:8787")
+	original := fakePNG(t, 4032, 3024)
+	store.Put(attachments.Record{UserID: "alex", FileID: "img1", Filename: "photo.jpg", MIMEType: "image/jpeg", Data: original})
+
+	_, imageParts, _ := o.processAttachments("alex", "что на фото?", []Attachment{{FileID: "img1", Filename: "photo.jpg"}})
+
+	require.Len(t, imageParts, 1)
+	require.Less(t, len(imageParts[0].ImageBase64), len(original), "resized image must be smaller than the original")
+	require.Equal(t, "image/jpeg", imageParts[0].MIMEType, "resize re-encodes as JPEG regardless of source format")
+
+	decoded, err := base64.StdEncoding.DecodeString(imageParts[0].ImageBase64)
+	require.NoError(t, err)
+	cfg, _, err := image.DecodeConfig(bytes.NewReader(decoded))
+	require.NoError(t, err)
+	require.LessOrEqual(t, cfg.Width, modelImageMaxPx)
+	require.LessOrEqual(t, cfg.Height, modelImageMaxPx)
+}
+
+// TestOrchestrator_ImagePartsSurviveToolCallRoundTrip is the regression test
+// for the production bug this fixed: a photo question that needs a tool
+// call before the final answer (e.g. this household's medical_card lookup,
+// always triggered for "what can I eat") used to get its image silently
+// stripped from the message history after the *first* Chat call — every
+// following call, including the one that composes the actual answer, saw
+// only the "[Изображение: ...]" text placeholder and had to fabricate an
+// answer with no pixels at all. Confirmed against the real Gemini API by
+// replaying a captured production request with and without the image
+// present: 4/4 hallucinated answers without it, 12/12 correct with it (see
+// commit fixing agent_loop.go's runAgentLoop). This test asserts the image
+// Part is still attached on the *second* Chat call — the one immediately
+// after a tool call — not just the first.
+func TestOrchestrator_ImagePartsSurviveToolCallRoundTrip(t *testing.T) {
+	provider := llmtest.New("local",
+		llmtest.Response{ToolCall: &llm.ToolCall{ID: "call-1", Name: "remember_this", Arguments: `{"fact":"ate an apple"}`}},
+		llmtest.Response{Text: "На фото — яблоко."},
+	)
+	o, _, _ := newTestOrchestrator(t, provider)
+	store := attachments.NewStore(time.Hour)
+	t.Cleanup(store.Close)
+	o.SetAttachmentStore(store)
+	o.SetFilesPublicBaseURL("http://192.168.1.50:8787")
+	store.Put(attachments.Record{UserID: "alex", FileID: "img1", Filename: "apple.jpg", MIMEType: "image/jpeg", Data: fakePNG(t, 480, 320)})
+
+	resp, err := o.Handle(context.Background(), InputRequest{
+		Source: "cli", UserID: "alex", Text: "что на фото?",
+		Attachments: []Attachment{{FileID: "img1", Filename: "apple.jpg"}},
+	})
+	require.NoError(t, err)
+	require.Equal(t, "На фото — яблоко.", resp.Reply)
+
+	// Only Requests[1] (the call after the tool round-trip) is checked:
+	// FakeProvider.Requests records the same slice header runAgentLoop
+	// mutates in place, so an in-place `messages[j].Parts = nil` (the old
+	// bug) retroactively blanks Requests[0]'s Parts too once inspected
+	// here — Requests[1] is still the one that isolates "did the second
+	// call actually carry the image."
+	require.Len(t, provider.Requests, 2, "one call, one tool-call round-trip, one final answer")
+	requireHasImagePart(t, provider.Requests[1].Messages, "call after the tool round-trip must STILL include the image")
+}
+
+func requireHasImagePart(t *testing.T, messages []llm.Message, msg string) {
+	t.Helper()
+	for _, m := range messages {
+		for _, p := range m.Parts {
+			if p.ImageBase64 != "" {
+				return
+			}
+		}
+	}
+	t.Fatal(msg)
 }
 
 func TestProcessAttachments_TextFileGetsBothInlineAndFileURI(t *testing.T) {

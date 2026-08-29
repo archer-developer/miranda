@@ -137,15 +137,26 @@ func (o *Orchestrator) runAgentLoop(ctx context.Context, userID, conversationID,
 			return text, providerUsed, nil
 		}
 
-		// Strip image Parts from all user messages now that the model has
-		// seen them on this first successful call. Subsequent iterations
-		// re-send the full accumulated message history, and re-transmitting
-		// large base64 blobs on every tool-call round-trip wastes both
-		// tokens and latency — the model's context already holds the image.
-		for j := range messages {
-			messages[j].Parts = nil
-		}
-
+		// Image Parts are deliberately NOT stripped here. Gemini/Anthropic/
+		// OpenAI's chat-completion APIs are stateless — every call resends
+		// the full message history, and nothing on the server retains what
+		// an earlier call in this same loop saw (Gemini's own context
+		// caching isn't wired up — see gemini.ToolsConfig.ContextCaching).
+		// An earlier version stripped Parts after the first successful call
+		// on the theory that "the model's context already holds the
+		// image" — false for a stateless API, and it silently blinded the
+		// model on every iteration after the first tool call: a photo
+		// question that needs even one tool round-trip (e.g. this
+		// household's medical_card nutrition-guidance lookup, always
+		// triggered before answering "what can I eat") got answered from a
+		// text placeholder alone, with the model fabricating plausible-
+		// looking but wrong contents (mandarins, then bananas, for a photo
+		// of an apple and bell peppers) — 100% reproducible, confirmed by
+		// replaying the exact captured request with and without the image
+		// present. Re-sending the (now resized, see
+		// processAttachments/imageutil) image bytes on every iteration
+		// costs some tokens/latency, but a correct answer beats a fast
+		// wrong one.
 		o.recordAssistantToolCallMessage(ctx, userID, conversationID, text, toolCalls)
 		messages = append(messages, llm.Message{Role: llm.RoleAssistant, Content: text, ToolCalls: toolCalls})
 		for _, tc := range toolCalls {
