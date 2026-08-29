@@ -12,6 +12,8 @@ github.com/archer-developer/miranda-llm v0.0.0-20260823121634-cf301b12ce44 h1:ml
 github.com/archer-developer/miranda-llm v0.0.0-20260823121634-cf301b12ce44/go.mod h1:vcitjTFzvDa/2PZvo3ltcEx+Kq3XuRm1L3o9JTuX7So=
 github.com/archer-developer/miranda-llm v0.0.0-20260827175033-61698027dc4f h1:9dMREbgNhV6VcRZE8MlGsQVZ/xnIgvrq2s70y4DIHbQ=
 github.com/archer-developer/miranda-llm v0.0.0-20260827175033-61698027dc4f/go.mod h1:vcitjTFzvDa/2PZvo3ltcEx+Kq3XuRm1L3o9JTuX7So=
+github.com/archer-developer/miranda-llm v0.0.0-20260827184507-0320de83d927 h1:xJW42uB1/pM1l1R/GOqiuMLYqdnuQcH0fWiqvNJMDlM=
+github.com/archer-developer/miranda-llm v0.0.0-20260827184507-0320de83d927/go.mod h1:vcitjTFzvDa/2PZvo3ltcEx+Kq3XuRm1L3o9JTuX7So=
 github.com/bahlo/generic-list-go v0.2.0 h1:5sz/EEAK+ls5wF+NeqDpk5+iNdMDXrh3z3nPnH1Wvgk=
 github.com/bahlo/generic-list-go v0.2.0/go.mod h1:2KvAjgMlE5NNynlg/5iLrrCCZ2+5xWbdbCW3pNTGyYg=
 github.com/braheezy/shine-mp3 v0.1.0 h1:N2wZhv6ipCFduTSftaPNdDgZ5xFmQAPvB7JcqA4sSi8=
