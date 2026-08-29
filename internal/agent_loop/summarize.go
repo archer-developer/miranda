@@ -10,6 +10,7 @@ import (
 	"github.com/archer-developer/miranda-llm/llmtrace"
 	"github.com/archer-developer/miranda/internal/history"
 	"github.com/archer-developer/miranda/internal/hub"
+	"github.com/archer-developer/miranda/internal/prompts"
 )
 
 // preferencesSection is the memory section the summarization pass owns. It's
@@ -24,46 +25,20 @@ const preferencesMarker = "## Preferences"
 
 const sharedMarker = "## Shared"
 
-// summarizeSystemPrompt asks the model for three things in one call, to
-// avoid double-billing the idle sweep: a short per-conversation recap (what
-// search_history surfaces when the user asks "помнишь, мы говорили о...."),
-// an updated durable-facts memory section for this user, and any new
-// household-wide facts worth promoting to shared memory (the same store the
-// live-turn remember_this(scope="shared") tool writes to — see
-// internal/memory's RememberShared). Without this third section, a fact
-// mentioned in conversation but never explicitly flagged via
-// remember_this(scope="shared") had no path into shared memory at all: this
-// pass only ever saw and wrote the per-user Preferences section. The recap
-// is distinct from extracting durable facts — it's fine (expected, even)
-// for it to mention one-off details that Preferences/Shared must not.
-const summarizeSystemPrompt = `You maintain memory for a home voice assistant shared by a household. You'll be given the user's
-existing "Preferences" notes, the household's existing "Shared" notes, and the transcript of one
-finished conversation with this one user.
-Reply with exactly three sections, in this order:
-
-## Summary
-A short (1-3 sentence) recap of what was discussed in this conversation, so it can be found and
-recalled later if the user references it (e.g. "помнишь, мы говорили о...").
-
-## Preferences
-An updated bullet list of durable facts, preferences, and recurring patterns about THIS USER
-worth remembering in future conversations.
-- Do not restate details that only matter for this one conversation.
-- Do not repeat facts already covered by the existing notes unless they changed.
-- Do not repeat a fact that's already covered by the household's existing Shared notes below —
-  that's this user's own information, not something new to remember about them specifically.
-- If nothing in the transcript is worth remembering long-term about this user, this section's body
-  must be exactly the single word NONE — no bullet, no placeholder sentence, no explanation.
-
-## Shared
-A bullet list of NEW facts from this conversation that belong to the whole household rather than
-this one user (e.g. a pet's name, a wifi password, a recurring household routine) — only facts not
-already present in the existing Shared notes above.
-- If nothing in the transcript is household-wide, or everything worth keeping is already in the
-  existing Shared notes, this section's body must be exactly the single word NONE — no bullet, no
-  placeholder sentence, no explanation.
-
-Reply with only these three sections — no extra commentary.`
+// summarizeSystemPrompt (see prompts.Summarize, internal/prompts/summarize.md)
+// asks the model for three things in one call, to avoid double-billing the
+// idle sweep: a short per-conversation recap (what search_history surfaces
+// when the user asks "помнишь, мы говорили о...."), an updated
+// durable-facts memory section for this user, and any new household-wide
+// facts worth promoting to shared memory (the same store the live-turn
+// remember_this(scope="shared") tool writes to — see internal/memory's
+// RememberShared). Without this third section, a fact mentioned in
+// conversation but never explicitly flagged via remember_this(scope="shared")
+// had no path into shared memory at all: this pass only ever saw and wrote
+// the per-user Preferences section. The recap is distinct from extracting
+// durable facts — it's fine (expected, even) for it to mention one-off
+// details that Preferences/Shared must not.
+var summarizeSystemPrompt = prompts.Summarize
 
 // SummarizeIdleSessions finds conversations that have sat idle past idleFor
 // and marks them ended, distilling each into the user's memory
