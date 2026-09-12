@@ -198,7 +198,7 @@ Config flags live on `config.MemoryConfig` unless noted.
 | `speak_reply` | `config.TTSConfig.SpeakReplyTool` | Dispatch the given `text` to `tts.primary`, even on a non-`ha_assist` source. |
 | `stop_speech` | `config.TTSConfig.StopSpeechTool` | Interrupt/clear the TTS queue and stop playback on all entities. |
 | `send_telegram` | `config.TelegramConfig.SendMessageTool` | Push a message to a household member's Telegram. See `internal/telegram/CLAUDE.md`. |
-| `create_scheduled_task` / `list_scheduled_tasks` / `delete_scheduled_task` | `config.ScheduleConfig.Enabled` | Schedule/list/cancel a prompt to replay through the agent loop. See `internal/schedule/CLAUDE.md`. |
+| `create_reminder` / `create_scheduled_task` / `list_scheduled_tasks` / `delete_scheduled_task` | `config.ScheduleConfig.Enabled` | Schedule a plain reminder (delivered directly at fire time, never replayed through the LLM) or an agentic prompt (replayed through the agent loop); list/cancel either. See `internal/schedule/CLAUDE.md` and `docs/adr/reminders-vs-scheduled-tasks.md`. |
 | `web_search` | `config.TavilyConfig.WebSearch.Enabled` | Live web search via Tavily. See `internal/config/CLAUDE.md`. |
 | `web_fetch` | `config.TavilyConfig.WebFetch.Enabled` | Fetch a URL's readable text via Tavily. See `internal/config/CLAUDE.md`. |
 | `oauth_authorize` | `config.OAuthConfig.Enabled` | Start connecting a third-party account (Google Calendar) — sends the user an authorization link. See `docs/adr/oauth2-layer.md`. |

@@ -17,21 +17,17 @@ import (
 // govern session boundaries, regardless of which channel (HA, web UI,
 // future Telegram/mobile) a turn arrives on.
 func (o *Orchestrator) resolveConversation(ctx context.Context, userID, source string) (string, []llm.Message, error) {
-	open, err := o.history.OpenConversation(ctx, userID)
+	convID, existed, err := o.openOrStartConversation(ctx, userID, source)
 	if err != nil {
-		return "", nil, fmt.Errorf("orchestrator: query open conversation: %w", err)
+		return "", nil, err
 	}
-	if open == nil {
-		convID, err := o.history.StartConversation(ctx, userID, source)
-		if err != nil {
-			return "", nil, fmt.Errorf("orchestrator: start conversation: %w", err)
-		}
+	if !existed {
 		return convID, nil, nil
 	}
 
-	stored, err := o.history.ConversationMessages(ctx, open.ID)
+	stored, err := o.history.ConversationMessages(ctx, convID)
 	if err != nil {
-		return "", nil, fmt.Errorf("orchestrator: load conversation %s: %w", open.ID, err)
+		return "", nil, fmt.Errorf("orchestrator: load conversation %s: %w", convID, err)
 	}
 
 	// Prior turns are replayed in full, including tool calls and their
@@ -54,7 +50,31 @@ func (o *Orchestrator) resolveConversation(ctx context.Context, userID, source s
 			messages = append(messages, llm.Message{Role: llm.RoleTool, ToolCallID: m.ToolCallID, Content: m.Content})
 		}
 	}
-	return open.ID, messages, nil
+	return convID, messages, nil
+}
+
+// openOrStartConversation returns userID's currently open conversation id,
+// or starts a new one (tagged source) if none is open — the "continue or
+// start" decision resolveConversation needs for a live turn, factored out
+// so appendReminderToHistory (internal/agent_loop/schedule.go) doesn't keep
+// its own independently-maintained copy of the same check-then-maybe-insert
+// sequence. existed reports which branch was taken, so a caller like
+// resolveConversation that only needs to load prior messages when
+// continuing an existing conversation can skip that query for a freshly
+// started one.
+func (o *Orchestrator) openOrStartConversation(ctx context.Context, userID, source string) (id string, existed bool, err error) {
+	open, err := o.history.OpenConversation(ctx, userID)
+	if err != nil {
+		return "", false, fmt.Errorf("orchestrator: query open conversation: %w", err)
+	}
+	if open != nil {
+		return open.ID, true, nil
+	}
+	convID, err := o.history.StartConversation(ctx, userID, source)
+	if err != nil {
+		return "", false, fmt.Errorf("orchestrator: start conversation: %w", err)
+	}
+	return convID, false, nil
 }
 
 // buildSystemPrompt combines the base persona prompt with who is currently

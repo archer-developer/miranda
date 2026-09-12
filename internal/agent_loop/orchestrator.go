@@ -66,6 +66,14 @@ const sendTelegramToolName = "send_telegram"
 
 const createScheduledTaskToolName = "create_scheduled_task"
 
+// createReminderToolName names the tool that stores a passive reminder —
+// delivered directly at fire time (TTS/Telegram/history append), never
+// replayed through the LLM. Distinct from createScheduledTaskToolName,
+// which is for genuinely agentic prompts the model must re-decide
+// something about at fire time — see
+// docs/adr/reminders-vs-scheduled-tasks.md and internal/schedule.Kind.
+const createReminderToolName = "create_reminder"
+
 const listScheduledTasksToolName = "list_scheduled_tasks"
 
 const deleteScheduledTaskToolName = "delete_scheduled_task"
@@ -102,6 +110,7 @@ func ReservedToolNames() []string {
 		stopSpeechToolName,
 		sendTelegramToolName,
 		createScheduledTaskToolName,
+		createReminderToolName,
 		listScheduledTasksToolName,
 		deleteScheduledTaskToolName,
 		loadToolGroupToolName,

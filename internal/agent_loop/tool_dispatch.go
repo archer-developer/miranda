@@ -27,7 +27,7 @@ const searchHistoryLimit = 8
 // differently) instead of the whole request failing.
 //
 //nolint:gocyclo // one if-per-tool-name dispatch chain; each branch is independent and shallow, so splitting it up would obscure the 1:1 mapping between tool name and handler without reducing real complexity
-func (o *Orchestrator) executeTool(ctx context.Context, userID, conversationID string, tc llm.ToolCall, control *turnControl) string {
+func (o *Orchestrator) executeTool(ctx context.Context, userID, conversationID, source string, tc llm.ToolCall, control *turnControl) string {
 	if tc.Name == rememberToolName {
 		var args struct {
 			Fact  string `json:"fact"`
@@ -271,33 +271,10 @@ func (o *Orchestrator) executeTool(ctx context.Context, userID, conversationID s
 		if args.Task == "" {
 			return "error: task is required"
 		}
-		if (args.RunAt == "") == (args.Schedule == "") {
-			return "error: provide exactly one of run_at or schedule"
-		}
 
 		task := schedule.Task{UserID: userID, Prompt: args.Task}
-		if args.Schedule != "" {
-			sched, err := cron.ParseStandard(args.Schedule)
-			if err != nil {
-				return fmt.Sprintf("error: invalid schedule expression: %v", err)
-			}
-			// Interpret the cron expression in the user's local timezone so
-			// "1 9 * * *" means 09:01 in the user's time, not the server's.
-			if specSched, ok := sched.(*cron.SpecSchedule); ok {
-				specSched.Location = o.userLocation(userID)
-			}
-			task.CronExpr = args.Schedule
-			task.NextRunAt = sched.Next(time.Now())
-		} else {
-			runAt, err := time.Parse(time.RFC3339, args.RunAt)
-			if err != nil {
-				return fmt.Sprintf("error: invalid run_at (expected RFC3339): %v", err)
-			}
-			if !runAt.After(time.Now()) {
-				return "error: run_at is in the past"
-			}
-			task.RunAt = &runAt
-			task.NextRunAt = runAt
+		if errMsg := o.resolveTaskTiming(&task, args.RunAt, args.Schedule); errMsg != "" {
+			return errMsg
 		}
 
 		id, err := o.schedule.Create(ctx, task)
@@ -305,6 +282,38 @@ func (o *Orchestrator) executeTool(ctx context.Context, userID, conversationID s
 			return fmt.Sprintf("error: %v", err)
 		}
 		return "scheduled: " + id
+	}
+
+	if tc.Name == createReminderToolName {
+		var args struct {
+			Message       string `json:"message"`
+			RunAt         string `json:"run_at"`
+			Schedule      string `json:"schedule"`
+			AnnounceAloud bool   `json:"announce_aloud"`
+		}
+		if err := json.Unmarshal([]byte(tc.Arguments), &args); err != nil {
+			return fmt.Sprintf("error: invalid arguments: %v", err)
+		}
+		if args.Message == "" {
+			return "error: message is required"
+		}
+
+		task := schedule.Task{
+			UserID:        userID,
+			Prompt:        args.Message,
+			Kind:          schedule.KindReminder,
+			OriginSource:  source,
+			AnnounceAloud: args.AnnounceAloud,
+		}
+		if errMsg := o.resolveTaskTiming(&task, args.RunAt, args.Schedule); errMsg != "" {
+			return errMsg
+		}
+
+		id, err := o.schedule.Create(ctx, task)
+		if err != nil {
+			return fmt.Sprintf("error: %v", err)
+		}
+		return "reminder scheduled: " + id
 	}
 
 	if tc.Name == listScheduledTasksToolName {
@@ -318,7 +327,7 @@ func (o *Orchestrator) executeTool(ctx context.Context, userID, conversationID s
 		userLoc := o.userLocation(userID)
 		var b strings.Builder
 		for _, t := range tasksList {
-			fmt.Fprintf(&b, "[%s] next: %s — %s\n", t.ID, t.NextRunAt.In(userLoc).Format(time.RFC3339), t.Prompt)
+			fmt.Fprintf(&b, "[%s] kind=%s next: %s — %s\n", t.ID, t.Kind, t.NextRunAt.In(userLoc).Format(time.RFC3339), t.Prompt)
 		}
 		return b.String()
 	}
@@ -351,4 +360,41 @@ func (o *Orchestrator) executeTool(ctx context.Context, userID, conversationID s
 	}
 
 	return o.executeMCPTool(ctx, userID, conversationID, tc, control)
+}
+
+// resolveTaskTiming validates that exactly one of runAt/cronExpr was
+// provided and fills in task's CronExpr/RunAt/NextRunAt accordingly —
+// shared by create_scheduled_task and create_reminder, which differ only in
+// Prompt/Kind/OriginSource/AnnounceAloud, never in how run_at/schedule
+// itself is interpreted. Returns a non-empty "error: ..." string (the same
+// shape executeTool's other validation failures return) on failure, empty
+// on success.
+func (o *Orchestrator) resolveTaskTiming(task *schedule.Task, runAt, cronExpr string) string {
+	if (runAt == "") == (cronExpr == "") {
+		return "error: provide exactly one of run_at or schedule"
+	}
+	if cronExpr != "" {
+		sched, err := cron.ParseStandard(cronExpr)
+		if err != nil {
+			return fmt.Sprintf("error: invalid schedule expression: %v", err)
+		}
+		// Interpret the cron expression in the user's local timezone so
+		// "1 9 * * *" means 09:01 in the user's time, not the server's.
+		if specSched, ok := sched.(*cron.SpecSchedule); ok {
+			specSched.Location = o.userLocation(task.UserID)
+		}
+		task.CronExpr = cronExpr
+		task.NextRunAt = sched.Next(time.Now())
+		return ""
+	}
+	parsed, err := time.Parse(time.RFC3339, runAt)
+	if err != nil {
+		return fmt.Sprintf("error: invalid run_at (expected RFC3339): %v", err)
+	}
+	if !parsed.After(time.Now()) {
+		return "error: run_at is in the past"
+	}
+	task.RunAt = &parsed
+	task.NextRunAt = parsed
+	return ""
 }

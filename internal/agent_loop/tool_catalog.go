@@ -220,14 +220,41 @@ func (o *Orchestrator) availableTools(ctx context.Context, userID string, contro
 	}
 
 	if o.schedule != nil {
+		// runAtProperty/scheduleProperty say the same thing for both
+		// create_scheduled_task and create_reminder — "provide exactly one of
+		// run_at/schedule, interpreted in the user's local timezone" — and
+		// there's no reason for the two copies to ever say something
+		// different, so both tool defs build their property block from these
+		// same functions. Each call returns a fresh map rather than a shared
+		// one: llm.ToolDef.Parameters isn't mutated anywhere today, but two
+		// tool schemas quietly aliasing the same map instance is a latent
+		// footgun for whichever future change assumes it's safe to touch one
+		// tool's schema in place.
+		runAtProperty := func() map[string]any {
+			return map[string]any{
+				"type":        "string",
+				"description": "RFC3339 datetime for a one-off firing — use the user's current local timezone offset shown in the system prompt (e.g. \"2026-07-30T22:00:00+03:00\") — provide exactly one of run_at or schedule, never both",
+			}
+		}
+		scheduleProperty := func() map[string]any {
+			return map[string]any{
+				"type":        "string",
+				"description": "5-field cron expression (minute hour day-of-month month day-of-week) for a recurring firing — times are interpreted in the user's local timezone, e.g. \"1 9 * * *\" for every day at 09:01 local time, or \"20 22 * * 2\" for every Tuesday at 22:20 local time — provide exactly one of run_at or schedule, never both",
+			}
+		}
+
 		add(llm.ToolDef{
 			Name: createScheduledTaskToolName,
 			Description: "Schedule a free-text instruction to be carried out later, either once or on a " +
-				"recurring basis — use when the user explicitly asks to be reminded/have something done " +
-				"at a future time (e.g. \"сегодня в 22:00 напомни мне...\", \"каждое утро в 9:01 ...\"). " +
-				"The instruction is replayed through you later exactly like a live message from the user — " +
-				"at that point you decide which of your own tools (speak_reply, send_telegram, etc.) to call " +
-				"to actually carry it out, so write it as a clear, self-contained instruction, not a summary.",
+				"recurring basis, when firing it requires making a live decision or calling a tool at that " +
+				"future time (e.g. \"проверь в 22:00, заперта ли дверь, и если нет — запри\", " +
+				"\"каждое утро в 9:01 проверь погоду и напомни, если будет дождь\"). " +
+				"Do NOT use this for a plain \"remind me/tell me at [time] that ...\" request with nothing to " +
+				"decide — use create_reminder for that instead; it's delivered directly and can't loop into " +
+				"scheduling itself again the way a plain reminder phrased as an instruction can. " +
+				"The instruction here is replayed through you later exactly like a live message from the " +
+				"user — at that point you decide which of your own tools (speak_reply, send_telegram, etc.) " +
+				"to call to actually carry it out, so write it as a clear, self-contained instruction, not a summary.",
 			Parameters: map[string]any{
 				"type": "object",
 				"properties": map[string]any{
@@ -235,22 +262,50 @@ func (o *Orchestrator) availableTools(ctx context.Context, userID string, contro
 						"type":        "string",
 						"description": "the instruction to carry out when this fires, written exactly as you'd want to receive it as a live message",
 					},
-					"run_at": map[string]any{
-						"type":        "string",
-						"description": "RFC3339 datetime for a one-off task — use the user's current local timezone offset shown in the system prompt (e.g. \"2026-07-30T22:00:00+03:00\") — provide exactly one of run_at or schedule, never both",
-					},
-					"schedule": map[string]any{
-						"type":        "string",
-						"description": "5-field cron expression (minute hour day-of-month month day-of-week) for a recurring task — times are interpreted in the user's local timezone, e.g. \"1 9 * * *\" for every day at 09:01 local time, or \"20 22 * * 2\" for every Tuesday at 22:20 local time — provide exactly one of run_at or schedule, never both",
-					},
+					"run_at":   runAtProperty(),
+					"schedule": scheduleProperty(),
 				},
 				"required": []string{"task"},
 			},
 		})
 
 		add(llm.ToolDef{
+			Name: createReminderToolName,
+			Description: "Store a plain reminder to be delivered later, either once or on a recurring " +
+				"basis — use for a straightforward \"remind me/tell me at [time] that ...\" request " +
+				"(e.g. \"напомни мне в 22:00 полить кактус\", \"remind me tomorrow at 9 to call the dentist\"). " +
+				"Unlike create_scheduled_task, this is never replayed back through you as a live message — " +
+				"there is no chance to reinterpret it or act on it again — so write message as the " +
+				"reminder's own content, phrased as something to tell the user, NOT as an instruction to " +
+				"yourself (write \"Полить кактус\", never \"напомни полить кактус\" or \"remind them to " +
+				"water the cactus\"). Use create_scheduled_task instead when firing it requires you to " +
+				"actually decide something or call a tool at that future time (e.g. \"check if the door " +
+				"is locked at 22:00 and lock it if not\").",
+			Parameters: map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"message": map[string]any{
+						"type": "string",
+						"description": "the reminder's own content, as a plain statement to deliver later " +
+							"(e.g. \"Полить кактус\") — not phrased as a command or as \"remind me to ...\"",
+					},
+					"run_at":   runAtProperty(),
+					"schedule": scheduleProperty(),
+					"announce_aloud": map[string]any{
+						"type": "boolean",
+						"description": "set true only if the user explicitly asked to be told this out loud/by voice " +
+							"when it fires, even from a channel that isn't voice (e.g. typed \"напомни голосом\" in the " +
+							"web UI) — omit or leave false otherwise. A reminder created over voice is always spoken " +
+							"aloud regardless of this flag.",
+					},
+				},
+				"required": []string{"message"},
+			},
+		})
+
+		add(llm.ToolDef{
 			Name:        listScheduledTasksToolName,
-			Description: "List this user's currently scheduled tasks (id, next run time, and instruction) — use when the user asks what's scheduled, or before deleting one.",
+			Description: "List this user's currently scheduled reminders and tasks (id, kind, next run time, and content) — use when the user asks what's scheduled/reminded, or before deleting one.",
 			Parameters:  map[string]any{"type": "object", "properties": map[string]any{}},
 		})
 

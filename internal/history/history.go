@@ -17,6 +17,8 @@ import (
 
 	"github.com/google/uuid"
 	_ "modernc.org/sqlite" // registers the "sqlite" database/sql driver
+
+	"github.com/archer-developer/miranda/internal/sqliteutil"
 )
 
 // Message is one stored turn in a conversation.
@@ -264,68 +266,35 @@ func (s *Store) migrate(ctx context.Context) error {
 		}
 	}
 
-	if err := s.ensureColumn(ctx, "conversations", "summary", "TEXT"); err != nil {
+	if err := sqliteutil.EnsureColumn(ctx, s.db, "conversations", "summary", "TEXT"); err != nil {
 		return err
 	}
-	if err := s.ensureColumn(ctx, "conversations", "system_prompt", "TEXT"); err != nil {
+	if err := sqliteutil.EnsureColumn(ctx, s.db, "conversations", "system_prompt", "TEXT"); err != nil {
 		return err
 	}
 	// tool_call_id / tool_calls_json let a stored conversation be replayed to
 	// the model exactly as it happened, instead of dropping tool-call turns
 	// when resuming — see AppendAssistantMessage, AppendToolResultMessage,
 	// and resolveConversation in internal/httpapi.
-	if err := s.ensureColumn(ctx, "messages", "tool_call_id", "TEXT"); err != nil {
+	if err := sqliteutil.EnsureColumn(ctx, s.db, "messages", "tool_call_id", "TEXT"); err != nil {
 		return err
 	}
-	if err := s.ensureColumn(ctx, "messages", "tool_calls_json", "TEXT"); err != nil {
+	if err := sqliteutil.EnsureColumn(ctx, s.db, "messages", "tool_calls_json", "TEXT"); err != nil {
 		return err
 	}
 	// downloads_json holds Message.Downloads — see its doc comment for why
 	// this is a separate column rather than folded into content.
-	if err := s.ensureColumn(ctx, "messages", "downloads_json", "TEXT"); err != nil {
+	if err := sqliteutil.EnsureColumn(ctx, s.db, "messages", "downloads_json", "TEXT"); err != nil {
 		return err
 	}
 	// attachments_json holds Message.Attachments — the inbound counterpart
 	// to downloads_json above.
-	if err := s.ensureColumn(ctx, "messages", "attachments_json", "TEXT"); err != nil {
+	if err := sqliteutil.EnsureColumn(ctx, s.db, "messages", "attachments_json", "TEXT"); err != nil {
 		return err
 	}
 	return nil
 }
 
-// ensureColumn adds column to table if it isn't already there. SQLite's
-// CREATE TABLE IF NOT EXISTS above is a no-op on an already-migrated
-// database, so columns added after the initial release need this explicit
-// existence check instead — ALTER TABLE ADD COLUMN has no IF NOT EXISTS
-// form in the SQLite versions modernc.org/sqlite has historically tracked.
-func (s *Store) ensureColumn(ctx context.Context, table, column, sqlType string) error {
-	rows, err := s.db.QueryContext(ctx, fmt.Sprintf("PRAGMA table_info(%s)", table))
-	if err != nil {
-		return fmt.Errorf("history: inspect %s columns: %w", table, err)
-	}
-	defer func() { _ = rows.Close() }()
-
-	for rows.Next() {
-		var cid int
-		var name, colType string
-		var notNull, pk int
-		var dflt sql.NullString
-		if err := rows.Scan(&cid, &name, &colType, &notNull, &dflt, &pk); err != nil {
-			return fmt.Errorf("history: scan %s column info: %w", table, err)
-		}
-		if name == column {
-			return nil
-		}
-	}
-	if err := rows.Err(); err != nil {
-		return fmt.Errorf("history: read %s column info: %w", table, err)
-	}
-
-	if _, err := s.db.ExecContext(ctx, fmt.Sprintf("ALTER TABLE %s ADD COLUMN %s %s", table, column, sqlType)); err != nil {
-		return fmt.Errorf("history: add column %s.%s: %w", table, column, err)
-	}
-	return nil
-}
 
 // StartConversation records a new conversation for userID and returns its
 // generated id. If userID hasn't been seen before, it's registered too.

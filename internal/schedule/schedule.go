@@ -20,6 +20,8 @@ import (
 
 	"github.com/google/uuid"
 	_ "modernc.org/sqlite" // registers the "sqlite" database/sql driver
+
+	"github.com/archer-developer/miranda/internal/sqliteutil"
 )
 
 // ErrNotFound is returned by Delete when id doesn't exist or doesn't belong
@@ -36,6 +38,23 @@ const (
 	StatusError = "error"
 )
 
+// Kind distinguishes a passive reminder (delivered directly at fire time —
+// TTS/Telegram/history, never replayed through the LLM) from an agentic
+// scheduled task (Prompt replayed through Handle so the model can decide
+// what to do). See ../../docs/adr/reminders-vs-scheduled-tasks.md for why
+// these were split: a reminder phrased by the model as "напомни..." and
+// then replayed as a live message was indistinguishable from a fresh
+// request to schedule another reminder, causing an infinite reschedule
+// loop. KindTask is the zero value, so every task created before this
+// field existed (and any caller that doesn't set it explicitly) is a task,
+// never misread as a reminder.
+type Kind string
+
+const (
+	KindTask     Kind = "task"
+	KindReminder Kind = "reminder"
+)
+
 // Task is one scheduled task. Exactly one of CronExpr/RunAt is set: RunAt
 // for a one-off task, CronExpr (a 5-field robfig/cron/v3 standard
 // expression) for a recurring one.
@@ -48,6 +67,32 @@ type Task struct {
 	NextRunAt   time.Time
 	CreatedAt   time.Time
 	LastFiredAt *time.Time
+
+	// Kind is KindTask (default) or KindReminder — see the Kind doc comment.
+	Kind Kind
+	// OriginSource is the InputRequest.Source (users.SourceHAAssist,
+	// users.SourceTelegram, or a web-UI source string) this task was
+	// created from. Only meaningful for Kind == KindReminder, where it
+	// picks the delivery channel at fire time; always "" for KindTask.
+	OriginSource string
+	// AnnounceAloud is Kind == KindReminder only: true when the model
+	// judged the user explicitly wants this reminder spoken aloud even
+	// though OriginSource isn't voice. It layers an additional TTS leg on
+	// top of OriginSource's own delivery — it never replaces it. Always
+	// false for KindTask.
+	AnnounceAloud bool
+}
+
+// kindOrDefault returns t.Kind, defaulting to KindTask when unset — shared
+// by Create and RecordRun so a caller that never sets Kind (or a Task read
+// back from before this field existed) still writes a valid, non-empty
+// kind column in both scheduled_tasks and scheduled_task_history, rather
+// than each call site re-deriving the same default independently.
+func (t Task) kindOrDefault() Kind {
+	if t.Kind == "" {
+		return KindTask
+	}
+	return t.Kind
 }
 
 // TaskRun is one historical record of a scheduled task firing, written by
@@ -66,6 +111,7 @@ type TaskRun struct {
 	FiredAt  time.Time
 	Status   string
 	Error    string
+	Kind     Kind
 }
 
 // Store is a SQLite-backed scheduled-task database.
@@ -164,6 +210,25 @@ func (s *Store) migrate(ctx context.Context) error {
 			return fmt.Errorf("schedule: migrate: %w", err)
 		}
 	}
+
+	// kind/origin_source/announce_aloud were added after the initial
+	// release (see the Kind doc comment) — CREATE TABLE IF NOT EXISTS above
+	// is a no-op against an already-migrated database, so they need an
+	// explicit ALTER TABLE. DEFAULT 'task' retroactively marks every
+	// pre-existing row KindTask, so nothing already scheduled changes
+	// behavior.
+	if err := sqliteutil.EnsureColumn(ctx, s.db, "scheduled_tasks", "kind", `TEXT NOT NULL DEFAULT 'task'`); err != nil {
+		return err
+	}
+	if err := sqliteutil.EnsureColumn(ctx, s.db, "scheduled_tasks", "origin_source", `TEXT NOT NULL DEFAULT ''`); err != nil {
+		return err
+	}
+	if err := sqliteutil.EnsureColumn(ctx, s.db, "scheduled_tasks", "announce_aloud", `INTEGER NOT NULL DEFAULT 0`); err != nil {
+		return err
+	}
+	if err := sqliteutil.EnsureColumn(ctx, s.db, "scheduled_task_history", "kind", `TEXT NOT NULL DEFAULT 'task'`); err != nil {
+		return err
+	}
 	return nil
 }
 
@@ -173,9 +238,12 @@ func (s *Store) migrate(ctx context.Context) error {
 // recurring one) — the store has no opinion on how that's derived.
 func (s *Store) Create(ctx context.Context, task Task) (string, error) {
 	id := uuid.NewString()
+	kind := task.kindOrDefault()
 	if _, err := s.db.ExecContext(ctx,
-		`INSERT INTO scheduled_tasks (id, user_id, prompt, cron_expr, run_at, next_run_at) VALUES (?, ?, ?, ?, ?, ?)`,
+		`INSERT INTO scheduled_tasks (id, user_id, prompt, cron_expr, run_at, next_run_at, kind, origin_source, announce_aloud)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		id, task.UserID, s.redact(task.Prompt), nullString(task.CronExpr), nullTime(task.RunAt), utc(task.NextRunAt),
+		string(kind), task.OriginSource, task.AnnounceAloud,
 	); err != nil {
 		return "", fmt.Errorf("schedule: create task: %w", err)
 	}
@@ -185,7 +253,7 @@ func (s *Store) Create(ctx context.Context, task Task) (string, error) {
 // ListForUser returns userID's scheduled tasks, soonest-next-run first.
 func (s *Store) ListForUser(ctx context.Context, userID string) ([]Task, error) {
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT id, user_id, prompt, cron_expr, run_at, next_run_at, created_at, last_fired_at
+		`SELECT id, user_id, prompt, cron_expr, run_at, next_run_at, created_at, last_fired_at, kind, origin_source, announce_aloud
 		 FROM scheduled_tasks WHERE user_id = ? ORDER BY next_run_at ASC`, userID)
 	if err != nil {
 		return nil, fmt.Errorf("schedule: list tasks: %w", err)
@@ -199,7 +267,7 @@ func (s *Store) ListForUser(ctx context.Context, userID string) ([]Task, error) 
 // polls for.
 func (s *Store) DueTasks(ctx context.Context, now time.Time) ([]Task, error) {
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT id, user_id, prompt, cron_expr, run_at, next_run_at, created_at, last_fired_at
+		`SELECT id, user_id, prompt, cron_expr, run_at, next_run_at, created_at, last_fired_at, kind, origin_source, announce_aloud
 		 FROM scheduled_tasks WHERE next_run_at <= ? ORDER BY next_run_at ASC`, utc(now))
 	if err != nil {
 		return nil, fmt.Errorf("schedule: query due tasks: %w", err)
@@ -262,9 +330,10 @@ func (s *Store) Reschedule(ctx context.Context, id string, nextRunAt time.Time) 
 // permanently.
 func (s *Store) RecordRun(ctx context.Context, task Task, status, errMsg string) error {
 	id := uuid.NewString()
+	kind := task.kindOrDefault()
 	if _, err := s.db.ExecContext(ctx,
-		`INSERT INTO scheduled_task_history (id, task_id, user_id, prompt, cron_expr, run_at, status, error) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-		id, task.ID, task.UserID, s.redact(task.Prompt), nullString(task.CronExpr), nullTime(task.RunAt), status, nullString(errMsg),
+		`INSERT INTO scheduled_task_history (id, task_id, user_id, prompt, cron_expr, run_at, status, error, kind) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		id, task.ID, task.UserID, s.redact(task.Prompt), nullString(task.CronExpr), nullTime(task.RunAt), status, nullString(errMsg), string(kind),
 	); err != nil {
 		return fmt.Errorf("schedule: record task run: %w", err)
 	}
@@ -278,7 +347,7 @@ func (s *Store) RecordRun(ctx context.Context, task Task, status, errMsg string)
 // this one — breaks the tie deterministically.
 func (s *Store) HistoryForUser(ctx context.Context, userID string) ([]TaskRun, error) {
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT id, task_id, user_id, prompt, cron_expr, run_at, fired_at, status, error
+		`SELECT id, task_id, user_id, prompt, cron_expr, run_at, fired_at, status, error, kind
 		 FROM scheduled_task_history WHERE user_id = ? ORDER BY fired_at DESC, rowid DESC`, userID)
 	if err != nil {
 		return nil, fmt.Errorf("schedule: list task history: %w", err)
@@ -290,9 +359,11 @@ func (s *Store) HistoryForUser(ctx context.Context, userID string) ([]TaskRun, e
 		var r TaskRun
 		var cronExpr, errMsg sql.NullString
 		var runAt sql.NullTime
-		if err := rows.Scan(&r.ID, &r.TaskID, &r.UserID, &r.Prompt, &cronExpr, &runAt, &r.FiredAt, &r.Status, &errMsg); err != nil {
+		var kind string
+		if err := rows.Scan(&r.ID, &r.TaskID, &r.UserID, &r.Prompt, &cronExpr, &runAt, &r.FiredAt, &r.Status, &errMsg, &kind); err != nil {
 			return nil, fmt.Errorf("schedule: scan task run: %w", err)
 		}
+		r.Kind = Kind(kind)
 		r.CronExpr = cronExpr.String
 		r.Error = errMsg.String
 		if runAt.Valid {
@@ -309,9 +380,12 @@ func scanTasks(rows *sql.Rows) ([]Task, error) {
 		var t Task
 		var cronExpr sql.NullString
 		var runAt, lastFiredAt sql.NullTime
-		if err := rows.Scan(&t.ID, &t.UserID, &t.Prompt, &cronExpr, &runAt, &t.NextRunAt, &t.CreatedAt, &lastFiredAt); err != nil {
+		var kind string
+		if err := rows.Scan(&t.ID, &t.UserID, &t.Prompt, &cronExpr, &runAt, &t.NextRunAt, &t.CreatedAt, &lastFiredAt,
+			&kind, &t.OriginSource, &t.AnnounceAloud); err != nil {
 			return nil, fmt.Errorf("schedule: scan task: %w", err)
 		}
+		t.Kind = Kind(kind)
 		t.CronExpr = cronExpr.String
 		if runAt.Valid {
 			t.RunAt = &runAt.Time

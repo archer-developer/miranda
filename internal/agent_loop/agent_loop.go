@@ -160,7 +160,7 @@ func (o *Orchestrator) runAgentLoop(ctx context.Context, userID, conversationID,
 		o.recordAssistantToolCallMessage(ctx, userID, conversationID, text, toolCalls)
 		messages = append(messages, llm.Message{Role: llm.RoleAssistant, Content: text, ToolCalls: toolCalls})
 		for _, tc := range toolCalls {
-			result := o.executeTool(ctx, userID, conversationID, tc, control)
+			result := o.executeTool(ctx, userID, conversationID, source, tc, control)
 			o.recordToolCall(ctx, userID, conversationID, tc, result)
 			messages = append(messages, llm.Message{Role: llm.RoleTool, ToolCallID: tc.ID, Content: result})
 		}
@@ -287,4 +287,22 @@ func (o *Orchestrator) speakText(ctx context.Context, text string) {
 		return
 	}
 	o.tts.Speak(ctx, text)
+}
+
+// speakTextChecked is like speakText, but returns an error when the TTS
+// device couldn't be resolved (see Dispatcher.SpeakChecked) — the one class
+// of TTS failure detectable before playback is even enqueued. Physical
+// synthesis/playback still happens asynchronously and its own failures
+// remain undetectable here, same as speakText. Used by deliverReminder,
+// which — unlike a live turn — has no other way to notice a voice-origin
+// reminder never had anywhere to go and needs to report that honestly
+// instead of always recording StatusSent.
+func (o *Orchestrator) speakTextChecked(ctx context.Context, text string) error {
+	if o.tts == nil {
+		return fmt.Errorf("tts not configured")
+	}
+	if text == "" {
+		return nil
+	}
+	return o.tts.SpeakChecked(ctx, text)
 }

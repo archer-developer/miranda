@@ -74,28 +74,44 @@ func NewDispatcher(primary, fallback Provider, ha HAClient, defaultDevice string
 // Player.run. When no default device is configured, the call is silently
 // skipped and a warning is published to the hub.
 func (d *Dispatcher) Speak(ctx context.Context, text string) {
-	d.speakToResolved(ctx, text, "")
+	_ = d.speakToResolved(ctx, text, "")
 }
 
 // SpeakTo enqueues text to be spoken on device (a friendly name resolved via
 // ha.ResolveMediaPlayer). Falls back to the configured default device when
 // device is empty, same as Speak.
 func (d *Dispatcher) SpeakTo(ctx context.Context, text, device string) {
-	d.speakToResolved(ctx, text, device)
+	_ = d.speakToResolved(ctx, text, device)
+}
+
+// SpeakChecked is like Speak, but also returns an error when the target
+// device can't be resolved to an entity_id — the one class of TTS failure
+// speakToResolved can detect synchronously, before anything is ever handed
+// to the Player. Physical synthesis/playback still happens asynchronously
+// (see the package doc comment) and its own failures remain undetectable
+// here — this only catches the deterministic "no device configured/
+// resolvable" case, for callers that need some synchronous failure signal
+// instead of Speak's pure fire-and-forget contract (e.g.
+// agent_loop.deliverReminder recording a fired reminder's actual outcome).
+func (d *Dispatcher) SpeakChecked(ctx context.Context, text string) error {
+	return d.speakToResolved(ctx, text, "")
 }
 
 // speakToResolved resolves device to an entity_id and enqueues the item on
 // the Player. When device is empty, d.defaultDevice is used; when neither
-// resolves, a hub warning is published and the call is a no-op.
-func (d *Dispatcher) speakToResolved(ctx context.Context, text, device string) {
+// resolves, a hub warning is published, the call is a no-op, and the
+// resolution failure is returned as an error (Speak/SpeakTo discard it,
+// keeping their existing fire-and-forget contract; SpeakChecked surfaces it).
+func (d *Dispatcher) speakToResolved(ctx context.Context, text, device string) error {
 	entityID := d.resolveEntity(ctx, device)
 	if entityID == "" {
 		if d.hub != nil {
 			d.hub.Publish(hub.Event{Source: "tts", Message: "no TTS device configured or could not be resolved — skipping speech"})
 		}
-		return
+		return fmt.Errorf("tts: no device configured or could not be resolved")
 	}
 	d.player.Enqueue(text, entityID)
+	return nil
 }
 
 // resolveEntity maps device (a friendly name) to a media_player entity_id via

@@ -237,3 +237,104 @@ func TestMigrate_IsIdempotentAcrossReopens(t *testing.T) {
 	require.Len(t, tasks, 1)
 	require.Equal(t, id, tasks[0].ID)
 }
+
+func TestCreate_DefaultsKindToTask(t *testing.T) {
+	ctx := context.Background()
+	s := openTestStore(t)
+
+	next := time.Now().Add(time.Hour).UTC().Truncate(time.Second)
+	id, err := s.Create(ctx, Task{UserID: "alex", Prompt: "hello", RunAt: &next, NextRunAt: next})
+	require.NoError(t, err)
+
+	tasks, err := s.ListForUser(ctx, "alex")
+	require.NoError(t, err)
+	require.Len(t, tasks, 1)
+	require.Equal(t, id, tasks[0].ID)
+	require.Equal(t, KindTask, tasks[0].Kind)
+	require.Empty(t, tasks[0].OriginSource)
+	require.False(t, tasks[0].AnnounceAloud)
+}
+
+func TestCreateAndListForUser_RoundTripsReminderFields(t *testing.T) {
+	ctx := context.Background()
+	s := openTestStore(t)
+
+	next := time.Now().Add(time.Hour).UTC().Truncate(time.Second)
+	id, err := s.Create(ctx, Task{
+		UserID:        "alex",
+		Prompt:        "Полить кактус",
+		Kind:          KindReminder,
+		OriginSource:  "telegram",
+		AnnounceAloud: true,
+		RunAt:         &next,
+		NextRunAt:     next,
+	})
+	require.NoError(t, err)
+
+	tasks, err := s.ListForUser(ctx, "alex")
+	require.NoError(t, err)
+	require.Len(t, tasks, 1)
+	require.Equal(t, id, tasks[0].ID)
+	require.Equal(t, KindReminder, tasks[0].Kind)
+	require.Equal(t, "telegram", tasks[0].OriginSource)
+	require.True(t, tasks[0].AnnounceAloud)
+	require.Equal(t, "Полить кактус", tasks[0].Prompt)
+
+	due, err := s.DueTasks(ctx, next.Add(time.Second))
+	require.NoError(t, err)
+	require.Len(t, due, 1)
+	require.Equal(t, KindReminder, due[0].Kind)
+	require.Equal(t, "telegram", due[0].OriginSource)
+	require.True(t, due[0].AnnounceAloud)
+}
+
+// TestMigrate_PreExistingRowsDefaultToKindTask proves the backward-
+// compatibility requirement: a row inserted by pre-Kind code (only the
+// original 6 columns, no kind/origin_source/announce_aloud) must read back
+// as KindTask/""/false once the store is reopened and ensureColumn runs —
+// not just default to KindTask for freshly Create'd rows.
+func TestMigrate_PreExistingRowsDefaultToKindTask(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "schedule.db")
+
+	s1, err := Open(path)
+	require.NoError(t, err)
+	next := time.Now().Add(time.Hour).UTC().Truncate(time.Second)
+	_, err = s1.db.ExecContext(ctx,
+		`INSERT INTO scheduled_tasks (id, user_id, prompt, next_run_at) VALUES (?, ?, ?, ?)`,
+		"legacy-task-id", "alex", "hello", next.UTC())
+	require.NoError(t, err)
+	require.NoError(t, s1.Close())
+
+	s2, err := Open(path)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = s2.Close() })
+
+	tasks, err := s2.ListForUser(ctx, "alex")
+	require.NoError(t, err)
+	require.Len(t, tasks, 1)
+	require.Equal(t, "legacy-task-id", tasks[0].ID)
+	require.Equal(t, KindTask, tasks[0].Kind)
+	require.Empty(t, tasks[0].OriginSource)
+	require.False(t, tasks[0].AnnounceAloud)
+}
+
+func TestRecordRun_RoundTripsKind(t *testing.T) {
+	ctx := context.Background()
+	s := openTestStore(t)
+
+	next := time.Now().Add(time.Hour).UTC().Truncate(time.Second)
+	id, err := s.Create(ctx, Task{UserID: "alex", Prompt: "Полить кактус", Kind: KindReminder, RunAt: &next, NextRunAt: next})
+	require.NoError(t, err)
+	tasks, err := s.ListForUser(ctx, "alex")
+	require.NoError(t, err)
+	require.Len(t, tasks, 1)
+
+	require.NoError(t, s.RecordRun(ctx, tasks[0], StatusSent, ""))
+
+	history, err := s.HistoryForUser(ctx, "alex")
+	require.NoError(t, err)
+	require.Len(t, history, 1)
+	require.Equal(t, id, history[0].TaskID)
+	require.Equal(t, KindReminder, history[0].Kind)
+}
