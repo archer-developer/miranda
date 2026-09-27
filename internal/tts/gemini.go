@@ -36,6 +36,22 @@ const geminiGenerateContentURLFormat = "%s/v1beta/models/%s:generateContent"
 // rotating keys or retrying — see its doc comment.
 var errKeyQuotaExceeded = errors.New("tts: gemini: key quota exceeded")
 
+// errKeyOverloaded marks a single API key, on a single request, as having
+// hit Gemini's specific "backend overloaded" shape (HTTP 503 with a
+// response body error.status "UNAVAILABLE") — mirrors errKeyQuotaExceeded's
+// role but for overload instead of quota. Unlike quota, a bare 5xx that
+// ISN'T this specific shape is NOT wrapped in this (see requestOnce) and
+// short-circuits callGemini immediately, same as any other unrecognized
+// error.
+var errKeyOverloaded = errors.New("tts: gemini: key overloaded")
+
+// errKeyOverloadTimeout marks a single API key, on a single request, as
+// having taken longer than cfg.OverloadResponseTimeoutSeconds to respond at
+// all — a backend that never answers within that window looks, to a
+// caller, the same as one that eventually answers 503 UNAVAILABLE, just
+// slower about it. Classified identically to errKeyOverloaded by classify.
+var errKeyOverloadTimeout = errors.New("tts: gemini: key response exceeded overload timeout")
+
 // geminiProvider synthesizes speech via Gemini's generateContent API
 // (generationConfig.responseModalities: ["AUDIO"]) and plays the result back
 // through the same Yandex Station entities textProvider uses, by serving
@@ -52,6 +68,58 @@ type geminiProvider struct {
 	apiKeys    []string
 	httpClient *http.Client
 	logger     *slog.Logger
+	// bans is shared across every Speak call this provider ever makes
+	// (constructed once in NewGeminiProvider, never per-call) — that's what
+	// lets a key exhausted or found overloaded on one call be skipped by
+	// the very next one, without waiting to rediscover the same failure.
+	// See keyrotation.Banlist.
+	bans *keyrotation.Banlist
+}
+
+// Built-in ban/timeout defaults applied whenever the corresponding
+// GeminiTTSConfig field is <= 0 — mirrors miranda-llm/gemini.RotationConfig's
+// own defaults (30min/30min/10s).
+const (
+	defaultQuotaBan        = 30 * time.Minute
+	defaultOverloadBan     = 30 * time.Minute
+	defaultOverloadTimeout = 10 * time.Second
+)
+
+func (p *geminiProvider) quotaBanDuration() time.Duration {
+	if p.cfg.QuotaBanMinutes <= 0 {
+		return defaultQuotaBan
+	}
+	return time.Duration(p.cfg.QuotaBanMinutes) * time.Minute
+}
+
+func (p *geminiProvider) overloadBanDuration() time.Duration {
+	if p.cfg.OverloadBanMinutes <= 0 {
+		return defaultOverloadBan
+	}
+	return time.Duration(p.cfg.OverloadBanMinutes) * time.Minute
+}
+
+func (p *geminiProvider) overloadTimeout() time.Duration {
+	if p.cfg.OverloadResponseTimeoutSeconds <= 0 {
+		return defaultOverloadTimeout
+	}
+	return time.Duration(p.cfg.OverloadResponseTimeoutSeconds) * time.Second
+}
+
+// classify adapts errKeyQuotaExceeded/errKeyOverloaded/errKeyOverloadTimeout
+// to keyrotation.Run's classify shape: all three are retryable (rotate to
+// the next key), and quota/overload additionally ban the failing key on
+// p.bans for this provider's configured duration. Any other error from
+// requestOnce is neither retryable nor bannable — see requestOnce's doc
+// comment for why a non-quota/overload error short-circuits immediately.
+func (p *geminiProvider) classify(err error) (retryable bool, ban time.Duration) {
+	switch {
+	case errors.Is(err, errKeyQuotaExceeded):
+		return true, p.quotaBanDuration()
+	case errors.Is(err, errKeyOverloaded), errors.Is(err, errKeyOverloadTimeout):
+		return true, p.overloadBanDuration()
+	}
+	return false, 0
 }
 
 // NewGeminiProvider resolves cfg.APIKeyEnvs to actual key values from the
@@ -92,6 +160,7 @@ func NewGeminiProvider(cfg config.GeminiTTSConfig, stationCfg config.YandexStati
 		apiKeys:    keys,
 		httpClient: &http.Client{Timeout: timeout},
 		logger:     logger,
+		bans:       keyrotation.NewBanlist(),
 	}, nil
 }
 
@@ -230,31 +299,39 @@ func estimatedDurationFromChars(chars int) time.Duration {
 }
 
 // callGemini requests chunk's audio from Gemini, rotating across every
-// configured API key on a quota error (HTTP 429 or a response body with
-// error.status "RESOURCE_EXHAUSTED") before giving up on that pass. If
-// every key hits quota in one pass, it sleeps QuotaCooldownSeconds and
-// retries the whole key list again, up to MaxQuotaRetryCycles total passes —
-// most free-tier Gemini quota windows are per-minute, so a short cooldown
-// often recovers a key that failed moments ago. Once every cycle is
-// exhausted, it returns ErrQuotaExceeded. The cycle/cooldown loop itself is
-// keyrotation.Run (github.com/archer-developer/miranda-llm/keyrotation) —
-// shared with miranda-llm/gemini's chat provider, which needs the
-// identical shape but a broader (quota-or-5xx) retryability rule; only
-// that predicate and what one attempt does differ between the two
-// callers.
+// configured API key on a quota error (HTTP 429, or a response body with
+// error.status "RESOURCE_EXHAUSTED") or an overload signal (HTTP 503 with
+// error.status "UNAVAILABLE", or a response slower than
+// OverloadResponseTimeoutSeconds — see requestOnce) before giving up on
+// that pass. A quota or overload error also bans that key on p.bans for
+// QuotaBanMinutes/OverloadBanMinutes, so a deployment that orders a
+// free-tier key before a paid one fails over on the very next Speak call
+// instead of re-discovering the same failure from scratch (see classify).
 //
-// Any non-quota error (auth, network, malformed request) returns
-// immediately without rotating keys or retrying: cycling keys can't fix a
-// request that's simply wrong, and there's no reason to burn the cooldown
-// delay on an error a retry will just reproduce.
+// If every non-banned key still fails in one pass, it sleeps
+// QuotaCooldownSeconds and retries the whole key list again, up to
+// MaxQuotaRetryCycles total passes — most free-tier Gemini quota windows
+// are per-minute, so a short cooldown often recovers a key that failed
+// moments ago. If every key is already banned, keyrotation.Run fails fast
+// instead of sleeping through a cooldown that can't help (a ban's own
+// expiry, not this cooldown, is what recovers a key). Once every avenue is
+// exhausted, it returns ErrQuotaExceeded. The cycle/cooldown/ban loop
+// itself is keyrotation.Run (github.com/archer-developer/miranda-llm/
+// keyrotation) — shared with miranda-llm/gemini's chat provider, which
+// needs the identical shape; only classify and what one attempt does
+// differ between the two callers.
+//
+// Any other error (auth, network, malformed request) returns immediately
+// without rotating keys or retrying: cycling keys can't fix a request
+// that's simply wrong, and there's no reason to burn the cooldown delay on
+// an error a retry will just reproduce.
 func (p *geminiProvider) callGemini(ctx context.Context, text string) ([]byte, error) {
 	var pcm []byte
 	cfg := keyrotation.Config{
 		Cycles:   p.cfg.MaxQuotaRetryCycles,
 		Cooldown: time.Duration(p.cfg.QuotaCooldownSeconds) * time.Second,
 	}
-	err := keyrotation.Run(ctx, p.logger, "tts: gemini", len(p.apiKeys), cfg,
-		func(err error) bool { return errors.Is(err, errKeyQuotaExceeded) },
+	err := keyrotation.Run(ctx, p.logger, "tts: gemini", len(p.apiKeys), cfg, p.bans, p.classify,
 		func(ctx context.Context, i int) error {
 			result, err := p.requestOnce(ctx, i, p.apiKeys[i], text)
 			if err != nil {
@@ -266,11 +343,12 @@ func (p *geminiProvider) callGemini(ctx context.Context, text string) ([]byte, e
 	)
 	if err != nil {
 		// Run wraps the exhaustion case with %w around the last attempt's
-		// error, so errKeyQuotaExceeded (if that's what every key failed
-		// with) survives the wrap — translate it to the exported sentinel
-		// callers actually check for. Any other error (a non-retryable
-		// failure Run returned immediately, unwrapped) passes through as-is.
-		if errors.Is(err, errKeyQuotaExceeded) {
+		// error, so errKeyQuotaExceeded/errKeyOverloaded/errKeyOverloadTimeout
+		// (if that's what every key failed with) survives the wrap —
+		// translate it to the exported sentinel callers actually check for.
+		// Any other error (a non-retryable failure Run returned immediately,
+		// unwrapped) passes through as-is.
+		if errors.Is(err, errKeyQuotaExceeded) || errors.Is(err, errKeyOverloaded) || errors.Is(err, errKeyOverloadTimeout) {
 			return nil, fmt.Errorf("%w: %v", ErrQuotaExceeded, err)
 		}
 		return nil, err
@@ -298,6 +376,8 @@ func (p *geminiProvider) requestOnce(ctx context.Context, keyIndex int, apiKey, 
 			p.logger.Info("tts: gemini: request succeeded", fields...)
 		case errors.Is(err, errKeyQuotaExceeded):
 			p.logger.Warn("tts: gemini: key quota exceeded, trying next key", append(fields, "error", err)...)
+		case errors.Is(err, errKeyOverloaded), errors.Is(err, errKeyOverloadTimeout):
+			p.logger.Warn("tts: gemini: key overloaded, trying next key", append(fields, "error", err)...)
 		default:
 			p.logger.Error("tts: gemini: request failed", append(fields, "error", err)...)
 		}
@@ -319,8 +399,18 @@ func (p *geminiProvider) requestOnce(ctx context.Context, keyIndex int, apiKey, 
 		return nil, fmt.Errorf("tts: gemini: marshal request: %w", err)
 	}
 
+	// overloadCtx bounds this one call to p.overloadTimeout(), tighter than
+	// p.httpClient's own RequestTimeoutSeconds cutoff — a backend that
+	// simply never answers within that shorter window is treated as
+	// overloaded (retry another key + ban this one) rather than waited out
+	// to the full hard timeout. Checking overloadCtx.Err() (not ctx.Err())
+	// below distinguishes this from the CALLER's ctx being cancelled, which
+	// must not be misreported as an overload.
+	overloadCtx, cancelOverload := context.WithTimeout(ctx, p.overloadTimeout())
+	defer cancelOverload()
+
 	url := fmt.Sprintf(geminiGenerateContentURLFormat, geminiAPIBaseURL, p.cfg.Model)
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
+	httpReq, err := http.NewRequestWithContext(overloadCtx, http.MethodPost, url, bytes.NewReader(body))
 	if err != nil {
 		return nil, fmt.Errorf("tts: gemini: build request: %w", err)
 	}
@@ -329,6 +419,9 @@ func (p *geminiProvider) requestOnce(ctx context.Context, keyIndex int, apiKey, 
 
 	resp, err := p.httpClient.Do(httpReq)
 	if err != nil {
+		if overloadCtx.Err() != nil && ctx.Err() == nil {
+			return nil, fmt.Errorf("%w: %v", errKeyOverloadTimeout, err)
+		}
 		return nil, fmt.Errorf("tts: gemini: request: %w", err)
 	}
 	defer func() { _ = resp.Body.Close() }()
@@ -346,6 +439,9 @@ func (p *geminiProvider) requestOnce(ctx context.Context, keyIndex int, apiKey, 
 
 	if resp.StatusCode == http.StatusTooManyRequests || (parsed.Error != nil && parsed.Error.Status == "RESOURCE_EXHAUSTED") {
 		return nil, fmt.Errorf("%w (http %d): %s", errKeyQuotaExceeded, resp.StatusCode, string(respBody))
+	}
+	if resp.StatusCode == http.StatusServiceUnavailable && parsed.Error != nil && parsed.Error.Status == "UNAVAILABLE" {
+		return nil, fmt.Errorf("%w (http %d): %s", errKeyOverloaded, resp.StatusCode, string(respBody))
 	}
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("tts: gemini: unexpected status %d: %s", resp.StatusCode, string(respBody))

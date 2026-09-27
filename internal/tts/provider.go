@@ -20,17 +20,19 @@ type Provider interface {
 	// the resolved media_player entity to dispatch to (e.g.
 	// "media_player.alice_mini_pro") — the Dispatcher resolves the friendly
 	// device name to this entity_id before calling Speak. Returns
-	// ErrQuotaExceeded specifically when this provider's own quota (e.g.
-	// every configured Gemini API key, across every retry cycle) is
-	// exhausted, so Dispatcher.speakOne knows a fallback provider is worth
+	// ErrQuotaExceeded specifically when this provider has exhausted every
+	// avenue it has to synthesize speech right now — every configured
+	// Gemini API key hit quota, or looked overloaded, across every retry
+	// cycle — so Dispatcher.speakOne knows a fallback provider is worth
 	// trying instead of just failing the turn's speech outright.
 	Speak(ctx context.Context, text, entityID string) error
 }
 
 // ErrQuotaExceeded is the sentinel a Provider's Speak returns when every
-// avenue it has to synthesize speech has been exhausted by quota errors.
+// avenue it has to synthesize speech has been exhausted by quota errors OR
+// by every configured key looking overloaded (see geminiProvider.classify).
 // Dispatcher checks for this specific error (via errors.Is) before falling
-// back to a secondary provider — a quota error is the one failure mode
+// back to a secondary provider — quota/overload is the one failure mode
 // where a *different* provider might succeed where the primary just
 // failed; any other error (auth, network, malformed request) is not, so
 // falling back on those would just fail identically (or worse) on a

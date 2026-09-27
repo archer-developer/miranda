@@ -140,7 +140,15 @@ llm:
   # config/llm.yaml for a worked example, including its own multi-key
   # rotation (api_key_envs takes several env var names; unlike anthropic/
   # openai_compat, which only ever use the first, Gemini actually rotates
-  # across all of them on a quota or server error). Its own native
+  # across all of them on a quota error, an overloaded backend, or a
+  # first-response timeout). A key that hits quota or looks overloaded is
+  # also BANNED for a while (gemini_rotation.quota_ban_minutes/
+  # overload_ban_minutes/overload_timeout_seconds, all default 30/30/10) —
+  # skipped by every subsequent request, not just retried within one — so
+  # listing a paid key after a free-tier one lets Miranda fail over
+  # automatically once the free key is exhausted or overloaded, instead of
+  # re-discovering the same failure from scratch every turn; see
+  # config/llm.yaml's gemini_rotation blocks. Its own native
   # gemini_tools.google_search (Grounding with Google Search) is NOT
   # recommended: it has a zero quota on the free-tier Gemini Developer API,
   # not merely a low one, so every request that touches it fails with
@@ -418,6 +426,19 @@ tts:
     request_timeout_seconds: 30
     quota_cooldown_seconds: 5
     max_quota_retry_cycles: 3
+    # How long a key that hit quota, or looked overloaded, is skipped by
+    # every SUBSEQUENT Speak call — not just retried within the current
+    # one. This is what lets you list a free-tier key before a paid one
+    # (api_key_envs above) and have Miranda fail over to the paid key
+    # automatically once the free one is exhausted or overloaded, instead
+    # of re-discovering the same failure from scratch on every call.
+    quota_ban_minutes: 30
+    overload_ban_minutes: 30
+    # How long one generateContent call is allowed to take before it's
+    # treated as "this key looks overloaded" (ban + try the next key)
+    # rather than waited out — shorter than request_timeout_seconds above,
+    # which remains the hard per-call cutoff.
+    overload_response_timeout_seconds: 10
   # Lets the model call speak_reply to dispatch this turn's reply to
   # tts.primary even when the request didn't arrive via ha_assist, when the
   # user explicitly asks to hear the answer read aloud.

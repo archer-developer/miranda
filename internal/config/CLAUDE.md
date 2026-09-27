@@ -54,11 +54,34 @@ providers escalating to each other), not a legitimate deep ladder.
 ## Gemini key rotation
 
 `type: gemini` rotates across every resolved `api_key_envs` key on a quota
-error (HTTP 429/`RESOURCE_EXHAUSTED`) **or a 5xx server error**. This is
-broader than `gemini_tts`'s rotation (quota-only — see
-`internal/tts/gemini.go`), because a conversational turn can't afford to
-drop the whole turn on a transient upstream failure. Don't "fix" this back
-to match TTS's narrower behavior.
+error (HTTP 429/`RESOURCE_EXHAUSTED`), Gemini's specific "overloaded" shape
+(HTTP 503/`UNAVAILABLE`, or a first-response timeout), or a per-key auth
+failure (401/403) — see `miranda-llm/gemini.isRetryable`. An unrecognized
+5xx (anything that isn't the specific overload shape) still fails
+immediately without rotating — see that function's doc comment for the
+2026-08-27 incident this distinction exists for.
+
+`anthropic`/`openai_compat` providers rotate on the same three categories
+too (their own overload shapes: Anthropic's `overloaded_error`, a bare 503
+for `openai_compat`), via the identical `keyrotation` package.
+
+**Key banning**: a quota or overload rotation also bans that key on a
+`keyrotation.Banlist` shared across every call a provider instance makes —
+`GeminiRotationConfig.QuotaBanMinutes`/`OverloadBanMinutes` (default 30 min
+each), `OverloadTimeoutSeconds` (default 10s) tune this, and it applies
+identically to `gemini_tts` (`internal/tts/gemini.go`,
+`GeminiTTSConfig`'s own matching fields) despite that provider using a
+separate config struct. This is what lets a deployment order a free-tier
+key before a paid one and have Miranda fail over automatically once the
+free key is exhausted or looks overloaded, instead of re-discovering the
+same failure from scratch on every call — banning persists ACROSS separate
+requests, not just within one, which is the whole point (see
+`miranda-llm/keyrotation.Banlist`'s doc comment). If every configured key is
+currently banned, `keyrotation.Run` fails immediately rather than sleeping
+through `cooldown_seconds`/`max_retry_cycles` — that older cycle/cooldown
+loop still exists for non-bannable retryable errors (e.g. a per-key auth
+failure), but for quota/overload it's largely superseded by the ban's own
+expiry.
 
 `anthropic`/`openai_compat` providers accept `api_key_envs` for config
 consistency but only ever use the first entry — those SDKs take a single

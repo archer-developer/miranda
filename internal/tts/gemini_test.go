@@ -111,46 +111,15 @@ func TestGeminiProvider_CallGemini_RotatesKeyOn429(t *testing.T) {
 	require.Equal(t, []string{"key-1", "key-2"}, requests)
 }
 
-func TestGeminiProvider_CallGemini_AllKeys429ThenCooldownThenSucceeds(t *testing.T) {
-	var mu sync.Mutex
-	callCount := map[string]int{}
-	withGeminiTestServer(t, func(w http.ResponseWriter, r *http.Request) {
-		key := r.Header.Get("x-goog-api-key")
-		mu.Lock()
-		callCount[key]++
-		n := callCount[key]
-		mu.Unlock()
-
-		if n == 1 { // every key's first call, in every cycle so far, hits quota
-			w.WriteHeader(http.StatusTooManyRequests)
-			_, _ = w.Write([]byte(quotaExceededBody))
-			return
-		}
-		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write([]byte(successBody("PCMDATA:ok")))
-	})
-
-	t.Setenv("GEMINI_TEST_KEY_1", "key-1")
-	t.Setenv("GEMINI_TEST_KEY_2", "key-2")
-	p := newTestGeminiProvider(t, config.GeminiTTSConfig{
-		APIKeyEnvs: []string{"GEMINI_TEST_KEY_1", "GEMINI_TEST_KEY_2"},
-		// 0s keeps the test fast; still exercises the "sleep, then retry the
-		// whole key list" cycle path, just without an observable delay.
-		QuotaCooldownSeconds: 0,
-		MaxQuotaRetryCycles:  2,
-	})
-
-	pcm, err := p.callGemini(context.Background(), "ok")
-	require.NoError(t, err)
-	require.Equal(t, "PCMDATA:ok", string(pcm))
-
-	mu.Lock()
-	defer mu.Unlock()
-	require.Equal(t, 2, callCount["key-1"], "key-1 is tried first each cycle: fails cycle 1, succeeds cycle 2")
-	require.Equal(t, 1, callCount["key-2"], "key-2 is only ever reached once, in cycle 1, before key-1 succeeds in cycle 2")
-}
-
-func TestGeminiProvider_CallGemini_AllKeysExhaustedAcrossAllCyclesReturnsErrQuotaExceeded(t *testing.T) {
+// TestGeminiProvider_CallGemini_AllKeysBannedAfterFirstCycleFailsFastWithoutASecondCycle
+// mirrors miranda-llm/gemini's own TestGemini_AllKeysBannedAfterFirstCycleFailsFastWithoutASecondCycle
+// — once both keys hit quota in cycle 1, both get banned (30min default,
+// far longer than any QuotaCooldownSeconds), so cycle 2 finds every key
+// already banned and keyrotation.Run fails immediately rather than
+// re-requesting either key. Recovery now comes from the ban's own expiry
+// (or Dispatcher's fallback provider), not from waiting out a cooldown
+// inside this one call.
+func TestGeminiProvider_CallGemini_AllKeysBannedAfterFirstCycleFailsFastWithoutASecondCycle(t *testing.T) {
 	var mu sync.Mutex
 	requestCount := 0
 	withGeminiTestServer(t, func(w http.ResponseWriter, r *http.Request) {
@@ -169,12 +138,121 @@ func TestGeminiProvider_CallGemini_AllKeysExhaustedAcrossAllCyclesReturnsErrQuot
 		MaxQuotaRetryCycles:  2,
 	})
 
-	_, err := p.callGemini(context.Background(), "text")
+	_, err := p.callGemini(context.Background(), "ok")
 	require.ErrorIs(t, err, ErrQuotaExceeded)
+	require.Contains(t, err.Error(), "banned")
 
 	mu.Lock()
 	defer mu.Unlock()
-	require.Equal(t, 4, requestCount, "2 keys x 2 cycles")
+	require.Equal(t, 2, requestCount, "cycle 2 must find every key already banned and skip straight to failing, not re-request either key")
+}
+
+// TestGeminiProvider_CallGemini_QuotaErrorBansKeyForFutureCalls mirrors
+// miranda-llm/gemini's own TestGemini_QuotaErrorBansTheKeyForFutureCalls: a
+// 429 bans the key so a later, separate callGemini call skips it outright —
+// the mechanism behind ordering a free-tier key before a paid one and
+// having Miranda fail over automatically once the free key is exhausted.
+func TestGeminiProvider_CallGemini_QuotaErrorBansKeyForFutureCalls(t *testing.T) {
+	var requests []string
+	withGeminiTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		key := r.Header.Get("x-goog-api-key")
+		requests = append(requests, key)
+		if key == "key-1" {
+			w.WriteHeader(http.StatusTooManyRequests)
+			_, _ = w.Write([]byte(quotaExceededBody))
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(successBody("PCMDATA:ok")))
+	})
+
+	t.Setenv("GEMINI_TEST_KEY_1", "key-1")
+	t.Setenv("GEMINI_TEST_KEY_2", "key-2")
+	p := newTestGeminiProvider(t, config.GeminiTTSConfig{
+		APIKeyEnvs: []string{"GEMINI_TEST_KEY_1", "GEMINI_TEST_KEY_2"},
+	})
+
+	_, err := p.callGemini(context.Background(), "first")
+	require.NoError(t, err)
+	require.True(t, p.bans.Banned(0), "the quota-exceeded key must be banned")
+
+	_, err = p.callGemini(context.Background(), "second")
+	require.NoError(t, err)
+	require.Equal(t, []string{"key-1", "key-2", "key-2"}, requests, "the banned key must be skipped outright on the second call")
+}
+
+// TestGeminiProvider_CallGemini_OverloadedRotatesAndBansTheKey mirrors
+// miranda-llm/gemini's own TestGemini_OverloadedRotatesAndBansTheKey: an
+// explicit 503 UNAVAILABLE now rotates to the next key and bans the
+// overloaded one — the mechanism behind switching to a paid key when the
+// free tier is overloaded.
+func TestGeminiProvider_CallGemini_OverloadedRotatesAndBansTheKey(t *testing.T) {
+	var requests []string
+	withGeminiTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		key := r.Header.Get("x-goog-api-key")
+		requests = append(requests, key)
+		if key == "key-1" {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			_, _ = w.Write([]byte(`{"error":{"code":503,"message":"backend overloaded","status":"UNAVAILABLE"}}`))
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(successBody("PCMDATA:ok")))
+	})
+
+	t.Setenv("GEMINI_TEST_KEY_1", "key-1")
+	t.Setenv("GEMINI_TEST_KEY_2", "key-2")
+	p := newTestGeminiProvider(t, config.GeminiTTSConfig{
+		APIKeyEnvs: []string{"GEMINI_TEST_KEY_1", "GEMINI_TEST_KEY_2"},
+	})
+
+	pcm, err := p.callGemini(context.Background(), "ok")
+	require.NoError(t, err)
+	require.Equal(t, "PCMDATA:ok", string(pcm))
+	require.Equal(t, []string{"key-1", "key-2"}, requests)
+	require.True(t, p.bans.Banned(0), "the overloaded key must be banned")
+	require.False(t, p.bans.Banned(1))
+}
+
+// TestGeminiProvider_CallGemini_FirstResponseTimeoutRotatesAndBans mirrors
+// miranda-llm/gemini's own TestGemini_FirstResponseTimeoutRotatesAndBans: a
+// backend that never answers within OverloadResponseTimeoutSeconds must be
+// treated as overloaded (ban + rotate) rather than waited out.
+func TestGeminiProvider_CallGemini_FirstResponseTimeoutRotatesAndBans(t *testing.T) {
+	var mu sync.Mutex
+	requestCount := 0
+	withGeminiTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		idx := requestCount
+		requestCount++
+		mu.Unlock()
+
+		if idx == 0 {
+			// Sleep past the 1s overload timeout so the client gives up
+			// first; still responds eventually (rather than blocking on
+			// r.Context().Done(), which isn't guaranteed to fire promptly
+			// just because the client stopped waiting) so the test
+			// server's Close() during cleanup doesn't hang.
+			time.Sleep(3 * time.Second)
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(successBody("PCMDATA:too-late")))
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(successBody("PCMDATA:ok")))
+	})
+
+	t.Setenv("GEMINI_TEST_KEY_1", "key-1")
+	t.Setenv("GEMINI_TEST_KEY_2", "key-2")
+	p := newTestGeminiProvider(t, config.GeminiTTSConfig{
+		APIKeyEnvs:                     []string{"GEMINI_TEST_KEY_1", "GEMINI_TEST_KEY_2"},
+		OverloadResponseTimeoutSeconds: 1,
+	})
+
+	pcm, err := p.callGemini(context.Background(), "ok")
+	require.NoError(t, err)
+	require.Equal(t, "PCMDATA:ok", string(pcm))
+	require.True(t, p.bans.Banned(0), "the slow-to-respond key must be banned")
 }
 
 func TestGeminiProvider_CallGemini_NonQuotaErrorShortCircuitsWithoutTryingOtherKeys(t *testing.T) {

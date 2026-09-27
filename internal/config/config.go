@@ -465,14 +465,41 @@ type GeminiToolsConfig struct {
 	ContextCaching bool `yaml:"context_caching"`
 }
 
-// GeminiRotationConfig tunes miranda-llm/gemini's key-rotation — same
-// shape/reasoning as GeminiTTSConfig's QuotaCooldownSeconds/
-// MaxQuotaRetryCycles, but this adapter's rotation trigger is broader
-// (quota AND server errors — see miranda-llm/gemini.isRetryable) than
-// TTS's quota-only rotation.
+// GeminiRotationConfig tunes miranda-llm/gemini's (and, despite the name,
+// miranda-llm/anthropic's and miranda-llm/openaicompat's — see
+// LLMProvider.APIKeyEnvs's doc comment) key-rotation: CooldownSeconds/
+// MaxRetryCycles govern the older "sleep and retry the whole key list"
+// loop; QuotaBanMinutes/OverloadBanMinutes/OverloadTimeoutSeconds govern
+// the newer keyrotation.Banlist mechanism, which persists across separate
+// requests, not just within one — see each package's own isRetryable/
+// banDuration doc comments.
+//
+// Field-for-field identical (same names, types, order) to
+// gemini.RotationConfig/anthropic.RotationConfig/openaicompat.RotationConfig
+// on purpose: cmd/miranda's main.go converts this struct directly into
+// whichever of those three a provider entry needs via a bare Go struct
+// conversion, which only compiles if all four shapes match exactly.
 type GeminiRotationConfig struct {
 	CooldownSeconds int `yaml:"cooldown_seconds"`
 	MaxRetryCycles  int `yaml:"max_retry_cycles"`
+	// QuotaBanMinutes is how long a key that hit a quota/rate-limit error
+	// is skipped by every subsequent call, not just retried within the
+	// current one — the mechanism behind ordering a free-tier key before a
+	// paid one and having Miranda fail over automatically once the free
+	// key is exhausted.
+	QuotaBanMinutes int `yaml:"quota_ban_minutes"`
+	// OverloadBanMinutes is the same idea for a key that looks like it hit
+	// an overloaded backend (an explicit "overloaded" error, or a
+	// first-response timeout — see OverloadTimeoutSeconds) — the mechanism
+	// behind switching to a paid key when the free tier is overloaded,
+	// instead of hanging on it.
+	OverloadBanMinutes int `yaml:"overload_ban_minutes"`
+	// OverloadTimeoutSeconds bounds how long a streaming attempt waits for
+	// the very first response chunk before treating the key as overloaded
+	// — a backend that accepts the connection but never sends anything
+	// looks, to a caller, the same as one that eventually answers with an
+	// explicit overload error, just slower about it.
+	OverloadTimeoutSeconds int `yaml:"overload_timeout_seconds"`
 }
 
 // EscalationConfig configures the explicit escalation tool that lets one
@@ -926,6 +953,26 @@ type GeminiTTSConfig struct {
 	// retried (with QuotaCooldownSeconds between passes) before giving up
 	// and returning tts.ErrQuotaExceeded.
 	MaxQuotaRetryCycles int `yaml:"max_quota_retry_cycles"`
+	// QuotaBanMinutes is how long a key that hit a quota error is skipped
+	// by every subsequent Speak call, not just retried within the current
+	// one — the mechanism behind ordering a free-tier key before a paid
+	// one and having Miranda fail over automatically once the free key is
+	// exhausted, instead of rediscovering the same 429 from scratch on
+	// every call.
+	QuotaBanMinutes int `yaml:"quota_ban_minutes"`
+	// OverloadBanMinutes is the same idea for a key that looks like it hit
+	// an overloaded backend (an explicit "overloaded" error, or a
+	// response slower than OverloadResponseTimeoutSeconds) — the mechanism
+	// behind switching to a paid key when the free tier is overloaded,
+	// instead of waiting out the full RequestTimeoutSeconds on it every
+	// time.
+	OverloadBanMinutes int `yaml:"overload_ban_minutes"`
+	// OverloadResponseTimeoutSeconds bounds how long one generateContent
+	// call is allowed to take before it's treated as "this key looks
+	// overloaded" (ban + try the next key) rather than waited out —
+	// shorter than RequestTimeoutSeconds, which remains the hard per-call
+	// cutoff.
+	OverloadResponseTimeoutSeconds int `yaml:"overload_response_timeout_seconds"`
 }
 
 // TTSConfig selects and configures the TTS channel(s).
@@ -1082,11 +1129,14 @@ func Default() Config {
 				// dependencies; try "mp3" (via shine-mp3) if the real
 				// Yandex Station rejects WAV over play_media's URL
 				// playback.
-				AudioFormat:           "wav",
-				ChunkMaxChars:         200,
-				RequestTimeoutSeconds: 30,
-				QuotaCooldownSeconds:  5,
-				MaxQuotaRetryCycles:   3,
+				AudioFormat:                    "wav",
+				ChunkMaxChars:                  200,
+				RequestTimeoutSeconds:          30,
+				QuotaCooldownSeconds:           5,
+				MaxQuotaRetryCycles:            3,
+				QuotaBanMinutes:                30,
+				OverloadBanMinutes:             30,
+				OverloadResponseTimeoutSeconds: 10,
 			},
 			SpeakReplyTool: true,
 			StopSpeechTool: true,
