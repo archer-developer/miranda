@@ -13,8 +13,9 @@
 // mirrors what mkcert and similar tools do: a long-lived root CA that never
 // leaves this pair of files (only its public half, ca.pem, needs
 // installing into a device's trust store), and a leaf server certificate —
-// the one actually presented over the wire — signed by that CA and
-// regenerated independently.
+// signed by that CA and regenerated independently — whose own file bundles
+// the root cert right after it, so the chain from leaf to root is explicit
+// in what's actually presented over the wire.
 package tlscert
 
 import (
@@ -109,7 +110,15 @@ func EnsureSelfSigned(certPath, keyPath string, hosts []string, logger *slog.Log
 		return fmt.Errorf("tlscert: create certificate: %w", err)
 	}
 
-	if err := writeCertPEM(certPath, der); err != nil {
+	// certPath holds the full chain, leaf first: Go's ListenAndServeTLS (and
+	// TLS clients generally) treat every PEM block in a cert file after the
+	// first as an intermediate to present alongside it during the handshake.
+	// Bundling the root here too — even though it's also installed
+	// separately into the browser/OS trust store as ca.pem — makes the link
+	// from leaf to root explicit on the wire instead of relying on the
+	// verifier to already hold that exact root, which is what Firefox's
+	// path-building expects to see.
+	if err := writeCertPEM(certPath, der, caCert.Raw); err != nil {
 		return err
 	}
 	if err := writeKeyPEM(keyPath, leafKey); err != nil {
@@ -235,13 +244,20 @@ func addSANHosts(template *x509.Certificate, hosts []string) {
 	}
 }
 
-func writeCertPEM(path string, der []byte) error {
+// writeCertPEM writes one or more DER-encoded certificates to path as
+// consecutive PEM blocks, in the order given. For a leaf cert this is how a
+// chain gets built: the leaf DER first, then each issuer up to (and
+// including) the root, so a TLS client sees the whole path in the handshake
+// without needing it already cached.
+func writeCertPEM(path string, ders ...[]byte) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return fmt.Errorf("create dir for %s: %w", path, err)
 	}
 	var buf bytes.Buffer
-	if err := pem.Encode(&buf, &pem.Block{Type: "CERTIFICATE", Bytes: der}); err != nil {
-		return fmt.Errorf("encode %s: %w", path, err)
+	for _, der := range ders {
+		if err := pem.Encode(&buf, &pem.Block{Type: "CERTIFICATE", Bytes: der}); err != nil {
+			return fmt.Errorf("encode %s: %w", path, err)
+		}
 	}
 	if err := os.WriteFile(path, buf.Bytes(), 0o644); err != nil {
 		return fmt.Errorf("write %s: %w", path, err)
