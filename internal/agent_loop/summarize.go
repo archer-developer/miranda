@@ -23,21 +23,34 @@ const summaryMarker = "## Summary"
 
 const preferencesMarker = "## Preferences"
 
+// sharedMarker is no longer part of what this pass asks the model to
+// produce (see summarizeSystemPrompt's doc comment) — kept only so
+// splitSummaryPreferences can defensively trim off a stray "## Shared"
+// heading the model imitates from the "Existing Shared notes" context it
+// was shown, rather than accidentally folding that content into Preferences.
 const sharedMarker = "## Shared"
 
 // summarizeSystemPrompt (see prompts.Summarize, internal/prompts/summarize.md)
-// asks the model for three things in one call, to avoid double-billing the
+// asks the model for two things in one call, to avoid double-billing the
 // idle sweep: a short per-conversation recap (what search_history surfaces
-// when the user asks "помнишь, мы говорили о...."), an updated
-// durable-facts memory section for this user, and any new household-wide
-// facts worth promoting to shared memory (the same store the live-turn
-// remember_this(scope="shared") tool writes to — see internal/memory's
-// RememberShared). Without this third section, a fact mentioned in
-// conversation but never explicitly flagged via remember_this(scope="shared")
-// had no path into shared memory at all: this pass only ever saw and wrote
-// the per-user Preferences section. The recap is distinct from extracting
-// durable facts — it's fine (expected, even) for it to mention one-off
-// details that Preferences/Shared must not.
+// when the user asks "помнишь, мы говорили о...."), and an updated
+// durable-facts Preferences section for this one user. The recap is
+// distinct from extracting durable facts — it's fine (expected, even) for
+// it to mention one-off details that Preferences must not.
+//
+// This pass deliberately never writes to shared.md (household memory) —
+// only the live remember_this(scope="shared") tool call does that. An
+// earlier version also asked the model for a "## Shared" section here and
+// wrote each line straight to memory.RememberShared, to close the gap
+// where a household fact mentioned in conversation but never explicitly
+// flagged live had no path into shared memory at all. In practice that
+// path let shared.md balloon: the model routinely judged something
+// belonging to one household member specifically (medical events, meal
+// logs, personal errands) as "worth telling the whole household" simply
+// because it affects them too, and every such judgment call is a
+// permanent, append-only line nobody asked for. Losing that one gap is the
+// accepted tradeoff for shared.md only ever growing from something a user
+// (or the model, live, on their behalf) explicitly asked to remember.
 var summarizeSystemPrompt = prompts.Summarize
 
 // SummarizeIdleSessions finds conversations that have sat idle past idleFor
@@ -125,12 +138,15 @@ func (o *Orchestrator) tryDistillConversation(ctx context.Context, convID, userI
 	if err != nil {
 		return "", false, fmt.Errorf("read memory: %w", err)
 	}
+	// Read-only context for the prompt (helps it avoid restating a fact the
+	// household already has via Shared) — this pass never writes here; see
+	// summarizeSystemPrompt's doc comment for why.
 	existingShared, err := o.memory.ReadShared()
 	if err != nil {
 		return "", false, fmt.Errorf("read shared memory: %w", err)
 	}
 
-	summary, preferences, sharedFacts, err := o.distillConversation(ctx, existing, existingShared, messages)
+	summary, preferences, err := o.distillConversation(ctx, existing, existingShared, messages)
 	if err != nil {
 		o.hub.Publish(hub.Event{Source: "error", Message: fmt.Sprintf("summarize conversation %s: distill: %v", convID, err)})
 		return "", false, nil
@@ -139,19 +155,6 @@ func (o *Orchestrator) tryDistillConversation(ctx context.Context, convID, userI
 	if hasContent(preferences) {
 		if err := o.memory.ReplaceSection(userID, preferencesSection, preferences); err != nil {
 			return "", false, fmt.Errorf("write memory: %w", err)
-		}
-	}
-
-	// Shared memory has no per-conversation "owner" the way Preferences does
-	// — it aggregates household facts contributed across every user's
-	// conversations, so this pass appends new facts one at a time (the same
-	// atomic shape remember_this(scope="shared") uses) rather than
-	// wholesale-replacing the section the way ReplaceSection does for
-	// Preferences, which would discard whatever other conversations already
-	// contributed.
-	for _, fact := range bulletLines(sharedFacts) {
-		if err := o.memory.RememberShared(fact); err != nil {
-			return "", false, fmt.Errorf("write shared memory: %w", err)
 		}
 	}
 
@@ -166,13 +169,13 @@ func (o *Orchestrator) publishConversationEnded(userID, convID string) {
 	o.hub.Publish(hub.Event{Source: "chat", UserID: userID, Data: ChatEvent{Type: "conversation_ended", ConversationID: convID}})
 }
 
-// distillConversation asks the LLM router for a conversation recap, an
-// updated Preferences section body, and any new household-wide facts to
-// promote to shared memory, given the current per-user and shared memory
-// and one conversation's transcript. It uses the router directly (no tools,
-// no TTS) since this is a background text distillation, not a user-facing
-// turn.
-func (o *Orchestrator) distillConversation(ctx context.Context, existingMemory, existingShared string, transcript []history.Message) (summary, preferences, sharedFacts string, err error) {
+// distillConversation asks the LLM router for a conversation recap and an
+// updated Preferences section body, given the current per-user memory
+// (plus the household's Shared notes, passed only as read-only context —
+// see summarizeSystemPrompt) and one conversation's transcript. It uses the
+// router directly (no tools, no TTS) since this is a background text
+// distillation, not a user-facing turn.
+func (o *Orchestrator) distillConversation(ctx context.Context, existingMemory, existingShared string, transcript []history.Message) (summary, preferences string, err error) {
 	var b strings.Builder
 	b.WriteString("Existing Preferences notes:\n")
 	if existingMemory == "" {
@@ -201,41 +204,40 @@ func (o *Orchestrator) distillConversation(ctx context.Context, existingMemory, 
 
 	stream, err := o.router.Chat(ctx, req, nil)
 	if err != nil {
-		return "", "", "", fmt.Errorf("chat: %w", err)
+		return "", "", fmt.Errorf("chat: %w", err)
 	}
 
 	var text string
 	for chunk := range stream {
 		if chunk.Err != nil {
-			return "", "", "", fmt.Errorf("stream: %w", chunk.Err)
+			return "", "", fmt.Errorf("stream: %w", chunk.Err)
 		}
 		text += chunk.TextDelta
 	}
 
-	summary, preferences, sharedFacts = splitSummaryPreferencesShared(text)
-	return summary, preferences, sharedFacts, nil
+	summary, preferences = splitSummaryPreferences(text)
+	return summary, preferences, nil
 }
 
-// splitSummaryPreferencesShared parses the "## Summary" / "## Preferences" /
-// "## Shared" sections out of the model's reply. If the model omits the
-// Preferences heading entirely, the whole reply is treated as the summary
-// and both other sections come back empty — a safe degradation, since an
-// empty section is already a no-op for the caller. Omitting just the Shared
-// heading (a model that hasn't been prompted to know about it, or an older
-// scripted test response) degrades the same way: preferences captures
-// everything after the Preferences marker, sharedFacts comes back empty.
-func splitSummaryPreferencesShared(text string) (summary, preferences, sharedFacts string) {
+// splitSummaryPreferences parses the "## Summary" / "## Preferences"
+// sections out of the model's reply. If the model omits the Preferences
+// heading entirely, the whole reply is treated as the summary and
+// preferences comes back empty — a safe degradation, since an empty
+// section is already a no-op for the caller. A stray "## Shared" heading —
+// the model imitating the "Existing Shared notes" context it was shown, or
+// an older scripted test response from before that section was removed
+// (see summarizeSystemPrompt's doc comment) — is trimmed off the end of
+// preferences and its content simply discarded: this pass never writes to
+// shared.md, on purpose, regardless of what the model produces.
+func splitSummaryPreferences(text string) (summary, preferences string) {
 	text = strings.TrimSpace(text)
 
-	var summaryPart, preferencesPart, sharedPart string
+	var summaryPart, preferencesPart string
 	if idx := strings.Index(text, preferencesMarker); idx >= 0 {
 		summaryPart = text[:idx]
-		rest := text[idx+len(preferencesMarker):]
-		if sharedIdx := strings.Index(rest, sharedMarker); sharedIdx >= 0 {
-			preferencesPart = rest[:sharedIdx]
-			sharedPart = rest[sharedIdx+len(sharedMarker):]
-		} else {
-			preferencesPart = rest
+		preferencesPart = text[idx+len(preferencesMarker):]
+		if sharedIdx := strings.Index(preferencesPart, sharedMarker); sharedIdx >= 0 {
+			preferencesPart = preferencesPart[:sharedIdx]
 		}
 	} else {
 		summaryPart = text
@@ -245,28 +247,7 @@ func splitSummaryPreferencesShared(text string) (summary, preferences, sharedFac
 	summaryPart = strings.TrimPrefix(summaryPart, summaryMarker)
 	summaryPart = strings.TrimSpace(summaryPart)
 
-	return summaryPart, strings.TrimSpace(preferencesPart), strings.TrimSpace(sharedPart)
-}
-
-// bulletLines splits a "- fact" bullet list (as sharedFacts comes back from
-// splitSummaryPreferencesShared) into individual fact strings, one per
-// RememberShared call — stripping the leading "-" and skipping blank lines
-// (so a model reply with stray blank lines between bullets doesn't produce
-// an empty RememberShared entry) and the NONE sentinel (so "- NONE" or a
-// bare "NONE" line never gets written as if it were a real fact — see
-// isNoneSentinel).
-func bulletLines(list string) []string {
-	var out []string
-	for _, line := range strings.Split(list, "\n") {
-		line = strings.TrimSpace(line)
-		line = strings.TrimPrefix(line, "-")
-		line = strings.TrimSpace(line)
-		if line == "" || isNoneSentinel(line) {
-			continue
-		}
-		out = append(out, line)
-	}
-	return out
+	return summaryPart, strings.TrimSpace(preferencesPart)
 }
 
 // hasContent reports whether s is worth writing to memory: non-blank and

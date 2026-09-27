@@ -184,6 +184,20 @@ Every arrow into a store passes through `internal/redact` first — see
 **Redaction** below. `fts` is masked for free: it is populated by triggers on
 `messages`, so it only ever sees text that was already stored.
 
+The diagram above is per-user memory (`data/memory/<user>.md`). Household-wide
+memory (`data/memory/shared.md`) is deliberately narrower: the **only** write
+path into it is an explicit, live `remember_this(scope="shared")` tool call
+(`memory.RememberShared`) — `summarizeConversation`'s idle-sweep/
+end_conversation distillation reads `shared.md` for context (so it can avoid
+restating a fact the household already has) but never writes to it. An
+earlier version also asked the model, in that same distillation call, for a
+"## Shared" section and wrote each line straight to `RememberShared` — this
+was removed after it let `shared.md` grow unbounded, since the model
+routinely judged something that was really one person's own information
+(medical events, meal logs) as "worth telling the whole household" simply
+because it affects them too. See `internal/agent_loop/summarize.go`'s
+`summarizeSystemPrompt` doc comment for the full history.
+
 ### Tools available to the model
 
 Config flags live on `config.MemoryConfig` unless noted.

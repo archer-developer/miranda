@@ -91,17 +91,22 @@ func TestOrchestrator_SummarizeIdleSessionsSkipsConversationsStillWithinTimeout(
 	require.Nil(t, convos[0].EndedAt)
 }
 
-// TestOrchestrator_SummarizeIdleSessionsPromotesHouseholdFactToSharedMemory
-// guards the fix for a real gap: before this, summarizeConversation only
-// ever read/wrote a user's own Preferences section — a household fact
-// mentioned in conversation but never explicitly flagged via
-// remember_this(scope="shared") had no path into shared memory at all, only
-// into that one user's personal notes (or nowhere).
-func TestOrchestrator_SummarizeIdleSessionsPromotesHouseholdFactToSharedMemory(t *testing.T) {
+// TestOrchestrator_SummarizeIdleSessionsNeverWritesSharedMemory guards the
+// current, deliberate scope of this pass: shared.md must only ever grow
+// from an explicit, live remember_this(scope="shared") tool call, never
+// from the idle-sweep/end_conversation distillation — even if the model
+// produces a "## Shared" section anyway (echoing the "Existing Shared
+// notes" context it was shown, or an old scripted reply), that content
+// must be discarded, not written. See summarizeSystemPrompt's doc comment
+// for why the reverse (auto-promoting conversation facts to shared memory)
+// was tried and reverted: it let shared.md balloon with what was usually
+// actually one person's own information (medical events, meal logs) rather
+// than genuinely household-wide facts.
+func TestOrchestrator_SummarizeIdleSessionsNeverWritesSharedMemory(t *testing.T) {
 	provider := llmtest.New("local",
 		llmtest.Response{Text: "Хорошо, буду знать."},
 		llmtest.Response{Text: "## Summary\nMentioned the household cat's name.\n" +
-			"## Preferences\n\n" +
+			"## Preferences\n- упомянул кота\n" +
 			"## Shared\n- у нас живёт кот Барсик"},
 	)
 	o, _, mem := newTestOrchestrator(t, provider)
@@ -114,7 +119,12 @@ func TestOrchestrator_SummarizeIdleSessionsPromotesHouseholdFactToSharedMemory(t
 
 	shared, err := mem.ReadShared()
 	require.NoError(t, err)
-	require.Contains(t, shared, "у нас живёт кот Барсик")
+	require.Empty(t, shared, "the distillation pass must never write to shared memory, even if the model produces a Shared section")
+
+	content, err := mem.Read("alex")
+	require.NoError(t, err)
+	require.Contains(t, content, "упомянул кота", "the Preferences section itself must still be written")
+	require.NotContains(t, content, "Барсик", "the discarded Shared content must not leak into Preferences either")
 }
 
 func TestOrchestrator_SummarizeIdleSessionsSkipsMemoryWriteOnEmptyDistillation(t *testing.T) {
@@ -149,10 +159,12 @@ func TestOrchestrator_SummarizeIdleSessionsSkipsMemoryWriteOnEmptyDistillation(t
 // TestOrchestrator_SummarizeIdleSessionsSkipsPlaceholderNoneReply guards a
 // real bug: despite summarizeSystemPrompt instructing "leave this section
 // empty", the model sometimes replies with placeholder filler like
-// "*(none)*" or a bare "-" bullet instead of an actually-empty body. Before
-// isNoneSentinel/hasContent existed, that filler passed the
-// TrimSpace(...) != "" check and got written verbatim — e.g. shared.md
-// ending up with "## Remembered\n- (2026-08-17) *(none)*".
+// "*(none)*" instead of an actually-empty body. Before isNoneSentinel/
+// hasContent existed, that filler passed the TrimSpace(...) != "" check and
+// got written verbatim. The scripted reply still includes a stray "##
+// Shared" section (as an old provider might, or a model imitating the
+// "Existing Shared notes" context it was shown) to also confirm that gets
+// discarded rather than written — see splitSummaryPreferences.
 func TestOrchestrator_SummarizeIdleSessionsSkipsPlaceholderNoneReply(t *testing.T) {
 	provider := llmtest.New("local",
 		llmtest.Response{Text: "Хорошо, буду знать."},
@@ -175,6 +187,30 @@ func TestOrchestrator_SummarizeIdleSessionsSkipsPlaceholderNoneReply(t *testing.
 	shared, err := mem.ReadShared()
 	require.NoError(t, err)
 	require.Empty(t, shared)
+}
+
+func TestSplitSummaryPreferences_NormalTwoSectionReply(t *testing.T) {
+	summary, preferences := splitSummaryPreferences("## Summary\nRecap here.\n## Preferences\n- fact one\n- fact two")
+	require.Equal(t, "Recap here.", summary)
+	require.Equal(t, "- fact one\n- fact two", preferences)
+}
+
+func TestSplitSummaryPreferences_MissingPreferencesMarkerTreatsWholeReplyAsSummary(t *testing.T) {
+	summary, preferences := splitSummaryPreferences("just a plain reply, no headings")
+	require.Equal(t, "just a plain reply, no headings", summary)
+	require.Empty(t, preferences)
+}
+
+// TestSplitSummaryPreferences_TrimsStrayShared covers the defensive half of
+// removing the "## Shared" output section from this pass (see
+// summarizeSystemPrompt's doc comment): if the model produces one anyway —
+// imitating the "Existing Shared notes" context it was shown, or an old
+// scripted reply — its content must be dropped, not folded into Preferences.
+func TestSplitSummaryPreferences_TrimsStrayShared(t *testing.T) {
+	summary, preferences := splitSummaryPreferences("## Summary\nRecap.\n## Preferences\n- real fact\n## Shared\n- у нас живёт кот Барсик")
+	require.Equal(t, "Recap.", summary)
+	require.Equal(t, "- real fact", preferences)
+	require.NotContains(t, preferences, "Барсик")
 }
 
 func TestOrchestrator_SummarizeIdleSessionsSkipsDistillationWhenAutoSummarizeDisabled(t *testing.T) {
