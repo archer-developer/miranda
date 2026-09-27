@@ -144,23 +144,61 @@ cp .env.example .env
 `llm.providers` is a fallback chain — `type: openai_compat` for any OpenAI
 Chat Completions compatible backend, `type: anthropic` for Claude, or
 `type: gemini` for native Gemini. `llm.default_provider`, if set, jumps to
-the front of that chain regardless of list order.
+the front of that chain regardless of list order. If a provider's own key
+rotation (below) can't produce a reply — every key hard-failed, or every
+key is currently banned — the router falls through to the next provider in
+this list.
+
+Each provider entry also configures its own key rotation, via a
+`gemini_rotation:` block (the name is a historical holdover — it tunes
+`anthropic`/`openai_compat` entries identically, not just `gemini` ones).
+Rotating across `api_key_envs` is what lets you list several keys —
+notably a free-tier key before a paid one — and have Miranda fail over
+between them automatically instead of failing the turn:
 
 ```mermaid
 flowchart TD
-    A(["Turn starts"]) --> B["Try current provider"]
-    B --> C{"Result"}
-    C -->|"success"| Z(["Reply sent"])
-    C -->|"connection error"| D["Next provider<br/>in the chain"]
-    D --> B
-    C -->|"Gemini: quota or<br/>server error"| E["Rotate to next<br/>API key"]
-    E --> F{"Keys left?"}
-    F -->|"yes"| B
-    F -->|"no"| G{"Retry cycles left?"}
-    G -->|"yes"| H["Wait, then retry<br/>the whole key list"]
-    H --> B
-    G -->|"no"| D
+    Start(["Chat/Structured call"]) --> CheckAny{"Any key in\napi_key_envs NOT\ncurrently banned?"}
+
+    CheckAny -->|"no — every key banned"| FailBanned["Fail immediately\n(no cooldown wait)"]
+    FailBanned --> NextProvider(["Router falls back to\nnext provider in llm.providers"])
+
+    CheckAny -->|"yes"| TryKey["Call the API with the\nnext non-banned key"]
+    TryKey --> Result{"Response"}
+    Result -->|"success"| Done(["Reply streamed back"])
+
+    Result -->|"HTTP 429, or\nstatus = RESOURCE_EXHAUSTED\n(quota)"| BanQuota["Ban this key for\nquota_ban_minutes\n(default: 30)"]
+
+    Result -->|"overloaded:\nGemini HTTP 503 + status=UNAVAILABLE\nAnthropic error.type=overloaded_error (HTTP 529)\nopenai_compat HTTP 503\n— or no first token within\noverload_timeout_seconds (default: 10)"| BanOverload["Ban this key for\noverload_ban_minutes\n(default: 30)"]
+
+    Result -->|"HTTP 401 / 403\n(auth failure)"| NoBan["NOT banned —\nsame key tried again\nnext call until fixed"]
+
+    Result -->|"HTTP 400, or any other\nunrecognized 5xx"| Stop["Stop this whole call here —\nno more keys, no more cycles"]
+    Stop --> NextProvider
+
+    BanQuota --> MoreKeys{"Another non-banned\nkey left this pass?"}
+    BanOverload --> MoreKeys
+    NoBan --> MoreKeys
+    MoreKeys -->|"yes"| TryKey
+    MoreKeys -->|"no"| CycleLeft{"max_retry_cycles\nleft? (default: 1,\ni.e. no retry)"}
+    CycleLeft -->|"yes"| Cooldown["Sleep cooldown_seconds\n(default: 0),\nstart next pass"]
+    Cooldown --> CheckAny
+    CycleLeft -->|"no"| NextProvider
 ```
+
+A quota or overload ban is written to a key-rotation state shared by every
+future call this provider makes, not just retried within the current
+one — so once `gemini-lite`'s free key gets banned, the very next turn
+skips straight to whatever's configured after it, instead of
+re-discovering the same 429/503 from scratch. A `401`/`403` auth failure
+still rotates to the next key on the same call, but is deliberately never
+banned (a revoked key doesn't fix itself after a timer, unlike quota or
+load), so it's retried — and fails — again on every subsequent call until
+someone fixes or removes it from `api_key_envs`; Miranda logs that case as
+a distinct WARN (`key auth failure ... needs manual attention`) rather than
+the routine rotation message. [`gemini_tts`](#tts) goes through the
+identical mechanism with its own `quota_ban_minutes` / `overload_ban_minutes`
+/ `overload_response_timeout_seconds`, same defaults.
 
 Separately, each provider can carry its own `escalation` block — the model
 itself hands a hard turn off mid-conversation, one hop at a time, seeing
