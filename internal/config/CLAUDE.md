@@ -83,6 +83,26 @@ loop still exists for non-bannable retryable errors (e.g. a per-key auth
 failure), but for quota/overload it's largely superseded by the ban's own
 expiry.
 
+`OverloadTimeoutSeconds` guards two separate things, not just the
+first-chunk wait its name suggests (added 2026-09-27 after a `gemini-lite`
+free key answered its first chunk within the default 10s but then took 16s,
+and separately 56s, to finish a whole reply — neither call errored, so
+neither used to get banned): once a call completes successfully,
+`miranda-llm/keyrotation.BanIfSlow` also checks the call's *total* duration
+against that same budget and bans the key post-hoc if it ran over — the
+already-delivered reply is untouched, only the *next* call is routed
+elsewhere. `MaxCallSeconds` (default 30s) is the harder counterpart for a
+call that's still stalled while streaming, which a post-hoc check can't
+help with: once it elapses, the provider aborts the in-flight attempt and
+rotates to the next key immediately, banning the slow one — deliberately
+even if that key had already forwarded some content to the caller (spoken
+over TTS, or streamed to the web UI). The accepted trade-off is a possible
+duplicated fragment on that specific interleaving, in exchange for not
+leaving a user waiting on the order of a minute or more for a stalled
+free-tier key (observed live under load). See `miranda-llm`'s
+`gemini`/`anthropic`/`openaicompat` packages' `errMaxCallTimeout` doc
+comments for the exact retry-safety reasoning.
+
 `anthropic`/`openai_compat` providers accept `api_key_envs` for config
 consistency but only ever use the first entry — those SDKs take a single
 credential per client.

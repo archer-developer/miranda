@@ -498,8 +498,23 @@ type GeminiRotationConfig struct {
 	// the very first response chunk before treating the key as overloaded
 	// — a backend that accepts the connection but never sends anything
 	// looks, to a caller, the same as one that eventually answers with an
-	// explicit overload error, just slower about it.
+	// explicit overload error, just slower about it. Once a call has
+	// forwarded its first chunk within this window, it also becomes the
+	// post-hoc threshold OverloadBanMinutes checks the call's total
+	// duration against — see keyrotation.BanIfSlow.
 	OverloadTimeoutSeconds int `yaml:"overload_timeout_seconds"`
+	// MaxCallSeconds is a hard ceiling on one attempt's total wall-clock
+	// time, from the moment it starts to the moment its stream finishes —
+	// unlike OverloadTimeoutSeconds's post-hoc check above, this one
+	// actively cancels the in-flight call once the budget is blown and
+	// rotates to the next key, even if content has already been forwarded
+	// to the caller (accepted risk: the next key's full answer may
+	// duplicate whatever fragment already reached the user). Without this,
+	// a free-tier key that answers its first chunk promptly but then stalls
+	// can leave a user waiting on the order of a minute or more for a
+	// simple question — observed live 2026-09-27. <= 0 uses miranda-llm's
+	// own default (30s).
+	MaxCallSeconds int `yaml:"max_call_seconds"`
 }
 
 // EscalationConfig configures the explicit escalation tool that lets one

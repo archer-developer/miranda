@@ -141,13 +141,19 @@ llm:
   # rotation (api_key_envs takes several env var names; unlike anthropic/
   # openai_compat, which only ever use the first, Gemini actually rotates
   # across all of them on a quota error, an overloaded backend, or a
-  # first-response timeout). A key that hits quota or looks overloaded is
-  # also BANNED for a while (gemini_rotation.quota_ban_minutes/
+  # first-response timeout, OR a call that completed but took longer than
+  # overload_timeout_seconds end-to-end). A key that hits quota or looks
+  # overloaded is also BANNED for a while (gemini_rotation.quota_ban_minutes/
   # overload_ban_minutes/overload_timeout_seconds, all default 30/30/10) —
   # skipped by every subsequent request, not just retried within one — so
   # listing a paid key after a free-tier one lets Miranda fail over
   # automatically once the free key is exhausted or overloaded, instead of
-  # re-discovering the same failure from scratch every turn; see
+  # re-discovering the same failure from scratch every turn.
+  # gemini_rotation.max_call_seconds (default 30) is a harder version of the
+  # same idea: it aborts a call still stalled mid-stream and rotates to the
+  # next key immediately, even if that key had already forwarded some
+  # content, rather than leaving a user waiting on a stalled free-tier key
+  # for as long as the backend takes to eventually answer or error. See
   # config/llm.yaml's gemini_rotation blocks. Its own native
   # gemini_tools.google_search (Grounding with Google Search) is NOT
   # recommended: it has a zero quota on the free-tier Gemini Developer API,

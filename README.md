@@ -165,7 +165,14 @@ flowchart TD
 
     CheckAny -->|"yes"| TryKey["Call the API with the\nnext non-banned key"]
     TryKey --> Result{"Response"}
+
     Result -->|"success"| Done(["Reply streamed back"])
+    Done --> SlowCheck{"Whole call took longer than\noverload_timeout_seconds\nend-to-end?"}
+    SlowCheck -->|"yes"| BanOverloadPostHoc["Ban this key for\noverload_ban_minutes —\nfor the NEXT call only,\nthis reply already went out"]
+    SlowCheck -->|"no"| Idle(["Nothing else to do"])
+
+    Result -->|"max_call_seconds exceeded\nmid-stream, even after a\nfirst chunk was already\nforwarded to the caller"| AbortRotate["Abort the in-flight call,\nban this key for\noverload_ban_minutes,\nrotate to the next key\n(accepted risk: the next key's\nfull answer may duplicate an\nalready-forwarded fragment)"]
+    AbortRotate --> MoreKeys
 
     Result -->|"HTTP 429, or\nstatus = RESOURCE_EXHAUSTED\n(quota)"| BanQuota["Ban this key for\nquota_ban_minutes\n(default: 30)"]
 
@@ -199,6 +206,32 @@ a distinct WARN (`key auth failure ... needs manual attention`) rather than
 the routine rotation message. [`gemini_tts`](#tts) goes through the
 identical mechanism with its own `quota_ban_minutes` / `overload_ban_minutes`
 / `overload_response_timeout_seconds`, same defaults.
+
+`overload_timeout_seconds` does double duty (observed live 2026-09-27: a
+`gemini-lite` free key answered its first chunk promptly, well inside the
+default 10s, but then took 16s and separately 56s to finish streaming —
+neither call errored, so neither got banned under the old logic). It still
+bounds the wait for the very first chunk before treating a silent key as
+overloaded, but now **also** gates a post-hoc check once a call completes
+successfully: if the whole call took longer than that same budget
+end-to-end, the key is banned anyway — the reply the user already got is
+untouched, this only affects which key handles the *next* call.
+
+`max_call_seconds` (default: 30, config field `gemini_rotation.max_call_seconds`)
+is a harder version of the same idea, for the case a post-hoc ban can't fix
+by itself: a key that's still stalled *while streaming* would otherwise
+leave a user waiting as long as the backend takes to eventually answer or
+error — observed in practice as free-tier Gemini taking close to two
+minutes under load. Once `max_call_seconds` elapses, Miranda aborts that
+attempt outright and rotates to the next key immediately, banning the slow
+one — deliberately even if that key had already started forwarding content
+(text already spoken over TTS, or streamed to the web UI). The accepted
+trade-off: on that specific interleaving, the next key's full answer can
+duplicate a fragment the user already saw, which beats making them wait out
+the stall. This is `keyrotation`'s `errMaxCallTimeout` in
+[`miranda-llm`](https://github.com/archer-developer/miranda-llm) — see that
+module's `gemini`/`anthropic`/`openaicompat` packages for the exact
+retry-safety reasoning (`BanIfSlow` vs. `errMaxCallTimeout`).
 
 Separately, each provider can carry its own `escalation` block — the model
 itself hands a hard turn off mid-conversation, one hop at a time, seeing
