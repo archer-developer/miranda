@@ -4,7 +4,7 @@ go 1.25.14
 
 require (
 	github.com/anthropics/anthropic-sdk-go v1.59.0
-	github.com/archer-developer/miranda-llm v0.0.0-20260827184507-0320de83d927
+	github.com/archer-developer/miranda-llm v0.1.0
 	github.com/braheezy/shine-mp3 v0.1.0
 	github.com/coder/websocket v1.8.15
 	github.com/descope/virtualwebauthn v1.0.5
@@ -71,5 +71,3 @@ require (
 	modernc.org/mathutil v1.7.1 // indirect
 	modernc.org/memory v1.11.0 // indirect
 )
-
-replace github.com/archer-developer/miranda-llm => ../miranda-llm
