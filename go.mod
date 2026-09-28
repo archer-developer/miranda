@@ -3,6 +3,7 @@ module github.com/archer-developer/miranda
 go 1.25.14
 
 require (
+	github.com/SherClockHolmes/webpush-go v1.4.0
 	github.com/anthropics/anthropic-sdk-go v1.59.0
 	github.com/archer-developer/miranda-llm v0.1.1
 	github.com/braheezy/shine-mp3 v0.1.0

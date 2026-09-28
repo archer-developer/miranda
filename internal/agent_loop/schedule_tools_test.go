@@ -22,6 +22,7 @@ import (
 	"github.com/archer-developer/miranda/internal/hub"
 	"github.com/archer-developer/miranda/internal/mcp"
 	"github.com/archer-developer/miranda/internal/memory"
+	"github.com/archer-developer/miranda/internal/notify"
 	"github.com/archer-developer/miranda/internal/schedule"
 	"github.com/archer-developer/miranda/internal/telegram"
 	"github.com/archer-developer/miranda/internal/tts"
@@ -495,10 +496,11 @@ func TestOrchestrator_ListScheduledTasksTool_ShowsKind(t *testing.T) {
 // --- RunScheduledTasks: reminder delivery (the actual bug-fix path) ---
 
 // newTestOrchestratorWithReminderChannels wires TTS (fakeHAClient),
-// Telegram (fake Bot API server), and a real schedule.Store into one
-// Orchestrator, so a single test can assert on every reminder delivery leg
-// (origin channel, always-additionally Telegram, history append) at once.
-func newTestOrchestratorWithReminderChannels(t *testing.T, provider *llmtest.FakeProvider, configs []config.UserConfig) (*Orchestrator, *fakeHAClient, *[]sentTelegramMessage, *schedule.Store) {
+// Telegram (fake Bot API server), the native notify feed, and a real
+// schedule.Store into one Orchestrator, so a single test can assert on
+// every reminder delivery leg (origin channel, always-additionally Notify,
+// Telegram-origin reply) at once.
+func newTestOrchestratorWithReminderChannels(t *testing.T, provider *llmtest.FakeProvider, configs []config.UserConfig) (*Orchestrator, *fakeHAClient, *[]sentTelegramMessage, *schedule.Store, *notify.Service) {
 	t.Helper()
 
 	r, err := router.New([]llm.Provider{provider}, selfEscalation(provider.Name()), "")
@@ -552,17 +554,23 @@ func newTestOrchestratorWithReminderChannels(t *testing.T, provider *llmtest.Fak
 	)
 	o.SetTelegram(sender, config.TelegramConfig{SendMessageTool: true})
 
+	notifyStore, err := notify.Open(filepath.Join(t.TempDir(), "notify.db"))
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = notifyStore.Close() })
+	notifySvc := notify.NewService(notifyStore, nil, nil) // feed-only: no webpush config needed for these tests
+	o.SetNotify(notifySvc, config.NotifyConfig{SendNotificationTool: true})
+
 	s, err := schedule.Open(filepath.Join(t.TempDir(), "schedule.db"))
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = s.Close() })
 	o.SetSchedule(s)
 
-	return o, ha, &sent, s
+	return o, ha, &sent, s, notifySvc
 }
 
 func TestOrchestrator_RunScheduledTasks_FiresReminder_NeverCallsHandle(t *testing.T) {
 	provider := llmtest.New("local", llmtest.Response{Text: "should never be used"})
-	o, ha, _, s := newTestOrchestratorWithReminderChannels(t, provider, []config.UserConfig{{Username: "alex"}})
+	o, ha, _, s, _ := newTestOrchestratorWithReminderChannels(t, provider, []config.UserConfig{{Username: "alex"}})
 
 	due := time.Now().Add(-time.Minute).UTC()
 	id, err := s.Create(context.Background(), schedule.Task{
@@ -591,7 +599,7 @@ func TestOrchestrator_RunScheduledTasks_FiresReminder_NeverCallsHandle(t *testin
 
 func TestOrchestrator_RunScheduledTasks_ReminderOriginTelegram_SendsOnce(t *testing.T) {
 	provider := llmtest.New("local", llmtest.Response{Text: "unused"})
-	o, _, sent, s := newTestOrchestratorWithReminderChannels(t, provider, []config.UserConfig{{Username: "alex"}})
+	o, _, sent, s, _ := newTestOrchestratorWithReminderChannels(t, provider, []config.UserConfig{{Username: "alex"}})
 
 	due := time.Now().Add(-time.Minute).UTC()
 	_, err := s.Create(context.Background(), schedule.Task{
@@ -606,9 +614,16 @@ func TestOrchestrator_RunScheduledTasks_ReminderOriginTelegram_SendsOnce(t *test
 	require.Equal(t, "Полить кактус", (*sent)[0].Text)
 }
 
-func TestOrchestrator_RunScheduledTasks_ReminderOriginWebUI_AlsoSendsTelegram(t *testing.T) {
+// TestOrchestrator_RunScheduledTasks_ReminderOriginWebUI_NotifiesNotTelegram
+// pins down the docs/adr/native-notifications.md behavior change: a
+// web/unknown-origin reminder now lands in the native notification feed
+// (once — the default branch already calls notifyUser, so the
+// always-additionally-Notify leg must not double it) instead of being
+// silently appended to conversation history, and Telegram is no longer
+// auto-CC'd on a non-Telegram-origin reminder at all.
+func TestOrchestrator_RunScheduledTasks_ReminderOriginWebUI_NotifiesNotTelegram(t *testing.T) {
 	provider := llmtest.New("local", llmtest.Response{Text: "unused"})
-	o, _, sent, s := newTestOrchestratorWithReminderChannels(t, provider, []config.UserConfig{{Username: "alex"}})
+	o, _, sent, s, notifySvc := newTestOrchestratorWithReminderChannels(t, provider, []config.UserConfig{{Username: "alex"}})
 
 	due := time.Now().Add(-time.Minute).UTC()
 	_, err := s.Create(context.Background(), schedule.Task{
@@ -617,22 +632,44 @@ func TestOrchestrator_RunScheduledTasks_ReminderOriginWebUI_AlsoSendsTelegram(t 
 	})
 	require.NoError(t, err)
 
-	open, err := o.history.StartConversation(context.Background(), "alex", "web_ui")
+	require.NoError(t, o.RunScheduledTasks(context.Background(), nil))
+
+	require.Empty(t, *sent, "a web/unknown-origin reminder must no longer auto-CC Telegram")
+
+	notifications, err := notifySvc.ListForUser(context.Background(), "alex", 0)
+	require.NoError(t, err)
+	require.Len(t, notifications, 1, "the reminder must land in the feed exactly once, not duplicated by the always-additionally leg")
+	require.Equal(t, "Полить кактус", notifications[0].Body)
+	require.Equal(t, "reminder", notifications[0].Source)
+}
+
+// TestOrchestrator_RunScheduledTasks_ReminderOriginTelegram_AlsoNotifies
+// covers the always-additionally-Notify leg's other side: a Telegram-origin
+// reminder (which the switch itself delivers via Telegram, not notify) must
+// still end up in the feed exactly once via that leg.
+func TestOrchestrator_RunScheduledTasks_ReminderOriginTelegram_AlsoNotifies(t *testing.T) {
+	provider := llmtest.New("local", llmtest.Response{Text: "unused"})
+	o, _, sent, s, notifySvc := newTestOrchestratorWithReminderChannels(t, provider, []config.UserConfig{{Username: "alex"}})
+
+	due := time.Now().Add(-time.Minute).UTC()
+	_, err := s.Create(context.Background(), schedule.Task{
+		UserID: "alex", Prompt: "Полить кактус", Kind: schedule.KindReminder,
+		OriginSource: users.SourceTelegram, RunAt: &due, NextRunAt: due,
+	})
 	require.NoError(t, err)
 
 	require.NoError(t, o.RunScheduledTasks(context.Background(), nil))
 
-	require.Len(t, *sent, 1, "non-telegram origin must still get the always-additionally Telegram push")
+	require.Len(t, *sent, 1, "the origin channel itself is still Telegram")
 
-	msgs, err := o.history.ConversationMessages(context.Background(), open)
+	notifications, err := notifySvc.ListForUser(context.Background(), "alex", 0)
 	require.NoError(t, err)
-	require.NotEmpty(t, msgs)
-	require.Equal(t, "Полить кактус", msgs[len(msgs)-1].Content)
+	require.Len(t, notifications, 1, "a Telegram-origin reminder must still land in the feed exactly once via the always-additionally leg")
 }
 
 func TestOrchestrator_RunScheduledTasks_ReminderAnnounceAloud_LayeredOnTopOfOrigin(t *testing.T) {
 	provider := llmtest.New("local", llmtest.Response{Text: "unused"})
-	o, ha, sent, s := newTestOrchestratorWithReminderChannels(t, provider, []config.UserConfig{{Username: "alex"}})
+	o, ha, sent, s, _ := newTestOrchestratorWithReminderChannels(t, provider, []config.UserConfig{{Username: "alex"}})
 
 	due := time.Now().Add(-time.Minute).UTC()
 	_, err := s.Create(context.Background(), schedule.Task{
@@ -650,7 +687,7 @@ func TestOrchestrator_RunScheduledTasks_ReminderAnnounceAloud_LayeredOnTopOfOrig
 func TestOrchestrator_RunScheduledTasks_ReminderTelegramSendFails_StillRecordsError(t *testing.T) {
 	provider := llmtest.New("local", llmtest.Response{Text: "unused"})
 	// "ghost" is never Save()'d into the chat store, so SendToUser errors.
-	o, _, _, s := newTestOrchestratorWithReminderChannels(t, provider, []config.UserConfig{{Username: "alex"}})
+	o, _, _, s, _ := newTestOrchestratorWithReminderChannels(t, provider, []config.UserConfig{{Username: "alex"}})
 
 	due := time.Now().Add(-time.Minute).UTC()
 	id, err := s.Create(context.Background(), schedule.Task{
@@ -681,7 +718,7 @@ func TestOrchestrator_RunScheduledTasks_ReminderTelegramSendFails_StillRecordsEr
 // since blocked the bot, as here) must still advance to the next occurrence.
 func TestOrchestrator_RunScheduledTasks_RecurringReschedulesEvenOnFailure(t *testing.T) {
 	provider := llmtest.New("local", llmtest.Response{Text: "unused"})
-	o, _, _, s := newTestOrchestratorWithReminderChannels(t, provider, []config.UserConfig{{Username: "alex"}})
+	o, _, _, s, _ := newTestOrchestratorWithReminderChannels(t, provider, []config.UserConfig{{Username: "alex"}})
 
 	due := time.Now().Add(-time.Minute).UTC()
 	// "ghost" is never Save()'d into the chat store, so every firing's

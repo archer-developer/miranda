@@ -110,7 +110,7 @@ func newTestHandlerWithMemory(t *testing.T, fake *fakeHistory) (*Handler, *sessi
 	sessions := session.NewStore(time.Hour)
 	mem := newFakeMemory()
 
-	h, err := New(fake, mem, nil, nil, nil, registry, sessions, "ru", "", testLogger())
+	h, err := New(fake, mem, nil, nil, nil, nil, registry, sessions, "ru", "", testLogger())
 	require.NoError(t, err)
 	return h, sessions, mem
 }
@@ -125,7 +125,7 @@ func newTestHandlerWithTurns(t *testing.T, turns *fakeTurnTracker) (*Handler, *s
 	require.NoError(t, err)
 	sessions := session.NewStore(time.Hour)
 
-	h, err := New(&fakeHistory{}, newFakeMemory(), turns, nil, nil, registry, sessions, "ru", "", testLogger())
+	h, err := New(&fakeHistory{}, newFakeMemory(), turns, nil, nil, nil, registry, sessions, "ru", "", testLogger())
 	require.NoError(t, err)
 	return h, sessions
 }
@@ -140,7 +140,7 @@ func newTestHandlerWithKeyring(t *testing.T, keyringFake *fakeKeyringService) (*
 	require.NoError(t, err)
 	sessions := session.NewStore(time.Hour)
 
-	h, err := New(&fakeHistory{}, newFakeMemory(), nil, nil, keyringFake, registry, sessions, "ru", "", testLogger())
+	h, err := New(&fakeHistory{}, newFakeMemory(), nil, nil, nil, keyringFake, registry, sessions, "ru", "", testLogger())
 	require.NoError(t, err)
 	return h, sessions
 }
@@ -332,7 +332,7 @@ func TestServesLocalAvatarFiles(t *testing.T) {
 	registry, err := users.NewRegistry([]config.UserConfig{{Username: "alex", PasswordHash: mustHash(t, "555")}})
 	require.NoError(t, err)
 	sessions := session.NewStore(time.Hour)
-	h, err := New(&fakeHistory{}, newFakeMemory(), nil, nil, nil, registry, sessions, "ru", dir, testLogger())
+	h, err := New(&fakeHistory{}, newFakeMemory(), nil, nil, nil, nil, registry, sessions, "ru", dir, testLogger())
 	require.NoError(t, err)
 
 	req := httptest.NewRequest(http.MethodGet, "/static/avatars/alex.png", nil)

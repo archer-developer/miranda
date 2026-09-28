@@ -17,6 +17,7 @@ import (
 	"syscall"
 	"time"
 
+	webpush "github.com/SherClockHolmes/webpush-go"
 	"gopkg.in/natefinch/lumberjack.v2"
 
 	llm "github.com/archer-developer/miranda-llm"
@@ -37,6 +38,7 @@ import (
 	"github.com/archer-developer/miranda/internal/keyring"
 	"github.com/archer-developer/miranda/internal/mcp"
 	"github.com/archer-developer/miranda/internal/memory"
+	"github.com/archer-developer/miranda/internal/notify"
 	"github.com/archer-developer/miranda/internal/oauth2"
 	"github.com/archer-developer/miranda/internal/redact"
 	"github.com/archer-developer/miranda/internal/schedule"
@@ -160,6 +162,29 @@ func main() {
 			bootstrap.Error("llm-trace failed", "error", err)
 			os.Exit(1)
 		}
+		return
+	}
+
+	// `miranda vapid-keys` generates one VAPID keypair (internal/notify's
+	// Web Push delivery leg needs one to sign push messages) and prints it
+	// for the operator to paste into config.yaml (public key,
+	// notify.web_push.vapid_public_key) and the environment
+	// (WEBPUSH_VAPID_PRIVATE_KEY) — a one-time manual step, not something
+	// generated automatically at startup: an auto-generated, unpersisted
+	// key would orphan every existing browser subscription on the next
+	// restart. Exits here the same way backup/llm-trace do, before the full
+	// service wiring below — no config needed at all for this one.
+	if len(os.Args) > 1 && os.Args[1] == "vapid-keys" {
+		priv, pub, err := webpush.GenerateVAPIDKeys()
+		if err != nil {
+			bootstrap.Error("vapid-keys failed", "error", err)
+			os.Exit(1)
+		}
+		fmt.Println("VAPID public key (config.yaml notify.web_push.vapid_public_key):")
+		fmt.Println(pub)
+		fmt.Println()
+		fmt.Println("VAPID private key (WEBPUSH_VAPID_PRIVATE_KEY environment variable — keep secret):")
+		fmt.Println(priv)
 		return
 	}
 
@@ -390,6 +415,22 @@ func run(cfg config.Config, logger *slog.Logger, eventHub *hub.Hub, configDir st
 		defer func() { _ = oauthStore.Close() }()
 	}
 
+	notifySvc, err := setupNotify(cfg.Notify, cfg.Storage, logger)
+	if err != nil {
+		return err
+	}
+	// notifyForWebUI stays a true nil interface (not a nil *notify.Service)
+	// when disabled — same footgun webauthnSvc's own doc comment above
+	// explains: assigning a nil *notify.Service to a webui.Notify variable
+	// directly would produce a non-nil interface wrapping a nil pointer,
+	// and webui.New's "notifySvc != nil" check to skip registering
+	// /api/notifications and /api/push/* would then never see it as nil.
+	var notifyForWebUI webui.Notify
+	if notifySvc != nil {
+		defer func() { _ = notifySvc.Close() }()
+		notifyForWebUI = notifySvc
+	}
+
 	defaultUserID := "debug"
 	orchestrator := agentloop.NewOrchestrator(
 		llmRouter, toolManager, historyStore, memoryStore, dispatcher, eventHub, usersRegistry,
@@ -407,6 +448,9 @@ func run(cfg config.Config, logger *slog.Logger, eventHub *hub.Hub, configDir st
 	})
 	if cfg.Telegram.Enabled {
 		orchestrator.SetTelegram(telegram.NewSender(tgClient, tgChats), cfg.Telegram)
+	}
+	if notifySvc != nil {
+		orchestrator.SetNotify(notifySvc, cfg.Notify)
 	}
 	if len(webTools) > 0 {
 		orchestrator.SetWebTools(webTools)
@@ -484,7 +528,7 @@ func run(cfg config.Config, logger *slog.Logger, eventHub *hub.Hub, configDir st
 
 	var webHandler http.Handler
 	if cfg.WebUI.Enabled {
-		wh, err := webui.New(historyStore, memoryStore, orchestrator, webauthnSvc, keyringService, usersRegistry, sessions, cfg.WebUI.DefaultLanguage, cfg.Storage.AvatarsDir, logger)
+		wh, err := webui.New(historyStore, memoryStore, orchestrator, webauthnSvc, notifyForWebUI, keyringService, usersRegistry, sessions, cfg.WebUI.DefaultLanguage, cfg.Storage.AvatarsDir, logger)
 		if err != nil {
 			return err
 		}
@@ -949,6 +993,42 @@ func setupTelegram(cfg config.TelegramConfig, storageCfg config.StorageConfig, l
 	}
 
 	return client, chats, secret, nil
+}
+
+// setupNotify opens internal/notify's store and builds its Service —
+// unlike setupTelegram, cfg.Enabled being false doesn't skip this entirely:
+// the notification feed itself needs no deployment secret (see
+// NotifyConfig's doc comment), so a nil Service is only returned when the
+// feed itself is off. The nested WebPush leg is a separate opt-in — nil
+// webpushCfg (feed-only Service) unless cfg.WebPush.Enabled, checked the
+// same way setupTelegram checks its own required fields.
+func setupNotify(cfg config.NotifyConfig, storageCfg config.StorageConfig, logger *slog.Logger) (*notify.Service, error) {
+	if !cfg.Enabled {
+		return nil, nil
+	}
+
+	store, err := notify.Open(storageCfg.NotifySQLitePath)
+	if err != nil {
+		return nil, err
+	}
+
+	var webpushCfg *notify.WebPushConfig
+	if cfg.WebPush.Enabled {
+		privateKey := os.Getenv("WEBPUSH_VAPID_PRIVATE_KEY")
+		if privateKey == "" {
+			return nil, fmt.Errorf("main: notify.web_push.enabled is true but WEBPUSH_VAPID_PRIVATE_KEY is not set")
+		}
+		if cfg.WebPush.VAPIDPublicKey == "" || cfg.WebPush.Subject == "" {
+			return nil, fmt.Errorf("main: notify.web_push.enabled is true but vapid_public_key/subject are not configured")
+		}
+		webpushCfg = &notify.WebPushConfig{
+			VAPIDPublicKey:  cfg.WebPush.VAPIDPublicKey,
+			VAPIDPrivateKey: privateKey,
+			Subject:         cfg.WebPush.Subject,
+		}
+	}
+
+	return notify.NewService(store, webpushCfg, logger), nil
 }
 
 // setupOAuth validates config and wires the optional OAuth2 authorization

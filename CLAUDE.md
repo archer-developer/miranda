@@ -122,12 +122,14 @@ generated.
 
 `ha_assist` is the only source that auto-speaks: `streamOneTurn` calls
 `speakChunks` as text streams in. Every other source (web UI, Telegram,
-scheduled tasks) is silent unless the model explicitly calls `speak_reply`
-or `send_telegram`. TTS dispatch is asynchronous (`Dispatcher.Speak`
-enqueues onto a background `Player` in `internal/tts/player.go`); every
-new `ha_assist` turn calls `o.tts.Stop` first for barge-in so a fresh
-voice turn interrupts whatever a previous turn is still finishing. See
-`internal/telegram/CLAUDE.md` for the Telegram channel details.
+scheduled tasks) is silent unless the model explicitly calls `speak_reply`,
+`send_notification`, or `send_telegram`. TTS dispatch is asynchronous
+(`Dispatcher.Speak` enqueues onto a background `Player` in
+`internal/tts/player.go`); every new `ha_assist` turn calls `o.tts.Stop`
+first for barge-in so a fresh voice turn interrupts whatever a previous
+turn is still finishing. See `internal/telegram/CLAUDE.md` for the
+Telegram channel details and `internal/notify/CLAUDE.md` for the native
+notification channel.
 
 ### Session lifecycle
 
@@ -211,7 +213,8 @@ Config flags live on `config.MemoryConfig` unless noted.
 | `forget_conversation` | `ForgetConversationTool` | Delete the current conversation entirely — no summarization, no memory write, `DeleteConversation` removes messages/tool_calls/FTS rows outright. Use for "forget this"/"start over" — nothing from it should persist anywhere. |
 | `speak_reply` | `config.TTSConfig.SpeakReplyTool` | Dispatch the given `text` to `tts.primary`, even on a non-`ha_assist` source. |
 | `stop_speech` | `config.TTSConfig.StopSpeechTool` | Interrupt/clear the TTS queue and stop playback on all entities. |
-| `send_telegram` | `config.TelegramConfig.SendMessageTool` | Push a message to a household member's Telegram. See `internal/telegram/CLAUDE.md`. |
+| `send_notification` | `config.NotifyConfig.SendNotificationTool` | Push a notification to a household member's Miranda app (feed + optional browser push) — the **default** proactive channel. See `internal/notify/CLAUDE.md` and `docs/adr/native-notifications.md`. |
+| `send_telegram` | `config.TelegramConfig.SendMessageTool` | Push a message to a household member's Telegram — only when the user explicitly names Telegram, per its own tool description (see `docs/adr/native-notifications.md`). See `internal/telegram/CLAUDE.md`. |
 | `create_reminder` / `create_scheduled_task` / `list_scheduled_tasks` / `delete_scheduled_task` | `config.ScheduleConfig.Enabled` | Schedule a plain reminder (delivered directly at fire time, never replayed through the LLM) or an agentic prompt (replayed through the agent loop); list/cancel either. See `internal/schedule/CLAUDE.md` and `docs/adr/reminders-vs-scheduled-tasks.md`. |
 | `web_search` | `config.TavilyConfig.WebSearch.Enabled` | Live web search via Tavily. See `internal/config/CLAUDE.md`. |
 | `web_fetch` | `config.TavilyConfig.WebFetch.Enabled` | Fetch a URL's readable text via Tavily. See `internal/config/CLAUDE.md`. |

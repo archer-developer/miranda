@@ -55,13 +55,10 @@ func (o *Orchestrator) resolveConversation(ctx context.Context, userID, source s
 
 // openOrStartConversation returns userID's currently open conversation id,
 // or starts a new one (tagged source) if none is open — the "continue or
-// start" decision resolveConversation needs for a live turn, factored out
-// so appendReminderToHistory (internal/agent_loop/schedule.go) doesn't keep
-// its own independently-maintained copy of the same check-then-maybe-insert
-// sequence. existed reports which branch was taken, so a caller like
-// resolveConversation that only needs to load prior messages when
-// continuing an existing conversation can skip that query for a freshly
-// started one.
+// start" decision resolveConversation needs for a live turn. existed
+// reports which branch was taken, so a caller like resolveConversation that
+// only needs to load prior messages when continuing an existing
+// conversation can skip that query for a freshly started one.
 func (o *Orchestrator) openOrStartConversation(ctx context.Context, userID, source string) (id string, existed bool, err error) {
 	open, err := o.history.OpenConversation(ctx, userID)
 	if err != nil {

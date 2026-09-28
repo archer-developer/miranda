@@ -76,10 +76,14 @@ For each due task, behavior branches on `Kind`:
 - **`KindReminder`**: calls `deliverReminder`, which never touches `Handle`.
   It speaks `Prompt` aloud via TTS if `OriginSource == users.SourceHAAssist`
   or `AnnounceAloud` is set; otherwise delivers via `OriginSource`'s own
-  channel (Telegram send, or an appended history message for web/unknown
-  origins); then, unless the origin was already Telegram, always
-  additionally attempts a best-effort Telegram send. Only the
-  origin-channel leg's failure counts as the firing failing.
+  channel (a direct Telegram send if `OriginSource == users.SourceTelegram`,
+  or the native notification feed/push — `internal/notify` — for web/unknown
+  origins); then, unless the origin was already that default notify branch,
+  always additionally best-effort notifies too, so every reminder ends up in
+  the feed exactly once regardless of origin. Telegram is **not** auto-CC'd
+  on every firing anymore — see `docs/adr/native-notifications.md` for why
+  this changed from an unconditional Telegram leg to this notify-based one.
+  Only the origin-channel leg's failure counts as the firing failing.
 
 After firing (either kind):
 - Recurring task (`CronExpr` set): rescheduled via

@@ -22,6 +22,7 @@ import (
 	"github.com/archer-developer/miranda/internal/mcp"
 	"github.com/archer-developer/miranda/internal/mcp/mcptest"
 	"github.com/archer-developer/miranda/internal/memory"
+	"github.com/archer-developer/miranda/internal/notify"
 	"github.com/archer-developer/miranda/internal/replyformat"
 	"github.com/archer-developer/miranda/internal/telegram"
 	"github.com/archer-developer/miranda/internal/tools"
@@ -1129,5 +1130,116 @@ func TestOrchestrator_SendTelegramTool_NotOfferedWhenTelegramNotConfigured(t *te
 	require.Len(t, provider.Requests, 1)
 	for _, tool := range provider.Requests[0].Tools {
 		require.NotEqual(t, "send_telegram", tool.Name)
+	}
+}
+
+// newTestOrchestratorWithNotify is like newTestOrchestratorWithTelegram but
+// for the send_notification tool — wires a real (feed-only, no webpush
+// config) notify.Service in via SetNotify.
+func newTestOrchestratorWithNotify(t *testing.T, provider *llmtest.FakeProvider, configs []config.UserConfig) (*Orchestrator, *notify.Service) {
+	t.Helper()
+
+	registry, err := users.NewRegistry(configs)
+	require.NoError(t, err)
+
+	r, err := router.New([]llm.Provider{provider}, selfEscalation(provider.Name()), "")
+	require.NoError(t, err)
+
+	h, err := history.Open(filepath.Join(t.TempDir(), "miranda.db"))
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = h.Close() })
+
+	mem, err := memory.New(t.TempDir())
+	require.NoError(t, err)
+
+	o := NewOrchestrator(
+		r, mcp.NewManager(nil), h, mem, nil, hub.New(100, nil), registry,
+		config.AgentConfig{},
+		config.MemoryConfig{},
+		config.TTSConfig{},
+		100, "debug",
+	)
+
+	store, err := notify.Open(filepath.Join(t.TempDir(), "notify.db"))
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = store.Close() })
+	svc := notify.NewService(store, nil, nil)
+	o.SetNotify(svc, config.NotifyConfig{SendNotificationTool: true})
+
+	return o, svc
+}
+
+func TestOrchestrator_SendNotificationTool_DefaultsToCurrentUser(t *testing.T) {
+	provider := llmtest.New("local",
+		llmtest.Response{ToolCall: &llm.ToolCall{ID: "call-1", Name: "send_notification", Arguments: `{"text":"ужин готов"}`}},
+		llmtest.Response{Text: "Отправила."},
+	)
+	o, svc := newTestOrchestratorWithNotify(t, provider, []config.UserConfig{
+		{Username: "alex", PasswordHash: "x", FullName: "Alex"},
+	})
+
+	resp, err := o.Handle(context.Background(), InputRequest{Source: "cli", UserID: "alex", Text: "уведоми меня, что ужин готов"})
+	require.NoError(t, err)
+	require.Equal(t, "Отправила.", resp.Reply)
+
+	got, err := svc.ListForUser(context.Background(), "alex", 0)
+	require.NoError(t, err)
+	require.Len(t, got, 1)
+	require.Equal(t, "ужин готов", got[0].Body)
+	require.Equal(t, "tool", got[0].Source)
+}
+
+func TestOrchestrator_SendNotificationTool_ResolvesNamedRecipient(t *testing.T) {
+	provider := llmtest.New("local",
+		llmtest.Response{ToolCall: &llm.ToolCall{ID: "call-1", Name: "send_notification", Arguments: `{"text":"ужин готов","recipient":"Аня"}`}},
+		llmtest.Response{Text: "Отправила Ане."},
+	)
+	o, svc := newTestOrchestratorWithNotify(t, provider, []config.UserConfig{
+		{Username: "alex", PasswordHash: "x", FullName: "Alex"},
+		{Username: "anna", PasswordHash: "x", FullName: "Аня"},
+	})
+
+	resp, err := o.Handle(context.Background(), InputRequest{Source: "cli", UserID: "alex", Text: "отправь Ане нотификацию, что ужин готов"})
+	require.NoError(t, err)
+	require.Equal(t, "Отправила Ане.", resp.Reply)
+
+	alexNotifications, err := svc.ListForUser(context.Background(), "alex", 0)
+	require.NoError(t, err)
+	require.Empty(t, alexNotifications, "the notification must go to anna, not the calling user")
+
+	annaNotifications, err := svc.ListForUser(context.Background(), "anna", 0)
+	require.NoError(t, err)
+	require.Len(t, annaNotifications, 1)
+	require.Equal(t, "ужин готов", annaNotifications[0].Body)
+}
+
+func TestOrchestrator_SendNotificationTool_UnknownRecipientReturnsErrorToModel(t *testing.T) {
+	provider := llmtest.New("local",
+		llmtest.Response{ToolCall: &llm.ToolCall{ID: "call-1", Name: "send_notification", Arguments: `{"text":"привет","recipient":"Незнакомец"}`}},
+		llmtest.Response{Text: "Не нашла такого человека."},
+	)
+	o, svc := newTestOrchestratorWithNotify(t, provider, []config.UserConfig{
+		{Username: "alex", PasswordHash: "x", FullName: "Alex"},
+	})
+
+	resp, err := o.Handle(context.Background(), InputRequest{Source: "cli", UserID: "alex", Text: "отправь Незнакомцу нотификацию привет"})
+	require.NoError(t, err)
+	require.Equal(t, "Не нашла такого человека.", resp.Reply)
+
+	got, err := svc.ListForUser(context.Background(), "alex", 0)
+	require.NoError(t, err)
+	require.Empty(t, got, "an unresolved recipient must not fall back to notifying the caller")
+}
+
+func TestOrchestrator_SendNotificationTool_NotOfferedWhenNotifyNotConfigured(t *testing.T) {
+	provider := llmtest.New("local", llmtest.Response{Text: "Привет!"})
+	o, _, _ := newTestOrchestrator(t, provider) // SetNotify never called
+
+	_, err := o.Handle(context.Background(), InputRequest{Source: "cli", UserID: "alex", Text: "привет"})
+	require.NoError(t, err)
+
+	require.Len(t, provider.Requests, 1)
+	for _, tool := range provider.Requests[0].Tools {
+		require.NotEqual(t, "send_notification", tool.Name)
 	}
 }

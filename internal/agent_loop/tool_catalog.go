@@ -195,12 +195,38 @@ func (o *Orchestrator) availableTools(ctx context.Context, userID string, contro
 		add(t.Def())
 	}
 
+	if o.notify != nil && o.notifyCfg.SendNotificationTool {
+		add(llm.ToolDef{
+			Name: sendNotificationToolName,
+			Description: "Push a notification to a household member's Miranda app — the default channel for any " +
+				"proactive, out-of-band message: an alert, a status update, telling them something without them " +
+				"having asked. Use this unless the user explicitly names Telegram specifically — that's the only " +
+				"case where send_telegram is the right tool instead.",
+			Parameters: map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"text": map[string]any{
+						"type":        "string",
+						"description": "the notification's content",
+					},
+					"recipient": map[string]any{
+						"type": "string",
+						"description": "the household member's name, exactly as the user said it (e.g. \"Аня\") — " +
+							"omit this to send to whoever is currently talking to you",
+					},
+				},
+				"required": []string{"text"},
+			},
+		})
+	}
+
 	if o.telegram != nil && o.telegramCfg.SendMessageTool {
 		add(llm.ToolDef{
 			Name: sendTelegramToolName,
-			Description: "Send a text message to a household member's Telegram — use when the user explicitly asks " +
-				"to send something to a phone (e.g. \"отправь мне на телефон ...\", \"send that to my phone\", " +
-				"\"отправь Ане на телефон ...\"). Only works for someone who has messaged the bot at least once.",
+			Description: "Send a text message to a household member's Telegram — use ONLY when the user explicitly " +
+				"names Telegram itself (e.g. \"отправь в Телеграм\", \"send that on Telegram\"), not for a generic " +
+				"\"send to my phone\" request — that's send_notification's job. Only works for someone who has " +
+				"messaged the bot at least once.",
 			Parameters: map[string]any{
 				"type": "object",
 				"properties": map[string]any{

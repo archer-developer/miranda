@@ -21,6 +21,7 @@ import (
 	"github.com/archer-developer/miranda/internal/keyring"
 	"github.com/archer-developer/miranda/internal/mcp"
 	"github.com/archer-developer/miranda/internal/memory"
+	"github.com/archer-developer/miranda/internal/notify"
 	"github.com/archer-developer/miranda/internal/oauth2"
 	"github.com/archer-developer/miranda/internal/redact"
 	"github.com/archer-developer/miranda/internal/replyformat"
@@ -64,10 +65,18 @@ const stopSpeechToolName = "stop_speech"
 
 const sendTelegramToolName = "send_telegram"
 
+// sendNotificationToolName names the tool that pushes a notification
+// through internal/notify — the default channel for any proactive
+// out-of-band message, distinct from sendTelegramToolName which now only
+// fires when the user explicitly names Telegram. See
+// docs/adr/native-notifications.md.
+const sendNotificationToolName = "send_notification"
+
 const createScheduledTaskToolName = "create_scheduled_task"
 
 // createReminderToolName names the tool that stores a passive reminder —
-// delivered directly at fire time (TTS/Telegram/history append), never
+// delivered directly at fire time (TTS, the notification feed/push, or
+// Telegram if it was created from a Telegram conversation), never
 // replayed through the LLM. Distinct from createScheduledTaskToolName,
 // which is for genuinely agentic prompts the model must re-decide
 // something about at fire time — see
@@ -109,6 +118,7 @@ func ReservedToolNames() []string {
 		speakReplyToolName,
 		stopSpeechToolName,
 		sendTelegramToolName,
+		sendNotificationToolName,
 		createScheduledTaskToolName,
 		createReminderToolName,
 		listScheduledTasksToolName,
@@ -202,12 +212,17 @@ type ChatEvent struct {
 	// "conversation_ended" (end_conversation / the idle sweep),
 	// "turn_started"/"turn_ended" (a Handle call began/finished for this
 	// user — edge-triggered, published from Handle itself, see
-	// TurnTracker), or "turn_in_progress" (a point-in-time snapshot sent
-	// once when GET /ws/chat/{username} connects, see
-	// internal/httpapi.handleWSChat).
+	// TurnTracker), "turn_in_progress" (a point-in-time snapshot sent once
+	// when GET /ws/chat/{username} connects, see
+	// internal/httpapi.handleWSChat), or "notification" (a row was written
+	// to internal/notify's feed — Notification is set; see notifyUser).
 	Type           string           `json:"type"`
 	ConversationID string           `json:"conversation_id"`
 	Message        *history.Message `json:"message,omitempty"`
+	// Notification is set on "notification" events only — carries the
+	// just-created row so the web UI's bell badge/list can update live
+	// without a re-fetch (see notify.Notification and static/js/notify-badge.js).
+	Notification *notify.Notification `json:"notification,omitempty"`
 	// Blocks mirrors InputResponse.Blocks — the web UI's chat screen renders
 	// straight from this on every live WS event (including messages from a
 	// channel this tab never itself talked to), the same way it renders
@@ -261,6 +276,8 @@ type Orchestrator struct {
 	baseSystemPrompt string
 	telegram         *telegram.Sender // set via SetTelegram; nil means the send_telegram tool is never offered
 	telegramCfg      config.TelegramConfig
+	notify           *notify.Service // set via SetNotify; nil means send_notification is never offered and deliverReminder's default/always-on legs skip it
+	notifyCfg        config.NotifyConfig
 	// webTools is set via SetWebTools; empty means none offered. Kept as a
 	// slice (not a map) so availableTools advertises them in the same order
 	// on every turn — anthropic.Provider places its prompt-cache breakpoint
@@ -405,6 +422,59 @@ func (o *Orchestrator) SetOAuth(svc *oauth2.Service, reconnectInterval, maxRecon
 func (o *Orchestrator) SetTelegram(sender *telegram.Sender, cfg config.TelegramConfig) {
 	o.telegram = sender
 	o.telegramCfg = cfg
+}
+
+// SetNotify wires the native notification feed in — the send_notification
+// tool, and deliverReminder's default delivery channel (see
+// docs/adr/native-notifications.md). Mirrors SetTelegram's shape; leaving
+// it uncalled means send_notification is never offered and every reminder
+// falls back to whatever deliverReminder does without it (voice/Telegram
+// origins still work, a web/unknown-origin reminder is simply dropped —
+// this method should always be called whenever config.NotifyConfig.Enabled,
+// which defaults true).
+func (o *Orchestrator) SetNotify(svc *notify.Service, cfg config.NotifyConfig) {
+	o.notify = svc
+	o.notifyCfg = cfg
+}
+
+// notifyUser is the one path everything in this package uses to deliver a
+// native notification — send_notification's dispatch and deliverReminder's
+// legs both call this instead of o.notify.Notify directly, since a
+// notification must also be published as a live ChatEvent (Type:
+// "notification") over this user's own chat WS connection so an
+// already-open tab updates its bell badge/list without a page reload.
+// internal/notify itself knows nothing about internal/hub — same
+// separation internal/telegram keeps — so this wrapper is where that wiring
+// happens. No-op (returns nil) when SetNotify was never called.
+func (o *Orchestrator) notifyUser(ctx context.Context, userID, title, body, source string) error {
+	if o.notify == nil {
+		return fmt.Errorf("notify not configured")
+	}
+	n, err := o.notify.Notify(ctx, userID, title, body, source)
+	if err != nil {
+		return err
+	}
+	o.hub.Publish(hub.Event{Source: "chat", UserID: userID, Data: ChatEvent{Type: "notification", Notification: &n}})
+	return nil
+}
+
+// resolveRecipient turns a tool call's optional free-text "recipient"
+// argument into a concrete username: callerUserID when recipient is empty
+// (send to whoever is currently talking to Miranda), otherwise
+// users.Registry.ResolveByDisplayName's match — shared by send_notification
+// and send_telegram's dispatch, which both need exactly this resolution.
+func (o *Orchestrator) resolveRecipient(recipient, callerUserID string) (string, error) {
+	if recipient == "" {
+		return callerUserID, nil
+	}
+	if o.users == nil {
+		return "", fmt.Errorf("no household member matches %q", recipient)
+	}
+	target, ok := o.users.ResolveByDisplayName(recipient)
+	if !ok {
+		return "", fmt.Errorf("no household member matches %q", recipient)
+	}
+	return target.Username, nil
 }
 
 // SetWebTools wires in Miranda's own tavily_web_search/tavily_web_fetch tools

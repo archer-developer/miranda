@@ -8,7 +8,6 @@ import (
 
 	"github.com/robfig/cron/v3"
 
-	"github.com/archer-developer/miranda/internal/history"
 	"github.com/archer-developer/miranda/internal/hub"
 	"github.com/archer-developer/miranda/internal/schedule"
 	"github.com/archer-developer/miranda/internal/users"
@@ -143,20 +142,28 @@ func (o *Orchestrator) RunScheduledTasks(ctx context.Context, logger *slog.Logge
 //
 // Delivery is: the origin channel first — TTS if created over voice
 // (OriginSource == ha_assist), a direct Telegram send if created via
-// Telegram, otherwise appended straight into the user's own conversation
-// history so the web UI shows it — then, always in addition, unless the
-// origin channel was already Telegram (to avoid sending it twice), a
-// best-effort Telegram push (skipped entirely, not just logged, when
-// Telegram isn't configured at all — see the guard below). AnnounceAloud
-// layers one more speak-aloud leg on top of all that when the origin wasn't
-// already voice — it never overrides which channel OriginSource itself
-// resolves to, so e.g. a Telegram-origin reminder with AnnounceAloud still
-// reaches Telegram, it's just also spoken. Every leg is independent; only
-// the origin-channel leg's failure is treated as the firing having failed
-// (see the two Telegram calls below for why).
+// Telegram, otherwise a native notification via internal/notify (the
+// notification feed's bell icon, plus a browser push if configured) — see
+// docs/adr/native-notifications.md for why Telegram is no longer the
+// default/always-on leg it used to be: auto-alerts now go through
+// Miranda's own notification channel, and Telegram only fires when a
+// reminder's origin literally was Telegram (replying on the channel it
+// came from) or a user explicitly asks for Telegram by name elsewhere
+// (send_telegram's tool description). AnnounceAloud layers one more
+// speak-aloud leg on top of all that when the origin wasn't already voice
+// — it never overrides which channel OriginSource itself resolves to, so
+// e.g. a Telegram-origin reminder with AnnounceAloud still reaches
+// Telegram, it's just also spoken. Every leg is independent; only the
+// origin-channel leg's failure is treated as the firing having failed.
 func (o *Orchestrator) deliverReminder(ctx context.Context, task schedule.Task, logger *slog.Logger) error {
 	voiceOrigin := task.OriginSource == users.SourceHAAssist
 	telegramOrigin := task.OriginSource == users.SourceTelegram
+	// defaultOrigin covers "web UI or any other/unknown origin" — the same
+	// set the switch's default case below handles. Computed once so the
+	// always-additionally-Notify block after the switch can tell whether
+	// the switch itself already notified, without re-deriving the same
+	// condition and risking the two falling out of sync.
+	defaultOrigin := !voiceOrigin && !telegramOrigin
 
 	// Origin-channel delivery — chosen strictly by OriginSource, never
 	// overridden by AnnounceAloud (see the doc comment above): a
@@ -176,7 +183,7 @@ func (o *Orchestrator) deliverReminder(ctx context.Context, task schedule.Task, 
 	case telegramOrigin:
 		originErr = o.sendTelegramReminder(ctx, task)
 	default: // web UI or any other/unknown origin
-		originErr = o.appendReminderToHistory(ctx, task)
+		originErr = o.notifyUser(ctx, task.UserID, "Миранда", task.Prompt, "reminder")
 	}
 	if originErr != nil {
 		logger.Error("reminder origin-channel delivery failed", "task_id", task.ID, "user_id", task.UserID, "origin_source", task.OriginSource, "error", originErr)
@@ -193,17 +200,20 @@ func (o *Orchestrator) deliverReminder(ctx context.Context, task schedule.Task, 
 		}
 	}
 
-	// Always-additionally Telegram, unless origin was already Telegram —
-	// best-effort and deliberately NOT folded into originErr: a user with no
-	// known Telegram chat id must not turn an otherwise-successful origin
-	// delivery into a StatusError firing. Skipped (not even attempted, no
-	// log) when Telegram isn't configured at all: that's a static,
-	// server-wide fact, not a per-firing transient condition, so warning
-	// about it on every single firing of every non-Telegram-origin reminder
-	// forever would just be permanent, un-actionable log noise.
-	if !telegramOrigin && o.telegram != nil {
-		if err := o.sendTelegramReminder(ctx, task); err != nil {
-			logger.Warn("reminder telegram delivery (always-on) failed", "task_id", task.ID, "user_id", task.UserID, "error", err)
+	// Always-additionally Notify, unless the origin channel already was the
+	// default branch above (which already called notifyUser — this avoids
+	// double-recording the same reminder in the feed). Best-effort and
+	// deliberately NOT folded into originErr, for the same reason Telegram's
+	// old always-on leg wasn't: a household that hasn't turned on browser
+	// push yet must not turn an otherwise-successful voice/Telegram-origin
+	// firing into a StatusError. This is what guarantees every reminder ends
+	// up in the notification feed exactly once regardless of origin. Skipped
+	// entirely (not even attempted, no log) when notify isn't configured at
+	// all — a static, server-wide fact, not a per-firing transient
+	// condition (same reasoning the old Telegram guard used).
+	if !defaultOrigin && o.notify != nil {
+		if err := o.notifyUser(ctx, task.UserID, "Миранда", task.Prompt, "reminder"); err != nil {
+			logger.Warn("reminder notify delivery (always-on) failed", "task_id", task.ID, "user_id", task.UserID, "error", err)
 		}
 	}
 
@@ -221,24 +231,4 @@ func (o *Orchestrator) sendTelegramReminder(ctx context.Context, task schedule.T
 		return fmt.Errorf("telegram not configured")
 	}
 	return o.telegram.SendToUser(ctx, task.UserID, task.Prompt)
-}
-
-// appendReminderToHistory delivers a web/unknown-origin reminder by
-// appending it straight into the user's conversation history — reusing
-// AppendMessage/publishChatMessage exactly as every other assistant-role
-// message is recorded, so a currently-open web UI tab sees it live over the
-// per-user chat stream, and it's there in the dialog log the next time they
-// open it even if no tab was open at all.
-func (o *Orchestrator) appendReminderToHistory(ctx context.Context, task schedule.Task) error {
-	convID, _, err := o.openOrStartConversation(ctx, task.UserID, users.SourceScheduled)
-	if err != nil {
-		return err
-	}
-
-	msgID, err := o.history.AppendMessage(ctx, convID, "assistant", task.Prompt)
-	if err != nil {
-		return fmt.Errorf("append reminder message: %w", err)
-	}
-	o.publishChatMessage(task.UserID, convID, history.Message{ID: msgID, ConversationID: convID, Role: "assistant", Content: task.Prompt})
-	return nil
 }

@@ -11,6 +11,7 @@ import { t } from "../i18n.js";
 import { icon } from "../icons.js";
 import { showToast } from "../toast.js";
 import * as webauthn from "../webauthn.js";
+import * as push from "../push.js";
 import { cropAvatar } from "../avatar-crop.js";
 
 const user = window.MIRANDA_USER || {};
@@ -169,6 +170,47 @@ async function renderCredentials(listEl) {
     listEl.innerHTML = `<p class="text-sm text-(--color-danger-text)"></p>`;
     listEl.querySelector("p").textContent = `${t("failed_to_load", "Failed to load:")} ${err}`;
   }
+}
+
+// mountPush wires the single enable/disable toggle for the browser-push
+// delivery leg (see docs/adr/native-notifications.md) — deliberately no
+// per-device management UI (unlike passkeys' list), since the common case
+// is one subscription per device and internal/notify.Store can grow that
+// later without a schema change.
+async function mountPush(container) {
+  const section = container.querySelector("#push-section");
+  section.classList.remove("hidden");
+
+  const toggleBtn = container.querySelector("#push-toggle");
+  const statusText = container.querySelector("#push-status");
+
+  function render(subscribed) {
+    toggleBtn.textContent = subscribed
+      ? t("profile_push_disable_button", "Disable push notifications")
+      : t("profile_push_enable_button", "Enable push notifications");
+    statusText.textContent = subscribed
+      ? t("profile_push_status_on", "Push notifications are on for this device.")
+      : t("profile_push_status_off", "Push notifications are off for this device.");
+  }
+
+  render(await push.isSubscribed());
+
+  toggleBtn.addEventListener("click", async () => {
+    toggleBtn.disabled = true;
+    try {
+      if (await push.isSubscribed()) {
+        await push.unsubscribe();
+        render(false);
+      } else {
+        await push.subscribe();
+        render(true);
+      }
+    } catch (err) {
+      showToast(`${t("request_failed", "Request failed:")} ${err}`, "error");
+    } finally {
+      toggleBtn.disabled = false;
+    }
+  });
 }
 
 function mountPasskeys(container) {
@@ -347,6 +389,14 @@ export function mount(container) {
           <div id="passkeys-list" class="space-y-2"></div>
         </section>
 
+        <section id="push-section" class="mt-6 hidden">
+          <h2 class="mb-1 text-base font-semibold text-(--color-text)">${t("profile_push_title", "Push notifications")}</h2>
+          <p id="push-status" class="mb-3 text-sm text-(--color-text-faint)"></p>
+          <button id="push-toggle" type="button"
+            class="w-full rounded-lg border border-(--color-border-strong) px-4 py-2.5 text-sm font-medium text-(--color-text) transition-colors hover:border-(--color-text-faint) hover:bg-(--color-surface-2)/60 focus-visible:outline-none disabled:cursor-not-allowed disabled:opacity-60">
+          </button>
+        </section>
+
         <!-- An installed home-screen PWA has no browser reload button and
              can sit on an already-loaded shell document indefinitely (iOS
              tends to resume a suspended WKWebView instance rather than
@@ -380,6 +430,10 @@ export function mount(container) {
 
   if (window.MIRANDA_WEBAUTHN_ENABLED && webauthn.isSupported()) {
     mountPasskeys(container);
+  }
+
+  if (window.MIRANDA_PUSH_ENABLED && push.isSupported()) {
+    mountPush(container);
   }
 
   container.querySelector("#force-refresh").addEventListener("click", () => {

@@ -263,6 +263,20 @@
             {{end}}
           </div>
 
+          {{if .NotifyEnabled}}
+          <a href="#/notifications" id="notify-bell"
+             class="relative inline-flex h-11 w-11 items-center justify-center rounded-lg text-(--color-text-muted) transition-colors hover:bg-(--color-surface-2) hover:text-(--color-text) focus-visible:outline-none"
+             aria-label="{{.Strings.nav_notifications_label}}">
+            <!-- Icon lives in its own child span, filled by notify-badge.js —
+                 kept separate from #notify-bell-dot (a sibling, not nested
+                 inside this one) so painting the icon via innerHTML never
+                 wipes out the dot along with it. -->
+            <span id="notify-bell-icon"></span>
+            <span id="notify-bell-dot" hidden
+                  class="absolute right-2.5 top-2.5 h-2 w-2 rounded-full bg-(--color-danger-icon)"></span>
+          </a>
+          {{end}}
+
           <button id="theme-toggle" type="button"
                   class="inline-flex h-11 w-11 items-center justify-center rounded-lg text-(--color-text-muted) transition-colors hover:bg-(--color-surface-2) hover:text-(--color-text) focus-visible:outline-none">
           </button>
@@ -356,6 +370,8 @@
     window.MIRANDA_I18N = {{.StringsJSON}};
     window.MIRANDA_USER = {{.UserJSON}};
     window.MIRANDA_WEBAUTHN_ENABLED = {{.WebAuthnEnabled}};
+    window.MIRANDA_NOTIFY_ENABLED = {{.NotifyEnabled}};
+    window.MIRANDA_PUSH_ENABLED = {{.PushEnabled}};
   </script>
   <!-- Attempt the Screen Orientation API lock for browsers that support it
        (Chrome on Android). Silently ignored on iOS Safari and non-fullscreen

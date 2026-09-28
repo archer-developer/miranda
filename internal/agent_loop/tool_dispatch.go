@@ -206,6 +206,26 @@ func (o *Orchestrator) executeTool(ctx context.Context, userID, conversationID, 
 		return "stopped"
 	}
 
+	if tc.Name == sendNotificationToolName {
+		var args struct {
+			Text      string `json:"text"`
+			Recipient string `json:"recipient"`
+		}
+		if err := json.Unmarshal([]byte(tc.Arguments), &args); err != nil {
+			return fmt.Sprintf("error: invalid arguments: %v", err)
+		}
+
+		targetUsername, err := o.resolveRecipient(args.Recipient, userID)
+		if err != nil {
+			return fmt.Sprintf("error: %v", err)
+		}
+
+		if err := o.notifyUser(ctx, targetUsername, "Miranda", args.Text, "tool"); err != nil {
+			return fmt.Sprintf("error: %v", err)
+		}
+		return "sent"
+	}
+
 	if tc.Name == sendTelegramToolName {
 		var args struct {
 			Text      string `json:"text"`
@@ -215,16 +235,9 @@ func (o *Orchestrator) executeTool(ctx context.Context, userID, conversationID, 
 			return fmt.Sprintf("error: invalid arguments: %v", err)
 		}
 
-		targetUsername := userID
-		if args.Recipient != "" {
-			if o.users == nil {
-				return fmt.Sprintf("error: no household member matches %q", args.Recipient)
-			}
-			target, ok := o.users.ResolveByDisplayName(args.Recipient)
-			if !ok {
-				return fmt.Sprintf("error: no household member matches %q", args.Recipient)
-			}
-			targetUsername = target.Username
+		targetUsername, err := o.resolveRecipient(args.Recipient, userID)
+		if err != nil {
+			return fmt.Sprintf("error: %v", err)
 		}
 
 		if err := o.telegram.SendHTMLToUser(ctx, targetUsername, replyformat.Parse(args.Text)); err != nil {

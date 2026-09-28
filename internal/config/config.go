@@ -28,6 +28,7 @@ type Config struct {
 	WebUI      WebUIConfig      `yaml:"web_ui"`
 	WebAuthn   WebAuthnConfig   `yaml:"webauthn"`
 	Telegram   TelegramConfig   `yaml:"telegram"`
+	Notify     NotifyConfig     `yaml:"notify"`
 	Schedule   ScheduleConfig   `yaml:"schedule"`
 	FileUpload FileUploadConfig `yaml:"file_upload"`
 	OAuth      OAuthConfig      `yaml:"oauth"`
@@ -172,6 +173,14 @@ type StorageConfig struct {
 	// data-loss-equivalent to every household member having to re-authorize
 	// every OAuth-gated MCP server. Only used when OAuthConfig.Enabled.
 	OAuthSQLitePath string `yaml:"oauth_sqlite_path"`
+	// NotifySQLitePath is a separate SQLite file holding both the
+	// persisted notification feed and registered Web Push subscriptions
+	// (see internal/notify) — kept apart from SQLitePath for the same
+	// isolation reasoning as WebAuthnSQLitePath/ScheduleSQLitePath. Used
+	// whenever NotifyConfig.Enabled is true (the browser-push subscription
+	// table exists in this same file regardless of whether
+	// NotifyConfig.WebPush.Enabled is on).
+	NotifySQLitePath string `yaml:"notify_sqlite_path"`
 }
 
 // WebAuthnConfig controls optional FIDO2/passkey ("biometric") login,
@@ -250,6 +259,61 @@ type TelegramConfig struct {
 	// clobbers the real deployment's webhook secret and breaks its inbound
 	// delivery until that one restarts.
 	RegisterWebhook bool `yaml:"register_webhook"`
+}
+
+// NotifyConfig controls Miranda's own native notification feed (the web
+// UI's bell icon) and the send_notification tool — see
+// docs/adr/native-notifications.md. Unlike WebAuthn/Telegram, the feed
+// itself needs no deployment secret or URL, so it's opt-out like
+// ScheduleConfig (Enabled defaults true): every reminder and proactive
+// send_notification call is recorded here regardless of whether browser
+// push delivery (WebPush below) is ever turned on — the feed alone still
+// works as an in-app-only list.
+//
+// This is now the *default* auto-alert channel — deliverReminder
+// (internal/agent_loop/schedule.go) notifies through this for every
+// reminder regardless of origin, and send_telegram's own tool description
+// steers the model away from auto-CCing Telegram; Telegram still fires
+// when a reminder's origin literally was Telegram, or when a user
+// explicitly asks for it by name.
+type NotifyConfig struct {
+	Enabled bool `yaml:"enabled"`
+	// SendNotificationTool controls whether the send_notification tool is
+	// offered to the model, letting it proactively notify any household
+	// member at an arbitrary moment (e.g. "Отправь Ане нотификацию, что
+	// ужин готов"). Only meaningful when Enabled is also true.
+	SendNotificationTool bool `yaml:"send_notification_tool"`
+	// WebPush is the opt-in browser-push delivery leg layered on top of the
+	// feed — see WebPushConfig's own doc comment for why this needs its own
+	// Enabled flag distinct from NotifyConfig.Enabled.
+	WebPush WebPushConfig `yaml:"web_push"`
+}
+
+// WebPushConfig controls the optional Web Push (RFC 8030/8291/8292)
+// delivery leg that lets a notification reach a household member's phone
+// as a real OS notification through the already-installable PWA
+// (internal/webui/templates/manifest.webmanifest,
+// static/js/{sw.js,pwa.js}), even when no Miranda tab is open. Opt-in
+// (Enabled defaults false) for the same reason as WebAuthn/Telegram: the
+// VAPID keypair is deployment-specific and there's no safe default to
+// generate silently — an auto-generated, unpersisted key would orphan
+// every existing browser subscription on the next restart. Generate a
+// keypair once with `go run ./cmd/miranda vapid-keys`.
+//
+// Web Push only works in a secure browser context (HTTPS, or
+// http://localhost), same requirement as WebAuthnConfig — and on iOS
+// Safari specifically, only once the PWA has actually been added to the
+// home screen (iOS 16.4+); there is no code-level workaround for either
+// platform limitation.
+type WebPushConfig struct {
+	Enabled bool `yaml:"enabled"`
+	// VAPIDPublicKey is sent to every subscribing browser — not secret,
+	// unlike the private key below. Base64url-encoded, uncompressed EC
+	// P-256 point, as produced by `go run ./cmd/miranda vapid-keys`.
+	VAPIDPublicKey string `yaml:"vapid_public_key"`
+	// Subject is the VAPID JWT's "sub" claim: a mailto: address or https:
+	// URL a push service may contact if this deployment misbehaves.
+	Subject string `yaml:"subject"`
 }
 
 // ScheduleConfig controls the create_scheduled_task/list_scheduled_tasks/
@@ -1095,6 +1159,7 @@ func Default() Config {
 			KeyringSQLitePath:  "./data/keyring.db",
 			TTSCacheDir:        "./data/storage",
 			OAuthSQLitePath:    "./data/oauth.db",
+			NotifySQLitePath:   "./data/notify.db",
 		},
 		Logging: LoggingConfig{
 			Dir:               "./logs",
@@ -1178,6 +1243,15 @@ func Default() Config {
 			WebhookPath:     "/telegram/webhook",
 			SendMessageTool: true,
 			RegisterWebhook: true,
+		},
+		// On by default — see NotifyConfig's doc comment: the feed itself
+		// needs no deployment secret, only the nested WebPush leg does.
+		Notify: NotifyConfig{
+			Enabled:              true,
+			SendNotificationTool: true,
+			WebPush: WebPushConfig{
+				Enabled: false,
+			},
 		},
 		Schedule: ScheduleConfig{
 			Enabled: true,

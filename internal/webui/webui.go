@@ -29,6 +29,7 @@ import (
 	"github.com/go-webauthn/webauthn/protocol"
 
 	"github.com/archer-developer/miranda/internal/history"
+	"github.com/archer-developer/miranda/internal/notify"
 	"github.com/archer-developer/miranda/internal/replyformat"
 	"github.com/archer-developer/miranda/internal/session"
 	"github.com/archer-developer/miranda/internal/users"
@@ -85,6 +86,25 @@ type WebAuthnService interface {
 	FinishKeyProbe(ctx context.Context, username, ceremonyKey string, body []byte) (credentialID, prfOutput []byte, err error)
 }
 
+// Notify is the subset of *notify.Service the dashboard needs for the
+// bell/notifications screen and the optional Web Push subscribe/unsubscribe
+// endpoints. A nil Notify passed to New disables every /api/notifications
+// and /api/push/* route entirely — see New's doc comment, mirroring
+// WebAuthnService's nil-disables convention.
+type Notify interface {
+	ListForUser(ctx context.Context, userID string, limit int) ([]notify.Notification, error)
+	UnreadCount(ctx context.Context, userID string) (int, error)
+	MarkAllRead(ctx context.Context, userID string) error
+	Subscribe(ctx context.Context, sub notify.Subscription) error
+	Unsubscribe(ctx context.Context, endpoint, userID string) error
+	// WebPushEnabled reports whether the nested browser-push leg is
+	// configured — gates whether /api/push/* is registered at all,
+	// distinct from Notify itself being nil (feed-only deployments still
+	// want /api/notifications without ever exposing /api/push/*).
+	WebPushEnabled() bool
+	VAPIDPublicKey() string
+}
+
 // KeyringService is the subset of *keyring.Service the dashboard needs to
 // unlock/lock a user's master key around login/logout, and to add a newly
 // registered passkey's wrapped-key slot — see internal/keyring and
@@ -113,6 +133,7 @@ type Handler struct {
 	memory          Memory
 	turns           TurnTracker
 	webauthn        WebAuthnService // nil disables passkey login/registration entirely
+	notify          Notify          // nil disables /api/notifications and /api/push/* entirely
 	keyring         KeyringService  // nil only in tests — cmd/miranda always passes a real one
 	users           *users.Registry
 	sessions        *session.Store
@@ -166,7 +187,7 @@ func staticAssetVersion(fsys fs.FS) (string, error) {
 // package needs a separate "is it enabled" branch beyond this one nil check.
 // keyringSvc may independently be nil in tests that don't exercise it — see
 // KeyringService's doc comment.
-func New(h History, mem Memory, turns TurnTracker, webauthnSvc WebAuthnService, keyringSvc KeyringService, usersRegistry *users.Registry, sessions *session.Store, defaultLanguage, avatarsDir string, logger *slog.Logger) (*Handler, error) {
+func New(h History, mem Memory, turns TurnTracker, webauthnSvc WebAuthnService, notifySvc Notify, keyringSvc KeyringService, usersRegistry *users.Registry, sessions *session.Store, defaultLanguage, avatarsDir string, logger *slog.Logger) (*Handler, error) {
 	indexTmpl, err := template.ParseFS(templatesFS, "templates/index.html")
 	if err != nil {
 		return nil, fmt.Errorf("webui: parse index template: %w", err)
@@ -192,6 +213,7 @@ func New(h History, mem Memory, turns TurnTracker, webauthnSvc WebAuthnService, 
 		memory:          mem,
 		turns:           turns,
 		webauthn:        webauthnSvc,
+		notify:          notifySvc,
 		keyring:         keyringSvc,
 		users:           usersRegistry,
 		sessions:        sessions,
@@ -266,6 +288,17 @@ func New(h History, mem Memory, turns TurnTracker, webauthnSvc WebAuthnService, 
 			// didn't support PRF.
 			mux.Handle("POST /api/webauthn/register/probe-begin", handler.requireAuthAPI(http.HandlerFunc(handler.handleWebAuthnRegisterProbeBegin)))
 			mux.Handle("POST /api/webauthn/register/probe-finish", handler.requireAuthAPI(http.HandlerFunc(handler.handleWebAuthnRegisterProbeFinish)))
+		}
+	}
+
+	if notifySvc != nil {
+		mux.Handle("GET /api/notifications", handler.requireAuthAPI(http.HandlerFunc(handler.handleGetNotifications)))
+		mux.Handle("POST /api/notifications/read", handler.requireAuthAPI(http.HandlerFunc(handler.handlePostNotificationsRead)))
+		mux.Handle("GET /api/notifications/unread-count", handler.requireAuthAPI(http.HandlerFunc(handler.handleGetUnreadCount)))
+		if notifySvc.WebPushEnabled() {
+			mux.Handle("GET /api/push/vapid-key", handler.requireAuthAPI(http.HandlerFunc(handler.handleGetVAPIDKey)))
+			mux.Handle("POST /api/push/subscribe", handler.requireAuthAPI(http.HandlerFunc(handler.handlePostPushSubscribe)))
+			mux.Handle("DELETE /api/push/subscribe", handler.requireAuthAPI(http.HandlerFunc(handler.handleDeletePushSubscribe)))
 		}
 	}
 	handler.mux = mux
@@ -344,6 +377,8 @@ func (h *Handler) handleIndex(w http.ResponseWriter, r *http.Request) {
 		UserJSON:        toJSON(userView),
 		Languages:       languageOptions(lang),
 		WebAuthnEnabled: h.webauthn != nil,
+		NotifyEnabled:   h.notify != nil,
+		PushEnabled:     h.notify != nil && h.notify.WebPushEnabled(),
 		AssetVersion:    h.assetVersion,
 	}
 

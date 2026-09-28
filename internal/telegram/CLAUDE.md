@@ -41,3 +41,12 @@ Telegram — the current user by default, or another one resolved by
 `FullName`/`Username`). Fails with a clear error if the target has never
 messaged the bot, since that's the only way `ChatStore` ever learns a
 chat id.
+
+**This tool's description was narrowed to require an explicit ask**
+("отправь в Телеграм") since `internal/notify`'s `send_notification`
+became the default proactive channel — see
+`docs/adr/native-notifications.md`. `deliverReminder`
+(`internal/agent_loop/schedule.go`) also no longer auto-CCs every
+reminder to Telegram; a Telegram-origin reminder still replies through
+Telegram (that's the channel it came from), but nothing else is
+Telegram-routed unless asked for by name.

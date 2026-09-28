@@ -104,6 +104,12 @@ type indexPageData struct {
 	UserJSON        template.JS
 	Languages       []languageOption
 	WebAuthnEnabled bool
+	// NotifyEnabled/PushEnabled gate the profile screen's notifications
+	// section and bell icon rendering the same way WebAuthnEnabled gates
+	// the passkeys section — see notify-badge.js/screens/notifications.js.
+	// PushEnabled is a strict subset of NotifyEnabled (see Notify.WebPushEnabled).
+	NotifyEnabled bool
+	PushEnabled   bool
 	// AssetVersion is embedded in /static/v<AssetVersion>/... URLs so a new
 	// build's assets get a new URL — see staticAssetVersion in webui.go.
 	AssetVersion string
