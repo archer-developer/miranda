@@ -457,8 +457,7 @@ type LLMProvider struct {
 	// miranda-llm/anthropic, and miranda-llm/openaicompat each hold one
 	// client per resolved key and cycle on a retryable error (quota/
 	// per-key auth, never a 5xx — see each package's own isRetryable doc
-	// comment) — tuned by GeminiRotationConfig for all three alike despite
-	// the name (a historical holdover from when only gemini rotated).
+	// comment) — tuned by RotationConfig for all three alike.
 	APIKeyEnvs []string `yaml:"api_key_envs,omitempty"`
 
 	// AnthropicTools enables Claude's own server-executed tools. Only
@@ -473,10 +472,14 @@ type LLMProvider struct {
 	// meaningful when Type == "gemini"; ignored otherwise — see
 	// GeminiToolsConfig.
 	GeminiTools GeminiToolsConfig `yaml:"gemini_tools,omitempty"`
-	// GeminiRotation tunes this provider's key-rotation behavior. Only
-	// meaningful when Type == "gemini"; the zero value falls back to
-	// miranda-llm/gemini's built-in defaults (1 cycle, no cooldown).
-	GeminiRotation GeminiRotationConfig `yaml:"gemini_rotation,omitempty"`
+	// Rotation tunes this provider's key-rotation behavior — applied to
+	// every provider Type alike (see RotationConfig's own doc comment and
+	// cmd/miranda's provider-construction switch, which converts this same
+	// struct into gemini.RotationConfig, anthropic.RotationConfig, or
+	// openaicompat.RotationConfig depending on Type) — the zero value
+	// falls back to each of those packages' own built-in defaults (1
+	// cycle, no cooldown).
+	Rotation RotationConfig `yaml:"rotation,omitempty"`
 
 	// Escalation lets this specific provider hand a hard turn off to
 	// another configured provider by calling a tool. Lives on each provider
@@ -529,21 +532,26 @@ type GeminiToolsConfig struct {
 	ContextCaching bool `yaml:"context_caching"`
 }
 
-// GeminiRotationConfig tunes miranda-llm/gemini's (and, despite the name,
-// miranda-llm/anthropic's and miranda-llm/openaicompat's — see
-// LLMProvider.APIKeyEnvs's doc comment) key-rotation: CooldownSeconds/
-// MaxRetryCycles govern the older "sleep and retry the whole key list"
-// loop; QuotaBanMinutes/OverloadBanMinutes/OverloadTimeoutSeconds govern
-// the newer keyrotation.Banlist mechanism, which persists across separate
-// requests, not just within one — see each package's own isRetryable/
-// banDuration doc comments.
+// RotationConfig tunes an LLMProvider's key-rotation, regardless of its
+// Type — miranda-llm/gemini's, miranda-llm/anthropic's, and
+// miranda-llm/openaicompat's alike (see LLMProvider.APIKeyEnvs's doc
+// comment). Named after the mechanism, not any one provider type — an
+// earlier version of this struct was gemini-only in name (it predates
+// anthropic/openai_compat gaining the same rotation logic) and got
+// renamed once that stopped being true, so a config field named
+// "gemini_..." no longer implies gemini-only anywhere in this file.
+// CooldownSeconds/MaxRetryCycles govern the older "sleep and retry the
+// whole key list" loop; QuotaBanMinutes/OverloadBanMinutes/
+// OverloadTimeoutSeconds govern the newer keyrotation.Banlist mechanism,
+// which persists across separate requests, not just within one — see
+// each package's own isRetryable/banDuration doc comments.
 //
 // Field-for-field identical (same names, types, order) to
 // gemini.RotationConfig/anthropic.RotationConfig/openaicompat.RotationConfig
 // on purpose: cmd/miranda's main.go converts this struct directly into
 // whichever of those three a provider entry needs via a bare Go struct
 // conversion, which only compiles if all four shapes match exactly.
-type GeminiRotationConfig struct {
+type RotationConfig struct {
 	CooldownSeconds int `yaml:"cooldown_seconds"`
 	MaxRetryCycles  int `yaml:"max_retry_cycles"`
 	// QuotaBanMinutes is how long a key that hit a quota/rate-limit error

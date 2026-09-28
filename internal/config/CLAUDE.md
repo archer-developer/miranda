@@ -51,7 +51,7 @@ hop in the chain sees only its own escalation tool. `Router.Chat` walks the
 chain to any depth; a small hop cap catches a misconfigured cycle (two
 providers escalating to each other), not a legitimate deep ladder.
 
-## Gemini key rotation
+## Provider key rotation
 
 `type: gemini` rotates across every resolved `api_key_envs` key on a quota
 error (HTTP 429/`RESOURCE_EXHAUSTED`), Gemini's specific "overloaded" shape
@@ -67,7 +67,7 @@ for `openai_compat`), via the identical `keyrotation` package.
 
 **Key banning**: a quota or overload rotation also bans that key on a
 `keyrotation.Banlist` shared across every call a provider instance makes —
-`GeminiRotationConfig.QuotaBanMinutes`/`OverloadBanMinutes` (default 30 min
+`RotationConfig.QuotaBanMinutes`/`OverloadBanMinutes` (default 30 min
 each), `OverloadTimeoutSeconds` (default 10s) tune this, and it applies
 identically to `gemini_tts` (`internal/tts/gemini.go`,
 `GeminiTTSConfig`'s own matching fields) despite that provider using a

@@ -174,7 +174,7 @@ func buildRecordingProviders(ctx context.Context, configs []config.LLMProvider, 
 		case "openai_compat":
 			p = openaicompat.New(c.Name, c.BaseURL, c.Model, firstAuditAPIKey(c.APIKeyEnvs))
 		case "gemini":
-			gp, err := gemini.New(ctx, c.Name, c.Model, c.APIKeyEnvs, gemini.ToolsConfig(c.GeminiTools), gemini.RotationConfig(c.GeminiRotation), logger)
+			gp, err := gemini.New(ctx, c.Name, c.Model, c.APIKeyEnvs, gemini.ToolsConfig(c.GeminiTools), gemini.RotationConfig(c.Rotation), logger)
 			if err != nil {
 				return nil, fmt.Errorf("build gemini provider %q: %w", c.Name, err)
 			}

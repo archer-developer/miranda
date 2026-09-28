@@ -79,6 +79,12 @@ storage:
   # (internal/oauth2, docs/adr/oauth2-layer.md) — one row per (username,
   # provider). Only used when oauth.enabled below is true.
   oauth_sqlite_path: "./data/oauth.db"
+  # Separate SQLite file holding both the notification feed (see notify:
+  # below) and registered Web Push browser subscriptions — same isolation
+  # reasoning as webauthn_sqlite_path. The feed table is used whenever
+  # notify.enabled; the subscriptions table only matters on top of that
+  # when notify.web_push.enabled is also true.
+  notify_sqlite_path: "./data/notify.db"
 
 logging:
   # Mirrors everything on stdout into logging.dir/miranda.log, plus a
@@ -113,6 +119,60 @@ llm:
         enabled: true
         tool_name: "escalate_to_claude"
         target_provider: claude
+        # Overrides the escalation tool's description shown to the model —
+        # the default is a generic "too complex/ambiguous/high-stakes"
+        # prompt. Worth setting when this provider has a concrete,
+        # known-missing capability worth naming explicitly (e.g. a Gemini
+        # provider with no working code-execution tool on the free
+        # Developer API — see config/llm.yaml's worked example).
+        # description: "Hand this off when ..."
+      # rotation tunes key rotation/retry/ban behavior — applies to EVERY
+      # provider type here alike (anthropic, openai_compat, and gemini;
+      # cmd/miranda converts this same block into each package's own
+      # RotationConfig), not just type: gemini. The zero value (omit this
+      # whole block) falls back to each package's own defaults (1 retry
+      # cycle, no cooldown) — only add it where api_key_envs above lists
+      # more than one key, or you want the ban-on-failure behavior tuned.
+      # See config/llm.yaml for a worked multi-tier Gemini example.
+      rotation:
+        # How long to sleep before retrying the *whole* key list again if
+        # every key failed with a retryable error in one pass (most
+        # free-tier quota windows are per-minute, so a short cooldown often
+        # recovers a key that failed moments ago). This is the older
+        # "sleep and retry the whole list" loop; quota_ban_minutes/
+        # overload_ban_minutes below are the newer, longer-lived mechanism
+        # and matter more in practice.
+        cooldown_seconds: 5
+        # Bounds how many times the whole key list is retried (with
+        # cooldown_seconds between passes) before giving up and returning
+        # an error for this call.
+        max_retry_cycles: 3
+        # How long a key that hit a quota/rate-limit error is skipped by
+        # every SUBSEQUENT call — not just retried within the current one.
+        # This is what lets you list a free-tier key before a paid one
+        # (api_key_envs above) and have Miranda fail over to the paid key
+        # automatically once the free one is exhausted, instead of
+        # re-discovering the same 429 from scratch on every call.
+        quota_ban_minutes: 30
+        # Same idea for a key that looks overloaded (an explicit overload
+        # error, or a first response slower than overload_timeout_seconds
+        # below) — the mechanism behind switching off an overloaded
+        # free-tier key instead of hanging on it every time.
+        overload_ban_minutes: 30
+        # How long a streaming attempt waits for its very first response
+        # chunk before the key is treated as overloaded (ban + try the next
+        # key) rather than waited out.
+        overload_timeout_seconds: 10
+        # Hard ceiling on one call's *total* wall-clock time, from start to
+        # the stream finishing — unlike overload_timeout_seconds above
+        # (which only judges the first chunk), this actively aborts a call
+        # still stalled mid-stream and rotates to the next key immediately,
+        # even if it had already forwarded some content (accepted risk: the
+        # next key's full answer can duplicate an already-forwarded
+        # fragment). Protects against a key that answers promptly but then
+        # stalls for a long time. Default: 30.
+        max_call_seconds: 30
+
     - name: claude
       type: anthropic
       model: "claude-sonnet-5"
@@ -137,30 +197,17 @@ llm:
   # list order above as-is".
   default_provider: local-qwen
   # A native Gemini provider (type: gemini) is also available — see
-  # config/llm.yaml for a worked example, including its own multi-key
-  # rotation (api_key_envs takes several env var names; unlike anthropic/
-  # openai_compat, which only ever use the first, Gemini actually rotates
-  # across all of them on a quota error, an overloaded backend, or a
-  # first-response timeout, OR a call that completed but took longer than
-  # overload_timeout_seconds end-to-end). A key that hits quota or looks
-  # overloaded is also BANNED for a while (gemini_rotation.quota_ban_minutes/
-  # overload_ban_minutes/overload_timeout_seconds, all default 30/30/10) —
-  # skipped by every subsequent request, not just retried within one — so
-  # listing a paid key after a free-tier one lets Miranda fail over
-  # automatically once the free key is exhausted or overloaded, instead of
-  # re-discovering the same failure from scratch every turn.
-  # gemini_rotation.max_call_seconds (default 30) is a harder version of the
-  # same idea: it aborts a call still stalled mid-stream and rotates to the
-  # next key immediately, even if that key had already forwarded some
-  # content, rather than leaving a user waiting on a stalled free-tier key
-  # for as long as the backend takes to eventually answer or error. See
-  # config/llm.yaml's gemini_rotation blocks. Its own native
-  # gemini_tools.google_search (Grounding with Google Search) is NOT
-  # recommended: it has a zero quota on the free-tier Gemini Developer API,
-  # not merely a low one, so every request that touches it fails with
-  # RESOURCE_EXHAUSTED — use tavily: below instead. Gemini's code-execution
-  # tool is Vertex AI-only and not offered here, unlike Claude's
-  # anthropic_tools.code_execution above.
+  # config/llm.yaml for a worked multi-tier example. One thing rotation
+  # above doesn't cover: api_key_envs listing *several* keys only actually
+  # rotates across all of them for type: gemini — anthropic/openai_compat
+  # accept a multi-entry list too (for config-shape consistency) but only
+  # ever use the first entry, since those SDKs take a single credential per
+  # client. Gemini's own native gemini_tools.google_search (Grounding with
+  # Google Search) is NOT recommended: it has a zero quota on the free-tier
+  # Gemini Developer API, not merely a low one, so every request that
+  # touches it fails with RESOURCE_EXHAUSTED — use tavily: below instead.
+  # Gemini's code-execution tool is Vertex AI-only and not offered here,
+  # unlike Claude's anthropic_tools.code_execution above.
 
 # Miranda's own tavily_web_search/tavily_web_fetch tools (internal/tools,
 # backed by Tavily — https://tavily.com), offered identically to every LLM
@@ -210,6 +257,35 @@ schedule:
   # model decides which of its own tools (speak_reply, send_telegram, etc.)
   # to call. No deployment-specific secret needed, so this defaults to true.
   enabled: true
+
+# Native notification channel (internal/notify, docs/adr/native-notifications.md)
+# — a persisted per-user feed (the web UI's bell icon) that's now the
+# *default* proactive channel: create_reminder/deliverReminder land here
+# instead of auto-CCing Telegram, and the model's send_notification tool
+# uses this too (send_telegram now only fires when the user explicitly
+# names Telegram). No deployment secret needed for the feed itself, so —
+# like schedule above — this defaults to true.
+notify:
+  enabled: true
+  # Lets the model call send_notification to proactively notify a household
+  # member at an arbitrary moment (e.g. "отправь Ане нотификацию, что ужин
+  # готов"). Only meaningful when enabled above is also true.
+  send_notification_tool: true
+  # Optional Web Push (RFC 8291) delivery leg on top of the feed, so a
+  # notification also reaches a subscribed browser as a real OS
+  # notification — even with the tab/PWA closed. Off by default, same
+  # reasoning as webauthn/telegram above: the VAPID keypair is
+  # deployment-specific and there's no safe default to silently generate
+  # (an auto-generated, unpersisted key would orphan every existing
+  # subscription on the next restart). Needs HTTPS (or localhost), same as
+  # webauthn — front Miranda with a reverse proxy, or use server.tls above.
+  # Generate a keypair once with `go run ./cmd/miranda vapid-keys`; the
+  # private half goes in the WEBPUSH_VAPID_PRIVATE_KEY environment
+  # variable (see .env / README), never here.
+  web_push:
+    enabled: false
+    vapid_public_key: "" # e.g. "BFE0vsy-pCibkKsfnI4jaElIZcE3pXrHcG9..."
+    subject: "mailto:you@example.com" # or an https: URL
 
 # Periodic database + config backups (internal/backup) — off by default,
 # same reasoning as webauthn/telegram/oauth: dir is deployment-specific
@@ -429,22 +505,6 @@ tts:
     # — e.g. Miranda's LAN address, or a reverse-proxied hostname.
     public_base_url: "http://192.168.1.50:8787"
     chunk_max_chars: 200
-    request_timeout_seconds: 30
-    quota_cooldown_seconds: 5
-    max_quota_retry_cycles: 3
-    # How long a key that hit quota, or looked overloaded, is skipped by
-    # every SUBSEQUENT Speak call — not just retried within the current
-    # one. This is what lets you list a free-tier key before a paid one
-    # (api_key_envs above) and have Miranda fail over to the paid key
-    # automatically once the free one is exhausted or overloaded, instead
-    # of re-discovering the same failure from scratch on every call.
-    quota_ban_minutes: 30
-    overload_ban_minutes: 30
-    # How long one generateContent call is allowed to take before it's
-    # treated as "this key looks overloaded" (ban + try the next key)
-    # rather than waited out — shorter than request_timeout_seconds above,
-    # which remains the hard per-call cutoff.
-    overload_response_timeout_seconds: 10
   # Lets the model call speak_reply to dispatch this turn's reply to
   # tts.primary even when the request didn't arrive via ha_assist, when the
   # user explicitly asks to hear the answer read aloud.

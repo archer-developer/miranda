@@ -755,15 +755,15 @@ func buildProviders(ctx context.Context, configs []config.LLMProvider, logger *s
 	for _, c := range configs {
 		switch c.Type {
 		case "anthropic":
-			p, err := anthropic.New(c.Name, c.Model, c.APIKeyEnvs, anthropic.ToolsConfig(c.AnthropicTools), anthropic.RotationConfig(c.GeminiRotation), logger)
+			p, err := anthropic.New(c.Name, c.Model, c.APIKeyEnvs, anthropic.ToolsConfig(c.AnthropicTools), anthropic.RotationConfig(c.Rotation), logger)
 			if err != nil {
 				return nil, fmt.Errorf("main: build anthropic provider %q: %w", c.Name, err)
 			}
 			providers = append(providers, p)
 		case "openai_compat":
-			providers = append(providers, openaicompat.New(c.Name, c.BaseURL, c.Model, c.APIKeyEnvs, openaicompat.RotationConfig(c.GeminiRotation), logger))
+			providers = append(providers, openaicompat.New(c.Name, c.BaseURL, c.Model, c.APIKeyEnvs, openaicompat.RotationConfig(c.Rotation), logger))
 		case "gemini":
-			p, err := gemini.New(ctx, c.Name, c.Model, c.APIKeyEnvs, gemini.ToolsConfig(c.GeminiTools), gemini.RotationConfig(c.GeminiRotation), logger)
+			p, err := gemini.New(ctx, c.Name, c.Model, c.APIKeyEnvs, gemini.ToolsConfig(c.GeminiTools), gemini.RotationConfig(c.Rotation), logger)
 			if err != nil {
 				return nil, fmt.Errorf("main: build gemini provider %q: %w", c.Name, err)
 			}

@@ -35,6 +35,7 @@ Desktop / Web UI ----> |     agent loop     | <---- Code sandbox
 | 🏠 **Home Assistant** | Talks over HA's Voice Assist pipeline, and controls HA entities as a tool                                              |
 | 🔊 **Yandex Station** | Speaks replies out loud — built-in voice or a Gemini-rendered one                                                      |
 | 💬 **Telegram**       | Household members can chat with it from their phone                                                                    |
+| 🔔 **Notifications**  | Native in-app feed + optional browser push — the default channel for reminders and proactive pings                    |
 | 🌐 **Web dashboard**  | Live logs, dialog history, passwordless login                                                                          |
 | 🔍 **Web search**     | Looks things up online when it doesn't know                                                                            |
 | ⏰ **Scheduler**      | One-off reminders and recurring routines, in plain language                                                            |
@@ -66,6 +67,7 @@ Desktop / Web UI ----> |     agent loop     | <---- Code sandbox
   - [Testing the full loop](#testing-the-full-loop)
   - [Troubleshooting](#troubleshooting)
 - [Telegram bot](#telegram-bot)
+- [Notifications](#notifications)
 - [Scheduled tasks](#scheduled-tasks)
 - [Database backups](#database-backups)
 - [License](#license)
@@ -150,9 +152,9 @@ key is currently banned — the router falls through to the next provider in
 this list.
 
 Each provider entry also configures its own key rotation, via a
-`gemini_rotation:` block (the name is a historical holdover — it tunes
-`anthropic`/`openai_compat` entries identically, not just `gemini` ones).
-Rotating across `api_key_envs` is what lets you list several keys —
+`rotation:` block — tunes `anthropic`/`openai_compat`/`gemini` entries
+identically, regardless of this provider's own `type`. Rotating across
+`api_key_envs` is what lets you list several keys —
 notably a free-tier key before a paid one — and have Miranda fail over
 between them automatically instead of failing the turn:
 
@@ -217,7 +219,7 @@ successfully: if the whole call took longer than that same budget
 end-to-end, the key is banned anyway — the reply the user already got is
 untouched, this only affects which key handles the *next* call.
 
-`max_call_seconds` (default: 30, config field `gemini_rotation.max_call_seconds`)
+`max_call_seconds` (default: 30, config field `rotation.max_call_seconds`)
 is a harder version of the same idea, for the case a post-hoc ban can't fix
 by itself: a key that's still stalled *while streaming* would otherwise
 leave a user waiting as long as the backend takes to eventually answer or
@@ -676,32 +678,96 @@ flowchart LR
 6. **Say something to the bot** — the first message is what teaches
    Miranda that person's chat id, which also unlocks proactive sends.
 
-With `send_message_tool: true`, the model can push a message on its own —
-*"отправь мне на телефон список покупок"*, or to a named household member
-by their full name or username.
+With `send_message_tool: true`, the model can push a message to Telegram
+on its own — but only when asked for Telegram by name (*"отправь мне в
+Телеграм список покупок"*), to a named household member or the current
+user. A generic "send to my phone" ask routes to
+[`send_notification`](#notifications) instead — see that section for why.
+
+---
+
+## Notifications
+
+The default proactive channel — a persisted per-user feed (the bell icon
+in the web UI header) with an optional Web Push leg on top, so a
+notification can reach a household member's phone as a real OS
+notification even with no Miranda tab open. Reminders
+(`create_reminder`/[Scheduled tasks](#scheduled-tasks) below) land here by
+default now; Telegram is no longer auto-CC'd on every firing — it only
+fires when a reminder's origin literally was Telegram, or someone
+explicitly asks for Telegram by name. See
+[`docs/adr/native-notifications.md`](docs/adr/native-notifications.md)
+for the full design.
+
+```mermaid
+flowchart LR
+    R["Reminder fires /<br/>send_notification tool"] --> N(["internal/notify"])
+    N --> F["Feed (bell icon)"]
+    N -.->|if web_push enabled| P["Browser push<br/>(even tab closed)"]
+```
+
+The feed itself needs no setup — it's on by default (`notify.enabled:
+true`). Browser push is opt-in and needs a VAPID keypair plus HTTPS (the
+Push API refuses to work over plain HTTP, other than `localhost`):
+
+1. **Generate a keypair**:
+   ```bash
+   go run ./cmd/miranda vapid-keys
+   ```
+2. **Set the private key**:
+   ```bash
+   export WEBPUSH_VAPID_PRIVATE_KEY="<the private key printed above>"
+   ```
+3. **Configure**:
+   ```yaml
+   notify:
+     web_push:
+       enabled: true
+       vapid_public_key: "<the public key printed above>"
+       subject: "mailto:you@example.com" # or an https: URL
+   ```
+4. **Restart**, then open the web UI over HTTPS, go to Profile, and click
+   "Enable push notifications" — the browser will ask for notification
+   permission once.
+
+On iOS, Safari only supports Web Push once the PWA has actually been added
+to the home screen (iOS 16.4+) — a plain open Safari tab can't subscribe,
+regardless of this config. That's a platform limitation, not something
+`web_push.enabled` can work around.
+
+With `send_notification_tool: true` (on by default alongside `notify.enabled`),
+the model can push a notification on its own — *"отправь Ане нотификацию,
+что ужин готов"*. `send_telegram` still exists for when someone explicitly
+asks for Telegram by name.
 
 ---
 
 ## Scheduled tasks
 
-On by default (`schedule.enabled: true`). Three tools —
-`create_scheduled_task`, `list_scheduled_tasks`, `delete_scheduled_task` —
-let the model set its own reminders and routines in plain language; a
-background sweep replays the stored prompt through the ordinary agent loop
-when it's due, exactly as if the user had just said it.
+On by default (`schedule.enabled: true`). Four tools —
+`create_reminder`, `create_scheduled_task`, `list_scheduled_tasks`,
+`delete_scheduled_task` — let the model set its own reminders and
+routines in plain language. `schedule`/`run_at` are mutually exclusive —
+exactly one per task — and cron is the standard 5-field format, evaluated
+in the server's local time zone.
 
-- **One-off**: *"сегодня в 22:00 напомни мне выпить тёмного пива — отправь
-  на телефон"* → a `run_at` timestamp, and a prompt that calls
-  `send_telegram` when it fires.
-- **Recurring**: *"каждое утро в 9:01 голосом пожелай доброго утра, получи
-  курс моих монет и зачитай голосом"* → a cron `schedule`
-  (`1 9 * * *`), decomposed by the model at fire time into `speak_reply` +
-  a web-search tool call.
-
-`schedule`/`run_at` are mutually exclusive — exactly one per task. Cron is
-the standard 5-field format, evaluated in the server's local time zone. A
-fired task is silent by default — it has to explicitly call `speak_reply`/
-`send_telegram`/etc. if it wants output somewhere.
+- **`create_reminder`** — a passive notification: *"сегодня в 22:00
+  напомни мне выпить тёмного пива"* → delivered directly at fire time via
+  [Notifications](#notifications) (plus voice if it was created over
+  `ha_assist`, or Telegram if it was created from a Telegram
+  conversation) — **never** replayed through the model, so it can't
+  reinterpret its own reminder text as a fresh request and reschedule
+  itself. See
+  [`docs/adr/reminders-vs-scheduled-tasks.md`](docs/adr/reminders-vs-scheduled-tasks.md)
+  for why this is a separate tool from the one below.
+- **`create_scheduled_task`** — a genuinely agentic prompt, replayed
+  through the full agent loop when due, exactly as if the user had just
+  said it: *"каждое утро в 9:01 голосом пожелай доброго утра, получи курс
+  моих монет и зачитай голосом"* → a cron `schedule` (`1 9 * * *`),
+  decomposed by the model at fire time into `speak_reply` + a web-search
+  tool call. A fired task is silent by default — it has to explicitly
+  call `speak_reply`/`send_notification`/`send_telegram`/etc. if it wants
+  output somewhere.
 
 ---
 
