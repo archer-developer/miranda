@@ -105,3 +105,25 @@ silently break the frontend (found once already: an untagged struct sent
 `Body`/`CreatedAt` instead of `body`/`created_at`, and
 `renderInlineText`/`formatDate` failed on `undefined` with no server-side
 error at all).
+
+**iOS/Safari-only 403 "BadJwtToken"**: `service.go`'s
+`normalizeVAPIDSubject` strips a leading `mailto:` off
+`WebPushConfig.Subject` before handing it to webpush-go as
+`Options.Subscriber` — that library's own `getVAPIDAuthorizationHeader`
+(vapid.go) re-prepends `mailto:` to anything not already starting with
+`https:`, so passing our config's RFC 8292-idiomatic `"mailto:foo@bar"`
+subject straight through used to double it into the JWT's `sub` claim as
+`"mailto:mailto:foo@bar"`. Google's FCM (every Android/desktop-Chrome
+subscription) silently tolerates that malformed value; Apple's push
+service (`web.push.apple.com` — i.e. every iOS/Safari subscription,
+including Chrome-on-iOS since it's a WebKit wrapper there) validates it
+strictly and rejects the whole send with `403`/`"BadJwtToken"` — logged as
+`notify: push send rejected ... status=403`, easy to miss since Notify's
+per-subscription send loop never fails the caller for it (see
+pushToSubscriptions' own best-effort doc comment). This is
+`SherClockHolmes/webpush-go#81`, open and unfixed upstream as of this
+writing — `TestNotify_VAPIDSubjectNotDoubled` (service_test.go) is the
+regression test, decoding the real JWT webpush-go produces rather than
+just unit-testing `normalizeVAPIDSubject` in isolation, specifically so a
+future webpush-go upgrade that changes this behavior gets caught here
+instead of silently reintroducing the bug.

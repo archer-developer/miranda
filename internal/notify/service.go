@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"strings"
 
 	webpush "github.com/SherClockHolmes/webpush-go"
 )
@@ -95,7 +96,7 @@ func (s *Service) pushToSubscriptions(ctx context.Context, userID, title, body s
 
 	opts := &webpush.Options{
 		HTTPClient:      s.webpush.HTTPClient,
-		Subscriber:      s.webpush.Subject,
+		Subscriber:      normalizeVAPIDSubject(s.webpush.Subject),
 		VAPIDPublicKey:  s.webpush.VAPIDPublicKey,
 		VAPIDPrivateKey: s.webpush.VAPIDPrivateKey,
 		TTL:             60,
@@ -122,6 +123,28 @@ func (s *Service) pushToSubscriptions(ctx context.Context, userID, title, body s
 			s.logger.Warn("notify: push send rejected", "user_id", userID, "endpoint", sub.Endpoint, "status", resp.StatusCode)
 		}
 	}
+}
+
+// normalizeVAPIDSubject strips a leading "mailto:" (case-insensitive)
+// before handing the subject to webpush-go's Options.Subscriber.
+//
+// webpush-go's own getVAPIDAuthorizationHeader (vapid.go) re-prepends
+// "mailto:" to anything that doesn't already start with "https:" —
+// passing it our config's RFC 8292-idiomatic "mailto:foo@bar.com" subject
+// unmodified doubles up into a JWT "sub" claim of
+// "mailto:mailto:foo@bar.com". Google's FCM (Android/Chrome push)
+// tolerates that malformed value; Apple's push service
+// (web.push.apple.com, i.e. every iOS/Safari subscription) validates it
+// strictly and rejects the whole request with 403 "BadJwtToken" — see
+// SherClockHolmes/webpush-go#81 (open, unfixed as of this writing). An
+// https: subject is left untouched either way, matching the library's own
+// check.
+func normalizeVAPIDSubject(subject string) string {
+	const prefix = "mailto:"
+	if len(subject) >= len(prefix) && strings.EqualFold(subject[:len(prefix)], prefix) {
+		return subject[len(prefix):]
+	}
+	return subject
 }
 
 // ListForUser, UnreadCount, MarkAllRead delegate straight to the store —
