@@ -328,38 +328,52 @@ type ScheduleConfig struct {
 
 // BackupConfig controls periodic snapshotting of every SQLite store under
 // StorageConfig (internal/backup) — a VACUUM INTO copy of each existing
-// *.db file into a timestamped subdirectory of Dir, on a fixed interval,
-// with the oldest snapshots pruned once more than RetentionCount
-// accumulate. Deliberately scoped to the SQLite stores only: MemoryDir's
-// markdown and AvatarsDir/TTSCacheDir are not covered, since VACUUM INTO
-// only applies to a SQLite database file.
+// *.db file, staged on local disk, verified, and packed into a single
+// timestamped tar.gz archive that's copied into Dir atomically, with the
+// oldest archives pruned once more than RetentionCount accumulate.
+// Deliberately scoped to the SQLite stores only: MemoryDir's markdown and
+// AvatarsDir/TTSCacheDir are not covered, since VACUUM INTO only applies
+// to a SQLite database file.
 //
 // Opt-in (Enabled defaults false), same posture as WebAuthn/Telegram/OAuth:
 // Dir is deployment-specific (often an absolute path to a mounted external
 // disk, so backups actually survive losing the machine Miranda runs on),
 // so there's no safe default to silently start writing to.
+//
+// Dir is routinely a network mount (CIFS/SMB to a NAS, as in production).
+// SQLite's VACUUM INTO cannot take the lock it needs on a destination file
+// that lives on such a filesystem — see internal/backup's package doc for
+// the "database is locked (5) (SQLITE_BUSY)" failure this staging design
+// exists to avoid. Nothing SQLite-shaped is ever written directly into
+// Dir; only a finished, already-verified archive file ever lands there.
 type BackupConfig struct {
 	Enabled bool `yaml:"enabled"`
-	// Dir is where timestamped backup subdirectories are written. May be a
-	// relative path (under the working directory, like StorageConfig's
-	// paths) or an absolute path onto a separately mounted disk. Created
-	// automatically if missing — but if it's meant to be a mount point that
-	// isn't currently mounted, letting MkdirAll silently create an empty
-	// directory there instead would mean backups look like they're
-	// succeeding while actually landing on the machine's local disk, so
-	// backupSweep logs (rather than silently swallows) every MkdirAll/backup
-	// error to make that failure mode visible.
+	// Dir is where finished backup archives are written. May be a relative
+	// path (under the working directory, like StorageConfig's paths) or an
+	// absolute path onto a separately mounted disk, including a network
+	// mount. Created automatically if missing — but if it's meant to be a
+	// mount point that isn't currently mounted, letting MkdirAll silently
+	// create an empty directory there instead would mean backups look like
+	// they're succeeding while actually landing on the machine's local
+	// disk, so backupSweep logs (rather than silently swallows) every
+	// MkdirAll/backup error to make that failure mode visible.
 	Dir string `yaml:"dir"`
+	// TempDir is where each run's staging work happens — VACUUM INTO,
+	// PRAGMA integrity_check, and building the tar.gz archive all happen
+	// here, on local disk, before the single finished archive is ever
+	// copied toward Dir. Empty (the default) means os.TempDir(). This must
+	// resolve to ordinary local disk, not a network mount — see
+	// BackupConfig's own doc comment for why.
+	TempDir string `yaml:"temp_dir"`
 	// IntervalMinutes is how often a full backup runs. This is the actual
 	// backup cadence itself, not a polling interval like
 	// MemoryConfig.SessionIdleTimeoutMinutes — every tick performs a real
 	// backup, since (unlike an idle sweep) there's no per-item "is this one
 	// due yet" check to decouple from.
 	IntervalMinutes int `yaml:"interval_minutes"`
-	// RetentionCount is how many of the most recent timestamped backup
-	// subdirectories to keep; older ones are deleted after each successful
-	// run. 0 means keep all of them (same convention as
-	// LoggingConfig.MaxBackups).
+	// RetentionCount is how many of the most recent backup archives to
+	// keep; older ones are deleted after each successful run. 0 means keep
+	// all of them (same convention as LoggingConfig.MaxBackups).
 	RetentionCount int `yaml:"retention_count"`
 }
 
@@ -1287,6 +1301,7 @@ func Default() Config {
 		Backup: BackupConfig{
 			Enabled:         false,
 			Dir:             "./data/backups",
+			TempDir:         "",
 			IntervalMinutes: 24 * 60,
 			RetentionCount:  7,
 		},

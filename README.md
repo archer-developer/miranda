@@ -775,12 +775,14 @@ in the server's local time zone.
 
 Off by default (`backup.enabled: false` — see `config/config.yaml.dist`).
 When enabled, a background ticker (`internal/backup`) runs every
-`backup.interval_minutes` and writes a new `backup.dir/<UTC timestamp>/`
-directory containing:
+`backup.interval_minutes` and produces one new
+`backup.dir/miranda-<UTC timestamp>.tar.gz` archive containing:
 
 - Every `storage.*_sqlite_path` file that currently exists, via one
   `VACUUM INTO` per store rather than a raw file copy — a plain `cp` of a
-  live SQLite file can catch a torn page mid-write, `VACUUM INTO` can't.
+  live SQLite file can catch a torn page mid-write, `VACUUM INTO` can't —
+  each snapshot is also run through `PRAGMA integrity_check` before it's
+  trusted.
 - This deployment's `config/*.yaml` files (a restored backup can't even
   start without them), copied into a `config/` subdirectory.
 - The `.env` file Miranda was started with, if one exists — included
@@ -788,18 +790,51 @@ directory containing:
   `keyring.db` are encrypted under keys that live only there, so a backup
   without it can never be decrypted. File permissions (e.g. a `.env`
   restricted to the owner) are preserved on copy.
+- A `manifest.json` listing what's inside (generation time, each database's
+  size and SHA-256).
 
-Old run directories beyond `backup.retention_count` are deleted after each
-successful run. Any of the above that doesn't exist yet (an unused optional
-store, a missing `.env`) is silently skipped rather than failing the run.
+Everything above is staged and verified on local disk first
+(`backup.temp_dir`, defaulting to the OS temp directory) and only ever
+reaches `backup.dir` as one finished archive, copied in via a `.tar.gz.part`
++ atomic rename. This matters because `backup.dir` is routinely a network
+mount (CIFS/SMB to a NAS) in production, and SQLite's `VACUUM INTO` cannot
+take the lock it needs on a *destination* file that lives on such a
+filesystem — it fails outright with `database is locked (5) (SQLITE_BUSY)`,
+even though the identical `VACUUM INTO` against a local path succeeds. A
+plain file copy has no such locking requirement, so routing everything
+SQLite-shaped through local disk first, and only ever copying a finished
+file toward the network mount, works regardless of what `backup.dir` is
+backed by.
+
+Old archives beyond `backup.retention_count` are deleted after each
+successful run, along with any leftover `.tar.gz.part` file older than 24h
+(a sign of a run that crashed mid-upload). Any input that doesn't exist yet
+(an unused optional store, a missing `.env`) is silently skipped rather than
+failing the run.
 
 `backup.dir` can be a relative path for local/dev use, but is meant to be
 pointed at a separately mounted disk in production (an absolute path like
 `/mnt/backup/miranda`) — a backup that lives on the same disk as the data
-it backs up doesn't protect against losing that disk. Markdown memory
-(`storage.memory_dir`) isn't covered — only the SQLite stores and config,
-since `VACUUM INTO` is a SQLite-specific mechanism and memory wasn't in
-scope for this pass.
+it backs up doesn't protect against losing that disk. `backup.temp_dir`, by
+contrast, must be ordinary local disk — that's the whole point. Markdown
+memory (`storage.memory_dir`) isn't covered — only the SQLite stores and
+config, since `VACUUM INTO` is a SQLite-specific mechanism and memory wasn't
+in scope for this pass.
+
+### Restoring from a backup
+
+```bash
+tar xzf miranda-20261009-120000.tar.gz -C /tmp/restore
+cat /tmp/restore/manifest.json          # sanity-check what's inside
+sqlite3 /tmp/restore/miranda.db 'PRAGMA integrity_check'  # should print "ok"
+
+systemctl --user stop miranda           # on the server: stop the running process first
+cp /tmp/restore/miranda.db ~/miranda/data/miranda.db
+cp /tmp/restore/webauthn.db ~/miranda/data/webauthn.db   # repeat per store that exists in the archive
+cp /tmp/restore/.env ~/miranda/.env
+cp -r /tmp/restore/config/. ~/miranda/config/
+systemctl --user start miranda
+```
 
 ### Manual backups
 
