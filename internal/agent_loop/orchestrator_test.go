@@ -3,11 +3,11 @@ package agentloop
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
-	"sync"
 	"testing"
 	"time"
 
@@ -26,89 +26,70 @@ import (
 	"github.com/archer-developer/miranda/internal/replyformat"
 	"github.com/archer-developer/miranda/internal/telegram"
 	"github.com/archer-developer/miranda/internal/tools"
-	"github.com/archer-developer/miranda/internal/tts"
 	"github.com/archer-developer/miranda/internal/users"
 )
 
-// fakeHAClient is an in-memory tts.HAClient: play_media calls are recorded,
-// and AliceState always reports "IDLE" so the dispatcher's wait-for-idle
-// poll never blocks the test. TTS dispatch is asynchronous (see
-// tts.Dispatcher/Player), so tests must poll Calls() rather than read the
-// calls slice immediately after Orchestrator.Handle returns.
-type fakeHAClient struct {
-	mu        sync.Mutex
-	calls     []string // recorded media_content_id values (play_media)
-	stopCalls []string // recorded entity_id values (media_stop)
-}
+// fakeSpeakerResolver resolves the two speaker friendly names the tests use:
+// a media_player and an assist_satellite.
+type fakeSpeakerResolver struct{}
 
-func (f *fakeHAClient) CallService(ctx context.Context, domain, service string, data map[string]any) error {
-	if domain == "media_player" && service == "play_media" {
-		f.mu.Lock()
-		f.calls = append(f.calls, data["media_content_id"].(string))
-		f.mu.Unlock()
-	}
-	if domain == "media_player" && service == "media_stop" {
-		f.mu.Lock()
-		f.stopCalls = append(f.stopCalls, data["entity_id"].(string))
-		f.mu.Unlock()
-	}
-	return nil
-}
-
-func (f *fakeHAClient) AliceState(ctx context.Context, entityID string) (string, error) {
-	return "IDLE", nil
-}
-
-// ResolveMediaPlayer maps the configured test device name to the test entity_id.
-func (f *fakeHAClient) ResolveMediaPlayer(ctx context.Context, friendlyName string) (string, error) {
-	if friendlyName == "test-kitchen" {
+func (fakeSpeakerResolver) ResolveSpeaker(_ context.Context, friendlyName string) (string, error) {
+	switch friendlyName {
+	case "test-kitchen":
 		return "media_player.kitchen", nil
+	case "test-bedroom":
+		return "assist_satellite.bedroom", nil
 	}
-	return "", fmt.Errorf("no media_player with friendly name %q", friendlyName)
+	return "", fmt.Errorf("no speaker with friendly name %q", friendlyName)
 }
 
-// Calls returns a snapshot of every play_media call's media_content_id so
-// far, safe to call concurrently with the Player's worker goroutine still
-// appending to it.
-func (f *fakeHAClient) Calls() []string {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	out := make([]string, len(f.calls))
-	copy(out, f.calls)
+// newFakeTTSServer is a stand-in for the miranda-tts MCP server, exposing
+// its two real tools (speak, stop) with scripted successful results.
+func newFakeTTSServer() *mcptest.FakeClient {
+	return mcptest.New("miranda-tts", llm.ToolDef{Name: "speak"}, llm.ToolDef{Name: "stop"}).
+		WithResult("speak", "played").
+		WithResult("stop", "stopped")
+}
+
+// ttsCallsTo returns the arguments of every call the fake miranda-tts server
+// received for tool.
+func ttsCallsTo(tts *mcptest.FakeClient, tool string) []map[string]string {
+	var out []map[string]string
+	for _, c := range tts.CallsSnapshot() {
+		if c.Tool != tool {
+			continue
+		}
+		args := map[string]string{}
+		_ = json.Unmarshal([]byte(c.ArgumentsJSON), &args)
+		out = append(out, args)
+	}
 	return out
 }
 
-// StopCalls returns a snapshot of every media_stop call's entity_id so far.
-func (f *fakeHAClient) StopCalls() []string {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	out := make([]string, len(f.stopCalls))
-	copy(out, f.stopCalls)
-	return out
-}
-
-// requireEventuallySpoken waits for at least one TTS dispatch to have
-// reached ha, since Dispatcher.Speak only enqueues (see tts.Player) instead
-// of blocking Orchestrator.Handle until playback actually happens.
-func requireEventuallySpoken(t *testing.T, ha *fakeHAClient) {
+// requireEventuallySpoken waits for at least one speak call to have reached
+// the fake miranda-tts server: speak_reply dispatches asynchronously (the
+// real call blocks until playback ends), so Handle returns before it lands.
+func requireEventuallySpoken(t *testing.T, tts *mcptest.FakeClient) {
 	t.Helper()
-	require.Eventually(t, func() bool { return len(ha.Calls()) > 0 }, 2*time.Second, 5*time.Millisecond,
-		"expected at least one TTS dispatch to reach the (simulated) Yandex Station")
+	require.Eventually(t, func() bool { return len(ttsCallsTo(tts, "speak")) > 0 }, 2*time.Second, 5*time.Millisecond,
+		"expected at least one speak call to reach miranda-tts")
 }
 
-// requireNeverSpoken gives any wrongly-triggered async TTS dispatch a brief
+// requireNeverSpoken gives any wrongly-triggered async speak call a brief
 // window to show up, then asserts nothing did — there's no positive signal
 // to wait on when asserting an absence.
-func requireNeverSpoken(t *testing.T, ha *fakeHAClient) {
+func requireNeverSpoken(t *testing.T, tts *mcptest.FakeClient) {
 	t.Helper()
 	time.Sleep(50 * time.Millisecond)
-	require.Empty(t, ha.Calls())
+	require.Empty(t, ttsCallsTo(tts, "speak"))
 }
 
-// newTestOrchestratorWithTTS is like newTestOrchestrator but wires up a real
-// tts.Dispatcher backed by a fakeHAClient, so tests can assert on whether a
-// turn actually spoke to the (simulated) Yandex Station or not.
-func newTestOrchestratorWithTTS(t *testing.T, provider *llmtest.FakeProvider) (*Orchestrator, *fakeHAClient) {
+// newTestOrchestratorWithTTS is like newTestOrchestrator but connects a fake
+// miranda-tts MCP server, resolves speaker names via fakeSpeakerResolver and
+// enables speak_reply/stop_speech with "test-kitchen" as the default device,
+// so tests can assert on whether (and where) a turn asked miranda-tts to
+// speak.
+func newTestOrchestratorWithTTS(t *testing.T, provider *llmtest.FakeProvider) (*Orchestrator, *mcptest.FakeClient) {
 	t.Helper()
 
 	r, err := router.New([]llm.Provider{provider}, selfEscalation(provider.Name()), "")
@@ -121,33 +102,22 @@ func newTestOrchestratorWithTTS(t *testing.T, provider *llmtest.FakeProvider) (*
 	mem, err := memory.New(t.TempDir())
 	require.NoError(t, err)
 
-	ha := &fakeHAClient{}
-	yandexCfg := config.YandexStationConfig{
-		ChunkMaxChars:      100,
-		IdlePollIntervalMS: 1,
-		// fakeHAClient.AliceState always reports "idle", so the "wait for it
-		// to leave idle" phase always times out; keep that timeout tiny too,
-		// or every TTS dispatch in these tests pays it.
-		PlaybackStartTimeoutMS: 1,
-	}
+	tts := newFakeTTSServer()
 	ttsCfg := config.TTSConfig{
 		DefaultDevice:  "test-kitchen",
-		Primary:        "yandex_station_text",
-		YandexStation:  yandexCfg,
 		SpeakReplyTool: true,
 		StopSpeechTool: true,
 	}
-	primary := tts.NewTextProvider(yandexCfg, ha, nil)
-	dispatcher := tts.NewDispatcher(primary, nil, ha, "test-kitchen", hub.New(100, nil), nil)
 
 	o := NewOrchestrator(
-		r, mcp.NewManager(nil), h, mem, dispatcher, hub.New(100, nil), nil,
+		r, mcp.NewManager(nil, tts), h, mem, hub.New(100, nil), nil,
 		config.AgentConfig{},
 		config.MemoryConfig{ExplicitTool: true},
 		ttsCfg,
-		100, "debug",
+		"debug",
 	)
-	return o, ha
+	o.SetSpeakerHA(fakeSpeakerResolver{})
+	return o, tts
 }
 
 // selfEscalation gives providerName an escalation config that targets
@@ -178,14 +148,14 @@ func newTestOrchestrator(t *testing.T, provider *llmtest.FakeProvider, mcpClient
 	toolManager := mcp.NewManager(nil, mcpClients...)
 
 	o := NewOrchestrator(
-		r, toolManager, h, mem, nil, hub.New(100, nil), nil,
+		r, toolManager, h, mem, hub.New(100, nil), nil,
 		config.AgentConfig{},
 		config.MemoryConfig{
 			ExplicitTool: true, AutoSummarize: true, SearchHistoryTool: true,
 			EndConversationTool: true, ForgetConversationTool: true,
 		},
 		config.TTSConfig{},
-		100, "debug",
+		"debug",
 	)
 	return o, h, mem
 }
@@ -477,11 +447,11 @@ func TestOrchestrator_EscalationIsTransparentToOrchestrator(t *testing.T) {
 	mem, err := memory.New(t.TempDir())
 	require.NoError(t, err)
 
-	o := NewOrchestrator(r, mcp.NewManager(nil), h, mem, nil, hub.New(100, nil), nil,
+	o := NewOrchestrator(r, mcp.NewManager(nil), h, mem, hub.New(100, nil), nil,
 		config.AgentConfig{},
 		config.MemoryConfig{ExplicitTool: true},
 		config.TTSConfig{},
-		100, "debug")
+		"debug")
 
 	resp, err := o.Handle(context.Background(), InputRequest{Source: "cli", UserID: "alex", Text: "сложный вопрос"})
 	require.NoError(t, err)
@@ -519,11 +489,11 @@ func TestOrchestrator_EscalatedProviderStaysActiveAcrossToolCall(t *testing.T) {
 	mem, err := memory.New(t.TempDir())
 	require.NoError(t, err)
 
-	o := NewOrchestrator(r, mcp.NewManager(nil, ha), h, mem, nil, hub.New(100, nil), nil,
+	o := NewOrchestrator(r, mcp.NewManager(nil, ha), h, mem, hub.New(100, nil), nil,
 		config.AgentConfig{},
 		config.MemoryConfig{ExplicitTool: true},
 		config.TTSConfig{},
-		100, "debug")
+		"debug")
 
 	resp, err := o.Handle(context.Background(), InputRequest{Source: "cli", UserID: "alex", Text: "свет в зале горит?"})
 	require.NoError(t, err)
@@ -694,14 +664,14 @@ func newTestOrchestratorWithStore(t *testing.T, provider *llmtest.FakeProvider, 
 	require.NoError(t, err)
 
 	o := NewOrchestrator(
-		r, mcp.NewManager(nil), h, mem, nil, hub.New(100, nil), nil,
+		r, mcp.NewManager(nil), h, mem, hub.New(100, nil), nil,
 		config.AgentConfig{},
 		config.MemoryConfig{
 			ExplicitTool: true, AutoSummarize: true, SearchHistoryTool: true,
 			EndConversationTool: true, ForgetConversationTool: true,
 		},
 		config.TTSConfig{},
-		100, "debug",
+		"debug",
 	)
 	return o
 }
@@ -845,33 +815,62 @@ func TestOrchestrator_RestoreConversationToolRejectsAnotherUsersConversation(t *
 	require.Contains(t, lastReqMessages[len(lastReqMessages)-1].Content, "no such past conversation")
 }
 
-func TestOrchestrator_SpeaksViaTTSForHAAssistSource(t *testing.T) {
+// TestOrchestrator_HAAssistReplyIsNotSpokenByMiranda guards the
+// double-voicing fix: an ha_assist reply is voiced exactly once, by Home
+// Assistant's Assist pipeline from the text this turn returns — Miranda
+// itself must never ask miranda-tts to speak it.
+func TestOrchestrator_HAAssistReplyIsNotSpokenByMiranda(t *testing.T) {
 	provider := llmtest.New("local", llmtest.Response{Text: "Включил свет в зале."})
-	o, ha := newTestOrchestratorWithTTS(t, provider)
+	o, tts := newTestOrchestratorWithTTS(t, provider)
 
 	resp, err := o.Handle(context.Background(), InputRequest{Source: users.SourceHAAssist, UserID: "alex", Text: "включи свет"})
 	require.NoError(t, err)
 	require.Equal(t, "Включил свет в зале.", resp.Reply)
 
-	// The reply must also have been spoken to the configured Yandex Station —
-	// ha_assist is the one channel with a physical speaker to answer through.
-	requireEventuallySpoken(t, ha)
+	requireNeverSpoken(t, tts)
 }
 
-func TestOrchestrator_SpeaksViaTTSWhenSpeakReplyToolIsCalledOnNonHASource(t *testing.T) {
+// TestOrchestrator_HAAssistTurnFailureReplyIsNotSpokenByMiranda covers the
+// other former speak site: the fallback text for a failed final call used to
+// be voiced explicitly for ha_assist; it now only travels back as the reply.
+func TestOrchestrator_HAAssistTurnFailureReplyIsNotSpokenByMiranda(t *testing.T) {
+	provider := llmtest.New("local", llmtest.Response{Err: errors.New("boom")})
+	o, tts := newTestOrchestratorWithTTS(t, provider)
+
+	resp, err := o.Handle(context.Background(), InputRequest{Source: users.SourceHAAssist, UserID: "alex", Text: "привет"})
+	require.NoError(t, err)
+	require.NotEmpty(t, resp.Reply)
+
+	requireNeverSpoken(t, tts)
+}
+
+func TestOrchestrator_SpeakReplyAsksMirandaTTSToSpeakOnDefaultDevice(t *testing.T) {
 	provider := llmtest.New("local",
 		llmtest.Response{ToolCall: &llm.ToolCall{ID: "call-1", Name: "speak_reply", Arguments: `{"text":"Хорошо, слушай."}`}},
 		llmtest.Response{Text: "Хорошо, слушай."},
 	)
-	o, ha := newTestOrchestratorWithTTS(t, provider)
+	o, tts := newTestOrchestratorWithTTS(t, provider)
 
 	resp, err := o.Handle(context.Background(), InputRequest{Source: "cli", UserID: "alex", Text: "озвучь мне это"})
 	require.NoError(t, err)
 	require.Equal(t, "Хорошо, слушай.", resp.Reply)
 
-	// The user's explicit request must still reach the Yandex Station even
-	// though this turn didn't arrive via ha_assist.
-	requireEventuallySpoken(t, ha)
+	requireEventuallySpoken(t, tts)
+	require.Equal(t, []map[string]string{{"text": "Хорошо, слушай.", "entity_id": "media_player.kitchen"}}, ttsCallsTo(tts, "speak"))
+}
+
+func TestOrchestrator_SpeakReplyDeviceArgumentCanTargetASatellite(t *testing.T) {
+	provider := llmtest.New("local",
+		llmtest.Response{ToolCall: &llm.ToolCall{ID: "call-1", Name: "speak_reply", Arguments: `{"text":"Пора спать.","device":"test-bedroom"}`}},
+		llmtest.Response{Text: "Сказала."},
+	)
+	o, tts := newTestOrchestratorWithTTS(t, provider)
+
+	_, err := o.Handle(context.Background(), InputRequest{Source: "telegram", UserID: "alex", Text: "скажи в спальне"})
+	require.NoError(t, err)
+
+	requireEventuallySpoken(t, tts)
+	require.Equal(t, []map[string]string{{"text": "Пора спать.", "entity_id": "assist_satellite.bedroom"}}, ttsCallsTo(tts, "speak"))
 }
 
 // TestOrchestrator_SpeaksExactlyTheTextPassedToSpeakReplyTool guards against
@@ -882,8 +881,8 @@ func TestOrchestrator_SpeaksViaTTSWhenSpeakReplyToolIsCalledOnNonHASource(t *tes
 // a later turn's unrelated post-tool-call wrap-up got auto-spoken too,
 // duplicating the reply. Now speak_reply takes the exact text to speak as
 // an explicit argument, so there's nothing to guess: only that argument
-// ever reaches the Yandex Station, exactly once, regardless of what any
-// turn's own reply text says or how many more turns follow.
+// ever reaches miranda-tts, exactly once, regardless of what any turn's own
+// reply text says or how many more turns follow.
 func TestOrchestrator_SpeaksExactlyTheTextPassedToSpeakReplyTool(t *testing.T) {
 	provider := llmtest.New("local",
 		llmtest.Response{
@@ -892,16 +891,18 @@ func TestOrchestrator_SpeaksExactlyTheTextPassedToSpeakReplyTool(t *testing.T) {
 		},
 		llmtest.Response{Text: "Готово, озвучила!"},
 	)
-	o, ha := newTestOrchestratorWithTTS(t, provider)
+	o, tts := newTestOrchestratorWithTTS(t, provider)
 
 	resp, err := o.Handle(context.Background(), InputRequest{Source: "web_ui", UserID: "alex", Text: "сгенерируй текст и озвучь его"})
 	require.NoError(t, err)
 	require.Equal(t, "Готово, озвучила!", resp.Reply)
 
-	requireEventuallySpoken(t, ha)
+	requireEventuallySpoken(t, tts)
 	// Exactly the tool argument's text, exactly once — not the first turn's
 	// written reply, and not the second turn's wrap-up.
-	require.Equal(t, []string{"Скажу словами: наступила осень."}, ha.Calls())
+	calls := ttsCallsTo(tts, "speak")
+	require.Len(t, calls, 1)
+	require.Equal(t, "Скажу словами: наступила осень.", calls[0]["text"])
 }
 
 // TestOrchestrator_SpeakReplyStripsMarkdownBeforeSpeaking guards the
@@ -914,59 +915,123 @@ func TestOrchestrator_SpeakReplyStripsMarkdownBeforeSpeaking(t *testing.T) {
 		llmtest.Response{ToolCall: &llm.ToolCall{ID: "call-1", Name: "speak_reply", Arguments: `{"text":"Погода сегодня **отличная**, бери *зонт* на всякий случай."}`}},
 		llmtest.Response{Text: "Готово."},
 	)
-	o, ha := newTestOrchestratorWithTTS(t, provider)
+	o, tts := newTestOrchestratorWithTTS(t, provider)
 
 	resp, err := o.Handle(context.Background(), InputRequest{Source: "web_ui", UserID: "alex", Text: "какая погода"})
 	require.NoError(t, err)
 	require.Equal(t, "Готово.", resp.Reply)
 
-	requireEventuallySpoken(t, ha)
-	require.Equal(t, []string{"Погода сегодня отличная, бери зонт на всякий случай."}, ha.Calls())
+	requireEventuallySpoken(t, tts)
+	calls := ttsCallsTo(tts, "speak")
+	require.Len(t, calls, 1)
+	require.Equal(t, "Погода сегодня отличная, бери зонт на всякий случай.", calls[0]["text"])
 }
 
-func TestOrchestrator_DoesNotSpeakViaTTSForNonHASources(t *testing.T) {
+func TestOrchestrator_SpeakReplyReportsUnresolvableDeviceToTheModelWithoutCallingMirandaTTS(t *testing.T) {
+	provider := llmtest.New("local",
+		llmtest.Response{ToolCall: &llm.ToolCall{ID: "call-1", Name: "speak_reply", Arguments: `{"text":"привет","device":"no-such-device"}`}},
+		llmtest.Response{Text: "Не получилось."},
+	)
+	o, tts := newTestOrchestratorWithTTS(t, provider)
+
+	_, err := o.Handle(context.Background(), InputRequest{Source: "cli", UserID: "alex", Text: "скажи"})
+	require.NoError(t, err)
+
+	last := provider.Requests[len(provider.Requests)-1].Messages
+	require.Contains(t, last[len(last)-1].Content, "error:")
+	require.Contains(t, last[len(last)-1].Content, "no-such-device")
+	requireNeverSpoken(t, tts)
+}
+
+func TestOrchestrator_DoesNotSpeakForNonHASourcesUnlessAsked(t *testing.T) {
 	for _, source := range []string{"web_ui", "cli", "telegram", "mobile_app"} {
 		t.Run(source, func(t *testing.T) {
 			provider := llmtest.New("local", llmtest.Response{Text: "Привет!"})
-			o, ha := newTestOrchestratorWithTTS(t, provider)
+			o, tts := newTestOrchestratorWithTTS(t, provider)
 
 			resp, err := o.Handle(context.Background(), InputRequest{Source: source, UserID: "alex", Text: "привет"})
 			require.NoError(t, err)
 			require.Equal(t, "Привет!", resp.Reply)
 
 			// Every other channel already has its own output surface (the HTTP
-			// response) — it must never also make the shared Yandex Station talk.
-			requireNeverSpoken(t, ha)
+			// response) — it must never also make a shared speaker talk.
+			requireNeverSpoken(t, tts)
 		})
 	}
 }
 
-// TestOrchestrator_StopSpeechToolClearsQueue exercises the stop_speech tool
-// end to end: the model calling it must reach Dispatcher.Stop, which clears
-// Miranda's TTS queue and cancels any in-flight synthesis. The physical
-// station finishes its current short chunk on its own — no media_stop call.
-func TestOrchestrator_StopSpeechToolClearsQueue(t *testing.T) {
+// TestOrchestrator_StopSpeechAsksMirandaTTSToStopTheDefaultDevice: the model
+// calling stop_speech must reach miranda-tts's stop tool, targeting the
+// default device's resolved entity_id.
+func TestOrchestrator_StopSpeechAsksMirandaTTSToStopTheDefaultDevice(t *testing.T) {
 	provider := llmtest.New("local",
 		llmtest.Response{ToolCall: &llm.ToolCall{ID: "call-1", Name: "stop_speech", Arguments: `{}`}},
 		llmtest.Response{Text: "Молчу."},
 	)
-	o, _ := newTestOrchestratorWithTTS(t, provider)
+	o, tts := newTestOrchestratorWithTTS(t, provider)
 
 	resp, err := o.Handle(context.Background(), InputRequest{Source: "cli", UserID: "alex", Text: "хватит болтать"})
 	require.NoError(t, err)
 	require.Equal(t, "Молчу.", resp.Reply)
+
+	require.Equal(t, []map[string]string{{"entity_id": "media_player.kitchen"}}, ttsCallsTo(tts, "stop"))
 }
 
-// TestOrchestrator_HAAssistTurnAlwaysStopsWhateverWasPlayingFirst guards the
-// barge-in behavior: every ha_assist turn calls tts.Stop before its own
-// speech has any chance to enqueue, so a new voice turn always clears the
-// queue and interrupts any in-flight synthesis instead of queuing after it.
-func TestOrchestrator_HAAssistTurnAlwaysStopsWhateverWasPlayingFirst(t *testing.T) {
-	provider := llmtest.New("local", llmtest.Response{Text: "Привет!"})
+func toolNames(req llm.ChatRequest) []string {
+	var names []string
+	for _, tool := range req.Tools {
+		names = append(names, tool.Name)
+	}
+	return names
+}
+
+// TestOrchestrator_SpeechToolsOfferedOnNonHASourcesAndMirandaTTSToolsHidden
+// pins the model-visible tool surface: speak_reply/stop_speech are offered on
+// a non-ha_assist turn, while miranda-tts's own prefixed tools never appear.
+func TestOrchestrator_SpeechToolsOfferedOnNonHASourcesAndMirandaTTSToolsHidden(t *testing.T) {
+	provider := llmtest.New("local", llmtest.Response{Text: "ok"})
+	o, _ := newTestOrchestratorWithTTS(t, provider)
+
+	_, err := o.Handle(context.Background(), InputRequest{Source: "telegram", UserID: "alex", Text: "привет"})
+	require.NoError(t, err)
+
+	names := toolNames(provider.Requests[0])
+	require.Contains(t, names, "speak_reply")
+	require.Contains(t, names, "stop_speech")
+	require.NotContains(t, names, "miranda-tts_speak")
+	require.NotContains(t, names, "miranda-tts_stop")
+}
+
+// TestOrchestrator_SpeechToolsAbsentOnHAAssistTurns: the Assist pipeline
+// already voices these turns, so offering speak_reply there would reopen the
+// double-voicing this change closes, one level down.
+func TestOrchestrator_SpeechToolsAbsentOnHAAssistTurns(t *testing.T) {
+	provider := llmtest.New("local", llmtest.Response{Text: "ok"})
 	o, _ := newTestOrchestratorWithTTS(t, provider)
 
 	_, err := o.Handle(context.Background(), InputRequest{Source: users.SourceHAAssist, UserID: "alex", Text: "привет"})
 	require.NoError(t, err)
+
+	names := toolNames(provider.Requests[0])
+	require.NotContains(t, names, "speak_reply")
+	require.NotContains(t, names, "stop_speech")
+	require.NotContains(t, names, "miranda-tts_speak")
+}
+
+// TestOrchestrator_SpeechToolsAbsentWithoutMirandaTTS: speak_reply is a thin
+// wrapper over the miranda-tts MCP server, so it is not offered when that
+// server isn't connected.
+func TestOrchestrator_SpeechToolsAbsentWithoutMirandaTTS(t *testing.T) {
+	provider := llmtest.New("local", llmtest.Response{Text: "ok"})
+	o, _, _ := newTestOrchestrator(t, provider)
+	o.ttsCfg = config.TTSConfig{SpeakReplyTool: true, StopSpeechTool: true}
+
+	_, err := o.Handle(context.Background(), InputRequest{Source: "cli", UserID: "alex", Text: "привет"})
+	require.NoError(t, err)
+
+	names := toolNames(provider.Requests[0])
+	require.NotContains(t, names, "speak_reply")
+	require.NotContains(t, names, "stop_speech")
 }
 
 // newTestOrchestratorWithUsers is like newTestOrchestrator but also wires up
@@ -990,11 +1055,11 @@ func newTestOrchestratorWithUsers(t *testing.T, provider *llmtest.FakeProvider, 
 	require.NoError(t, err)
 
 	return NewOrchestrator(
-		r, mcp.NewManager(nil), h, mem, nil, hub.New(100, nil), registry,
+		r, mcp.NewManager(nil), h, mem, hub.New(100, nil), registry,
 		config.AgentConfig{},
 		config.MemoryConfig{ExplicitTool: true},
 		config.TTSConfig{},
-		100, "debug",
+		"debug",
 	)
 }
 
@@ -1032,11 +1097,11 @@ func newTestOrchestratorWithTelegram(t *testing.T, provider *llmtest.FakeProvide
 	require.NoError(t, err)
 
 	o := NewOrchestrator(
-		r, mcp.NewManager(nil), h, mem, nil, hub.New(100, nil), registry,
+		r, mcp.NewManager(nil), h, mem, hub.New(100, nil), registry,
 		config.AgentConfig{},
 		config.MemoryConfig{},
 		config.TTSConfig{},
-		100, "debug",
+		"debug",
 	)
 	o.SetTelegram(sender, config.TelegramConfig{SendMessageTool: true})
 
@@ -1153,11 +1218,11 @@ func newTestOrchestratorWithNotify(t *testing.T, provider *llmtest.FakeProvider,
 	require.NoError(t, err)
 
 	o := NewOrchestrator(
-		r, mcp.NewManager(nil), h, mem, nil, hub.New(100, nil), registry,
+		r, mcp.NewManager(nil), h, mem, hub.New(100, nil), registry,
 		config.AgentConfig{},
 		config.MemoryConfig{},
 		config.TTSConfig{},
-		100, "debug",
+		"debug",
 	)
 
 	store, err := notify.Open(filepath.Join(t.TempDir(), "notify.db"))

@@ -173,13 +173,14 @@ func (o *Orchestrator) deliverReminder(ctx context.Context, task schedule.Task, 
 	var originErr error
 	switch {
 	case voiceOrigin:
-		// speakTextChecked only catches the device-can't-be-resolved class of
-		// failure synchronously — actual synthesis/playback still happens
-		// asynchronously via the Player and remains undetectable here (same
-		// limitation speak_reply has) — but that's still strictly better than
-		// speakText's pure fire-and-forget, which could never report this
-		// firing as failed even when there was never anywhere for it to go.
-		originErr = o.speakTextChecked(ctx, voiceText(task.Prompt))
+		// speakChecked only catches the speaker-can't-be-resolved /
+		// miranda-tts-not-connected class of failure synchronously — actual
+		// synthesis/playback still happens asynchronously and remains
+		// undetectable here (same limitation speak_reply has) — but that's
+		// still strictly better than pure fire-and-forget, which could
+		// never report this firing as failed even when there was never
+		// anywhere for it to go.
+		originErr = o.speakChecked(ctx, voiceText(task.Prompt))
 	case telegramOrigin:
 		originErr = o.sendTelegramReminder(ctx, task)
 	default: // web UI or any other/unknown origin
@@ -195,7 +196,7 @@ func (o *Orchestrator) deliverReminder(ctx context.Context, task schedule.Task, 
 	// this is an add-on, not the channel the reminder was actually created
 	// through, so its own failure doesn't affect originErr.
 	if task.AnnounceAloud && !voiceOrigin {
-		if err := o.speakTextChecked(ctx, voiceText(task.Prompt)); err != nil {
+		if err := o.speakChecked(ctx, voiceText(task.Prompt)); err != nil {
 			logger.Warn("reminder announce_aloud delivery failed", "task_id", task.ID, "user_id", task.UserID, "error", err)
 		}
 	}

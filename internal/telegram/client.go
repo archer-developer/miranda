@@ -127,9 +127,8 @@ func (c *Client) call(ctx context.Context, method string, payload, out any) erro
 
 // splitMessage breaks text into chunks of at most max runes, preferring to
 // cut at the last newline within a chunk so a message isn't split
-// mid-sentence when it doesn't have to be. Mirrors internal/tts.Chunk's
-// intent for a different transport (Telegram's length limit instead of the
-// Yandex Station's).
+// mid-sentence when it doesn't have to be. Mirrors internal/chunk.Chunk's
+// intent for a different transport (Telegram's length limit).
 func splitMessage(text string, max int) []string {
 	runes := []rune(text)
 	if len(runes) <= max {

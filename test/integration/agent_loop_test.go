@@ -63,14 +63,14 @@ func newHarness(t *testing.T, provider *llmtest.FakeProvider, mcpClients ...mcp.
 	eventHub := hub.New(200, nil)
 
 	orchestrator := agentloop.NewOrchestrator(
-		r, toolManager, historyStore, memoryStore, nil, eventHub, nil,
+		r, toolManager, historyStore, memoryStore, eventHub, nil,
 		config.AgentConfig{},
 		config.MemoryConfig{
 			ExplicitTool: true, AutoSummarize: false,
 			EndConversationTool: true, ForgetConversationTool: true,
 		},
 		config.TTSConfig{},
-		100, "debug",
+		"debug",
 	)
 
 	server := httpapi.NewServer(orchestrator, eventHub, "", nil, nil, nil, nil)

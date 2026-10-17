@@ -16,11 +16,11 @@ anything, not only the house. One static Go binary, no Docker, no cgo.
 Desktop / Web UI ----> |     agent loop     | <---- Code sandbox
      Phone (PWA) ----> |  memory + history  | <---- Personal diary
         Telegram ----> |     scheduler      | <---- YAZIO nutrition
-                       |    built-in TTS    |
+                       |   voice via TTS    |
                        +--------------------+
                                    |
                                    v
-                             Yandex Station
+                  miranda-tts (Gemini speech) ----> HA speakers
 ```
 
 > 📖 This README is for people setting up and running Miranda. If you're an
@@ -33,7 +33,7 @@ Desktop / Web UI ----> |     agent loop     | <---- Code sandbox
 |-----------------------|------------------------------------------------------------------------------------------------------------------------|
 | 🧠 **Any LLM**        | Claude, Gemini, or anything OpenAI-compatible (Ollama, vLLM, OpenRouter, ...) — with automatic fallback and escalation |
 | 🏠 **Home Assistant** | Talks over HA's Voice Assist pipeline, and controls HA entities as a tool                                              |
-| 🔊 **Yandex Station** | Speaks replies out loud — built-in voice or a Gemini-rendered one                                                      |
+| 🔊 **Voice replies**  | Speaks replies out loud — through HA's pipeline, or on a satellite / Yandex Station, with Gemini voices via miranda-tts |
 | 💬 **Telegram**       | Household members can chat with it from their phone                                                                    |
 | 🔔 **Notifications**  | Native in-app feed + optional browser push — the default channel for reminders and proactive pings                    |
 | 🌐 **Web dashboard**  | Live logs, dialog history, passwordless login                                                                          |
@@ -205,9 +205,8 @@ banned (a revoked key doesn't fix itself after a timer, unlike quota or
 load), so it's retried — and fails — again on every subsequent call until
 someone fixes or removes it from `api_key_envs`; Miranda logs that case as
 a distinct WARN (`key auth failure ... needs manual attention`) rather than
-the routine rotation message. [`gemini_tts`](#tts) goes through the
-identical mechanism with its own `quota_ban_minutes` / `overload_ban_minutes`
-/ `overload_response_timeout_seconds`, same defaults.
+the routine rotation message. [miranda-tts](#tts) (a separate service)
+uses the same rotation mechanism for its own Gemini speech keys.
 
 `overload_timeout_seconds` does double duty (observed live 2026-09-27: a
 `gemini-lite` free key answered its first chunk promptly, well inside the
@@ -227,7 +226,7 @@ error — observed in practice as free-tier Gemini taking close to two
 minutes under load. Once `max_call_seconds` elapses, Miranda aborts that
 attempt outright and rotates to the next key immediately, banning the slow
 one — deliberately even if that key had already started forwarding content
-(text already spoken over TTS, or streamed to the web UI). The accepted
+(text already streamed to the web UI). The accepted
 trade-off: on that specific interleaving, the next key's full answer can
 duplicate a fragment the user already saw, which beats making them wait out
 the stall. This is `keyrotation`'s `errMaxCallTimeout` in
@@ -304,29 +303,35 @@ duplicate tool name is a hard conflict, not just redundancy.
 
 ## TTS
 
-| Provider | | |
-|---|---|---|
-| `yandex_station_text` | default | Yandex Station's built-in voice, zero external dependency |
-| `gemini_tts` | opt-in | Renders audio via Gemini and plays it back as a fetched file, for a different voice |
+Miranda does not synthesize speech itself. Voice is the job of
+[`miranda-tts`](https://github.com/archer-developer/miranda-tts), a separate
+Gemini-backed service, used in two ways:
 
-Selected via `tts.primary`, with an optional `tts.fallback` if the primary's
-quota is exhausted. Dispatch is always asynchronous — a reply is queued and
-the turn continues immediately, never blocking on synthesis or playback. A
-new voice turn always interrupts whatever's still speaking; the model can
-also stop itself mid-reply via the `stop_speech` tool.
+| Request source | Who speaks | How |
+|---|---|---|
+| Home Assistant Assist pipeline (`ha_assist`) | HA's pipeline TTS engine | `miranda-tts` appears in HA as a Wyoming TTS entity; the pipeline streams the reply through it. Miranda only returns the text — **it never speaks these turns itself**, so a reply is voiced exactly once. See [Home Assistant as a Wyoming TTS server](#home-assistant-as-a-wyoming-tts-server). |
+| Anything else (Telegram, web UI, CLI, reminders) | Nobody, unless asked | The model calls `speak_reply`; Miranda resolves the speaker's friendly name to an `entity_id` and asks `miranda-tts` to play it — on a Home Assistant Voice satellite (`assist_satellite.announce`) or a media player such as a Yandex Station. |
+
+`speak_reply` is fire-and-forget (the turn never waits for playback), and
+`stop_speech` interrupts it. Neither is offered on `ha_assist` turns, and
+both are hidden unless the `miranda-tts` MCP server is connected.
 
 ```yaml
 tts:
-  primary: yandex_station_text
-  gemini_tts:
-    enabled: false
-    api_key_envs: ["GEMINI_API_KEY_1", "GEMINI_API_KEY_2"] # rotates on quota
-    public_base_url: "http://192.168.1.50:8787" # where the Station fetches audio from
-    audio_format: "wav" # or "mp3" — try mp3 first if replies don't play
+  default_device: "Станция Мини 3 Про" # friendly name of a media_player or assist_satellite
+  speak_reply_tool: true
+  stop_speech_tool: true
+
+mcp:
+  servers:
+    - name: miranda-tts
+      url: "http://192.168.1.94:8794/mcp"
+      token_env: "MIRANDA_TTS_MCP_TOKEN"
+      enabled: true
 ```
 
-Every rendered file is cached permanently (content-addressed by model,
-voice, format, and text) — a cache hit skips calling Gemini entirely.
+Resolving a friendly name needs `HA_BASE_URL` / `HA_TOKEN` (see below).
+Gemini keys, model and voice are configured in `miranda-tts`, not here.
 
 ## Memory & conversation history
 
@@ -587,8 +592,10 @@ state.
          token_env: "HA_MCP_TOKEN"
          enabled: true
    ```
-5. *(Optional)* TTS talks to HA's REST API directly and needs its own
-   `HA_BASE_URL`/`HA_TOKEN` — reuse the token above, or mint a separate one.
+5. *(Optional)* `speak_reply` and spoken reminders look up a speaker's
+   friendly name (`tts.default_device`, the tool's `device` argument) via
+   HA's REST API, which needs its own `HA_BASE_URL`/`HA_TOKEN` — reuse the
+   token above, or mint a separate one.
 
 ### Miranda as a Home Assistant conversation agent
 
@@ -606,12 +613,31 @@ your HA host.
    `server.auth_token_env` names — `MIRANDA_AUTH_TOKEN` by default).
    Validated live against Miranda's `/healthz` before saving.
 3. **Settings → Voice Assistants**, set **Conversation agent** to
-   **Miranda**. Voice replies are spoken back through both the pipeline's
-   own TTS *and* Miranda's Yandex Station channel — every other channel
-   (web UI, Telegram) stays silent unless the model explicitly calls
-   `speak_reply`.
+   **Miranda**. The reply is spoken by the pipeline's own TTS engine — set
+   it up as described in [Home Assistant as a Wyoming TTS
+   server](#home-assistant-as-a-wyoming-tts-server) — exactly once. Every
+   other channel (web UI, Telegram) stays silent unless the model
+   explicitly calls `speak_reply`.
 4. Ships with English, Russian, and Belarusian config-flow translations,
    matched to your HA profile's language automatically.
+
+### Home Assistant as a Wyoming TTS server
+
+Voice replies for the Assist pipeline come from `miranda-tts`, which speaks
+the Wyoming protocol — Home Assistant's built-in **Wyoming Protocol**
+integration turns it into a streaming `tts.*` entity (audio starts playing
+while Gemini is still synthesizing). No custom component is involved.
+
+1. Deploy and start [`miranda-tts`](https://github.com/archer-developer/miranda-tts)
+   (Wyoming listener on port `10400` by default).
+2. **Settings → Devices & Services → Add Integration** → **"Wyoming
+   Protocol"**, host = the `miranda-tts` host, port `10400`. (This sits next
+   to the existing Wyoming entry for speech-to-text, if you use one.)
+3. **Settings → Voice Assistants** → your pipeline → **Text-to-speech**: pick
+   the new entity (replacing any placeholder such as a null TTS).
+4. Make sure Miranda itself is not also configured to speak `ha_assist`
+   turns — it isn't, by design; there is nothing to disable on Miranda's
+   side.
 
 ### Testing the full loop
 

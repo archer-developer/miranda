@@ -1,8 +1,7 @@
-// Package tts turns assistant text into speech via Yandex Station (the
-// always-available provider, dispatched through HA's media_player.play_media)
-// or, optionally, Gemini (an external voice rendered to a file and played
-// back through the same station — see gemini.go).
-package tts
+// Package chunk splits streamed assistant text into sentence-aware pieces no
+// longer than a size limit. The agent loop uses it to publish a reply to the
+// hub (chat/log visibility) a few sentences at a time as the model streams.
+package chunk
 
 import "unicode"
 

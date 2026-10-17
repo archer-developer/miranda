@@ -36,8 +36,8 @@ func newTestOrchestratorWithMemoryConfig(t *testing.T, provider *llmtest.FakePro
 	require.NoError(t, err)
 
 	o := NewOrchestrator(
-		r, mcp.NewManager(nil), h, mem, nil, hub.New(100, nil), nil,
-		config.AgentConfig{}, memCfg, config.TTSConfig{}, 100, "debug",
+		r, mcp.NewManager(nil), h, mem, hub.New(100, nil), nil,
+		config.AgentConfig{}, memCfg, config.TTSConfig{}, "debug",
 	)
 	return o, h, mem
 }

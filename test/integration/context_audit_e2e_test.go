@@ -593,8 +593,8 @@ func TestContextAudit_DebugUser(t *testing.T) {
 	eventHub := hub.New(200, nil)
 
 	orchestrator := agentloop.NewOrchestrator(
-		llmRouter, toolManager, historyStore, memoryStore, nil, eventHub, nil,
-		cfg.Agent, cfg.Memory, cfg.TTS, cfg.TTS.YandexStation.ChunkMaxChars, contextAuditUserID,
+		llmRouter, toolManager, historyStore, memoryStore, eventHub, nil,
+		cfg.Agent, cfg.Memory, cfg.TTS, contextAuditUserID,
 	)
 	if lazy := cfg.LazyMCPServers(); len(lazy) > 0 {
 		orchestrator.SetLazyMCPServers(lazy)

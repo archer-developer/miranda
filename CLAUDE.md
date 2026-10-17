@@ -23,12 +23,14 @@ commands, and the HA integration.
 - **Yandex Station integration**: we use
   [AlexxIT/YandexStation](https://github.com/AlexxIT/YandexStation) as the
   HA custom_component that exposes Yandex Stations as `media_player`
-  entities. Miranda TTS uses `media_player.play_media` with
-  `media_content_type: text` (never `dialog` — that reopens the station's
-  own mic). The opt-in `gemini_tts` provider uses `media_content_type: music`
-  with a URL — **not yet verified on real hardware**. When touching
-  TTS/media_player code, check against this specific integration, not HA's
-  generic `media_player` or other Yandex integrations.
+  entities. Miranda no longer talks to them for speech: playback is owned by
+  the separate `miranda-tts` service, which plays a Gemini-rendered clip via
+  `media_player.play_media` with `media_content_type: music` and a URL
+  (never `dialog` — that reopens the station's own mic) — **not yet verified
+  on real hardware**. Miranda only resolves a speaker's friendly name to an
+  `entity_id` (`internal/ha`, media_player or assist_satellite) and hands it
+  to `miranda-tts`. When touching that code, check against this specific
+  integration, not HA's generic `media_player` or other Yandex integrations.
 
 ## Conventions
 
@@ -95,9 +97,7 @@ sequenceDiagram
     loop until final text (max 15 tool iterations — `maxToolIterations`, internal/agent_loop/orchestrator.go)
         O->>R: Chat(messages, tools)
         R-->>O: text delta / tool call
-        opt source == ha_assist
-            O-->>Caller: TTS chunks to Yandex Station (best-effort, as text streams in)
-        end
+        O-->>Caller: assistant text chunks published to the hub (chat/log view; never spoken from here)
         opt model requested a tool
             O->>T: executeTool(name, args, turnControl)
             T-->>O: result
@@ -120,14 +120,25 @@ generated.
 
 ### Response routing
 
-`ha_assist` is the only source that auto-speaks: `streamOneTurn` calls
-`speakChunks` as text streams in. Every other source (web UI, Telegram,
+Miranda itself never speaks a turn's streamed text. An `ha_assist` reply is
+voiced exactly once by Home Assistant's Assist pipeline: `conversation.py`
+passes the returned reply text to the pipeline's TTS engine, which is the
+`miranda-tts` service exposed as a Wyoming TTS entity (see README, "Home
+Assistant as a Wyoming TTS server"). Every other source (web UI, Telegram,
 scheduled tasks) is silent unless the model explicitly calls `speak_reply`,
-`send_notification`, or `send_telegram`. TTS dispatch is asynchronous
-(`Dispatcher.Speak` enqueues onto a background `Player` in
-`internal/tts/player.go`); every new `ha_assist` turn calls `o.tts.Stop`
-first for barge-in so a fresh voice turn interrupts whatever a previous
-turn is still finishing. See `internal/telegram/CLAUDE.md` for the
+`send_notification`, or `send_telegram`. `speak_reply` resolves the device's
+friendly name to an `entity_id` (`internal/ha.ResolveSpeaker`; falls back to
+`tts.default_device`) and asks the `miranda-tts` MCP server (`speak` tool) to
+play it — asynchronously, in a goroutine under a context detached from the
+turn, with failures published to the hub (`internal/agent_loop/speak.go`).
+`stop_speech` calls its `stop` tool for every entity a speak is still
+running on plus the default device. Both tools are withheld from `ha_assist`
+turns (the pipeline already voices them — offering them would reopen the
+double-voicing this design removed) and whenever `miranda-tts` isn't
+connected; the server's own prefixed `miranda-tts_speak`/`_stop` tools are
+always hidden from the model (`skip["miranda-tts"]` in `availableTools`).
+There is no in-process TTS queue, so no barge-in or "wait for the station to
+be idle" logic remains here. See `internal/telegram/CLAUDE.md` for the
 Telegram channel details and `internal/notify/CLAUDE.md` for the native
 notification channel.
 
@@ -211,8 +222,8 @@ Config flags live on `config.MemoryConfig` unless noted.
 | `restore_conversation` | `SearchHistoryTool` | Resume a past (ended) conversation as the active session: closes the current one exactly like `end_conversation`, starts a fresh conversation, and replays the target conversation's plain user/assistant text turns into it (no tool calls/results) via `history.AppendMessage` — see `internal/agent_loop/restore.go`. Takes an optional `conversation_id` (from a prior `search_history` call); omitted, it resolves to `history.LastEndedConversation` for "давай вернёмся к последнему диалогу". Ownership (`UserID`) and `EndedAt != nil` are re-checked server-side, never trusted from the model's argument. |
 | `end_conversation` | `EndConversationTool` | Close the current session immediately — same `summarizeConversation` path as an idle-timeout close: recap + durable facts are written, conversation stays in history (just excluded from future `OpenConversation` lookups). Use for "let's start a new conversation" — the old one is worth remembering. |
 | `forget_conversation` | `ForgetConversationTool` | Delete the current conversation entirely — no summarization, no memory write, `DeleteConversation` removes messages/tool_calls/FTS rows outright. Use for "forget this"/"start over" — nothing from it should persist anywhere. |
-| `speak_reply` | `config.TTSConfig.SpeakReplyTool` | Dispatch the given `text` to `tts.primary`, even on a non-`ha_assist` source. |
-| `stop_speech` | `config.TTSConfig.StopSpeechTool` | Interrupt/clear the TTS queue and stop playback on all entities. |
+| `speak_reply` | `config.TTSConfig.SpeakReplyTool` | Ask `miranda-tts` to speak the given `text` on a speaker (`device` friendly name, else `tts.default_device`) — non-`ha_assist` sources only; fire-and-forget. |
+| `stop_speech` | `config.TTSConfig.StopSpeechTool` | Ask `miranda-tts` to interrupt speech started by `speak_reply` (and on the default device) — non-`ha_assist` sources only. |
 | `send_notification` | `config.NotifyConfig.SendNotificationTool` | Push a notification to a household member's Miranda app (feed + optional browser push) — the **default** proactive channel. See `internal/notify/CLAUDE.md` and `docs/adr/native-notifications.md`. |
 | `send_telegram` | `config.TelegramConfig.SendMessageTool` | Push a message to a household member's Telegram — only when the user explicitly names Telegram, per its own tool description (see `docs/adr/native-notifications.md`). See `internal/telegram/CLAUDE.md`. |
 | `create_reminder` / `create_scheduled_task` / `list_scheduled_tasks` / `delete_scheduled_task` | `config.ScheduleConfig.Enabled` | Schedule a plain reminder (delivered directly at fire time, never replayed through the LLM) or an agentic prompt (replayed through the agent loop); list/cancel either. See `internal/schedule/CLAUDE.md` and `docs/adr/reminders-vs-scheduled-tasks.md`. |

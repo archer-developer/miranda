@@ -47,7 +47,6 @@ import (
 	"github.com/archer-developer/miranda/internal/telegram"
 	"github.com/archer-developer/miranda/internal/tlscert"
 	"github.com/archer-developer/miranda/internal/tools"
-	"github.com/archer-developer/miranda/internal/tts"
 	"github.com/archer-developer/miranda/internal/users"
 	"github.com/archer-developer/miranda/internal/webauthn"
 	"github.com/archer-developer/miranda/internal/webui"
@@ -354,7 +353,7 @@ func run(cfg config.Config, logger *slog.Logger, eventHub *hub.Hub, configDir st
 		return err
 	}
 
-	dispatcher, ttsAudioHandler, ttsHAClient := buildTTSDispatcher(cfg.TTS, cfg.Storage, eventHub, logger)
+	speakerResolver := buildSpeakerResolver(logger)
 
 	usersRegistry, err := users.NewRegistry(cfg.Users)
 	if err != nil {
@@ -433,8 +432,8 @@ func run(cfg config.Config, logger *slog.Logger, eventHub *hub.Hub, configDir st
 
 	defaultUserID := "debug"
 	orchestrator := agentloop.NewOrchestrator(
-		llmRouter, toolManager, historyStore, memoryStore, dispatcher, eventHub, usersRegistry,
-		cfg.Agent, cfg.Memory, cfg.TTS, ttsChunkMaxChars(cfg.TTS), defaultUserID,
+		llmRouter, toolManager, historyStore, memoryStore, eventHub, usersRegistry,
+		cfg.Agent, cfg.Memory, cfg.TTS, defaultUserID,
 	)
 	orchestrator.SetLogger(logger)
 	orchestrator.SetRedactor(redactor)
@@ -458,8 +457,8 @@ func run(cfg config.Config, logger *slog.Logger, eventHub *hub.Hub, configDir st
 	if cfg.Schedule.Enabled {
 		orchestrator.SetSchedule(scheduleStore)
 	}
-	if ttsHAClient != nil {
-		orchestrator.SetSpeakerHA(ttsHAClient)
+	if speakerResolver != nil {
+		orchestrator.SetSpeakerHA(speakerResolver)
 	}
 	orchestrator.SetKeyring(keyringService)
 	if lazy := cfg.LazyMCPServers(); len(lazy) > 0 {
@@ -516,9 +515,7 @@ func run(cfg config.Config, logger *slog.Logger, eventHub *hub.Hub, configDir st
 
 		// Required for processAttachments to build a fileURI any tool can
 		// pull an upload's bytes from (see docs/file-staging-refactor.md) —
-		// fail fast at startup rather than silently serve broken URIs,
-		// mirroring gemini_tts's identical PublicBaseURL requirement
-		// (internal/tts/gemini.go).
+		// fail fast at startup rather than silently serve broken URIs.
 		if cfg.FileUpload.PublicBaseURL == "" {
 			return fmt.Errorf("main: file_upload.public_base_url is not configured — other services have no way to fetch an uploaded file's bytes")
 		}
@@ -554,9 +551,6 @@ func run(cfg config.Config, logger *slog.Logger, eventHub *hub.Hub, configDir st
 	// earlier than the stores, and it reaches the systemd journal, which our
 	// own log rotation does not govern.
 	server.SetRedactor(redactor)
-	if ttsAudioHandler != nil {
-		server.SetTTSAudioHandler(ttsAudioHandler)
-	}
 	if cfg.FileUpload.Enabled {
 		server.SetUploadHandler(cfg.FileUpload.MaxFileSizeBytes)
 	}
@@ -1080,66 +1074,16 @@ func setupOAuth(cfg config.OAuthConfig, storageCfg config.StorageConfig, logger 
 	return store, svc, nil
 }
 
-// buildTTSDispatcher wires up the Home Assistant REST client TTS needs, if
-// HA_BASE_URL is configured, plus the primary/fallback tts.Provider pair
-// named by cfg.Primary/cfg.Fallback and (if a gemini_tts provider was built)
-// the HTTP handler that serves its rendered audio files back to the
-// station. TTS is entirely optional: without HA_BASE_URL the agent still
-// answers via the HTTP API/web UI, just without speaking replies.
-//
-// A provider failing to build (e.g. gemini_tts requested with no usable API
-// key) disables TTS dispatch entirely rather than falling back silently to
-// some other provider the config didn't actually ask for — better to notice
-// a misconfiguration in the logs than to have replies quietly go out over
-// the wrong voice.
-func buildTTSDispatcher(cfg config.TTSConfig, storageCfg config.StorageConfig, h *hub.Hub, logger *slog.Logger) (*tts.Dispatcher, *tts.HTTPHandler, *ha.Client) {
+// buildSpeakerResolver builds the Home Assistant REST client used only to
+// turn a speaker's friendly name into the entity_id miranda-tts speaks on
+// (speak_reply's device argument, tts.default_device, spoken reminders). It
+// is nil when HA_BASE_URL is unset: replies still go out over the HTTP
+// API/web UI, and speak_reply reports that it cannot resolve a speaker.
+func buildSpeakerResolver(logger *slog.Logger) *ha.Client {
 	baseURL := os.Getenv("HA_BASE_URL")
 	if baseURL == "" {
-		logger.Warn("HA_BASE_URL not set — TTS dispatch is disabled")
-		return nil, nil, nil
+		logger.Warn("HA_BASE_URL not set — speak_reply cannot resolve speaker names")
+		return nil
 	}
-	haClient := ha.New(baseURL, os.Getenv("HA_TOKEN"))
-
-	primary, err := tts.NewProvider(cfg.Primary, cfg, storageCfg.TTSCacheDir, haClient, logger)
-	if err != nil {
-		logger.Error("tts: failed to build primary provider, TTS dispatch is disabled", "error", err, "primary", cfg.Primary)
-		return nil, nil, nil
-	}
-
-	var fallback tts.Provider
-	if cfg.Fallback != "" && cfg.Fallback != cfg.Primary {
-		fallback, err = tts.NewProvider(cfg.Fallback, cfg, storageCfg.TTSCacheDir, haClient, logger)
-		if err != nil {
-			logger.Warn("tts: failed to build fallback provider, continuing without one", "error", err, "fallback", cfg.Fallback)
-			fallback = nil
-		}
-	}
-
-	dispatcher := tts.NewDispatcher(primary, fallback, haClient, cfg.DefaultDevice, h, logger)
-
-	// Always registered (independent of which provider ended up being usable
-	// above): a gemini_tts cache directory populated by an earlier, since-
-	// reconfigured run should still be servable, and this is cheap to keep
-	// around regardless.
-	ttsHandler, err := tts.NewHTTPHandler(storageCfg.TTSCacheDir)
-	if err != nil {
-		logger.Error("tts: failed to create the /tts-audio HTTP handler", "error", err)
-		return dispatcher, nil, haClient
-	}
-	return dispatcher, ttsHandler, haClient
-}
-
-// ttsChunkMaxChars picks the sentence-boundary chunk size (see
-// tts.Accumulator/Chunk) the agent loop uses to split streaming LLM text
-// before handing it to TTS — sized to whichever provider is actually
-// configured as primary, since gemini_tts renders a real audio file and
-// isn't limited by what Yandex Station's own on-device TTS can swallow in
-// one call the way yandex_station_text is. Chunking itself is always
-// maximally greedy regardless of provider (see Accumulator's doc comment) —
-// only the limit differs.
-func ttsChunkMaxChars(cfg config.TTSConfig) int {
-	if cfg.Primary == "gemini_tts" {
-		return cfg.GeminiTTS.ChunkMaxChars
-	}
-	return cfg.YandexStation.ChunkMaxChars
+	return ha.New(baseURL, os.Getenv("HA_TOKEN"))
 }

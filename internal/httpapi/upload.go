@@ -177,9 +177,9 @@ func (s *Server) handleUpload(w http.ResponseWriter, r *http.Request) {
 // GET /files/{id} — the endpoint any external MCP server's tool fetches a
 // fileURI from (see docs/file-staging-refactor.md and
 // config.FileUploadConfig.PublicBaseURL). Deliberately unauthenticated,
-// mirroring internal/tts.HTTPHandler's GET /tts-audio/{filename} (the same
+// like the audio route miranda-tts serves for media players (the same
 // "a LAN service needs to fetch a Miranda-hosted resource by URL" problem,
-// already solved there the same way): the id's own randomness
+// solved the same way): the id's own randomness
 // (attachments.NewFileID, crypto/rand-backed) plus the store's TTL is the
 // security boundary, not a session or bearer token — this route serves
 // backend services pulling a file they were handed a capability URL for,

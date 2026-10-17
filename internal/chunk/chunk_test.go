@@ -1,4 +1,4 @@
-package tts
+package chunk
 
 import (
 	"testing"
@@ -9,7 +9,7 @@ import (
 // TestChunk_GroupsShortSentencesUntilForced is the regression test for the
 // bug this greedy strategy fixes: cutting at the *first* sentence boundary
 // seen split short sentences into their own chunk each, defeating a large
-// maxChars entirely (observed in production logs: gemini_tts fired one API
+// maxChars entirely (observed in production logs: a Gemini TTS provider fired one API
 // call per sentence despite chunk_max_chars: 200). Chunking must group all
 // four into a single chunk instead, since together they still fit under
 // maxChars.

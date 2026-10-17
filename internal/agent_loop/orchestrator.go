@@ -28,7 +28,6 @@ import (
 	"github.com/archer-developer/miranda/internal/schedule"
 	"github.com/archer-developer/miranda/internal/telegram"
 	"github.com/archer-developer/miranda/internal/tools"
-	"github.com/archer-developer/miranda/internal/tts"
 	"github.com/archer-developer/miranda/internal/users"
 )
 
@@ -240,24 +239,25 @@ type ChatEvent struct {
 	StartedAt time.Time `json:"started_at,omitempty"`
 }
 
-// speakerHA is the subset of *ha.Client the Orchestrator needs for per-entity
-// speaker coordination before alice MCP tool calls: resolve a speaker's
-// friendly name to its entity_id so WaitEntityIdle can poll the right entity.
+// speakerHA is the subset of *ha.Client the Orchestrator needs to address
+// miranda-tts: resolve a speaker's friendly name (media_player or
+// assist_satellite) to the concrete entity_id it speaks on.
 type speakerHA interface {
-	ResolveMediaPlayer(ctx context.Context, friendlyName string) (string, error)
+	ResolveSpeaker(ctx context.Context, friendlyName string) (string, error)
 }
 
 // Orchestrator drives one full agent turn: it loads the user's memory and
 // prior conversation, calls the LLM router (looping on tool calls), executes
 // tools (either locally — remember_this — or via the MCP tool manager),
-// dispatches assistant text to TTS as it streams, and persists the turn to
-// history.
+// publishes assistant text to the hub as it streams, and persists the turn to
+// history. Spoken replies are not its job: Assist-pipeline turns are voiced by
+// Home Assistant's TTS engine, and everything else by the speak_reply tool
+// delegating to miranda-tts (see speak.go).
 type Orchestrator struct {
 	router  *router.Router
 	tools   *mcp.Manager
 	history *history.Store
 	memory  *memory.Store
-	tts     *tts.Dispatcher // may be nil: TTS dispatch is best-effort and optional
 	hub     *hub.Hub
 	// logger is set via SetLogger; nil means tool-call failures (e.g. an
 	// MCP server rejecting a call) are only visible in logs/llm.log's full
@@ -271,7 +271,6 @@ type Orchestrator struct {
 	users            *users.Registry // may be nil: falls back to the raw user id in the system prompt
 	memoryCfg        config.MemoryConfig
 	ttsCfg           config.TTSConfig
-	chunkMaxChars    int
 	defaultUserID    string
 	baseSystemPrompt string
 	telegram         *telegram.Sender // set via SetTelegram; nil means the send_telegram tool is never offered
@@ -320,9 +319,13 @@ type Orchestrator struct {
 	// marker is embedded durably in persisted conversation history and can be
 	// revisited long after the turn that created it.
 	downloadRecordTTL time.Duration
-	// speakerHA is set via SetSpeakerHA; nil means pre-alice-tool speaker
-	// coordination (WaitIdle + alice_state polling) is skipped entirely.
+	// speakerHA is set via SetSpeakerHA; nil means speaker friendly names
+	// cannot be resolved, so speak_reply/reminder speech reports an error.
 	speakerHA speakerHA
+	// speaking counts in-flight miranda-tts speak calls per entity_id, so
+	// stop_speech knows which speakers to interrupt; guarded by speakingMu.
+	speakingMu sync.Mutex
+	speaking   map[string]int
 	// keyring is set via SetKeyring; nil means executeTool never injects an
 	// encryption_key argument into any MCP tool call, regardless of
 	// mcpExtensions above — see docs/encryption.md.
@@ -330,10 +333,7 @@ type Orchestrator struct {
 	// filesPublicBaseURL is set via SetFilesPublicBaseURL: the base URL
 	// other backend services (sandbox, medical-card, ...) can reach
 	// Miranda's own GET /files/{id} route through, e.g.
-	// "http://192.168.1.50:8787" — mirrors config.TTSConfig's
-	// gemini_tts.PublicBaseURL, which solves the identical problem (a LAN
-	// device needs to fetch a Miranda-hosted resource by URL) for
-	// synthesized audio. processAttachments uses this to build the fileURI
+	// "http://192.168.1.50:8787". processAttachments uses this to build the fileURI
 	// handed to the model for each attachment — see
 	// docs/file-staging-refactor.md. Empty means no URI is ever included
 	// (file_upload.enabled is false, or public_base_url isn't configured).
@@ -497,10 +497,10 @@ func (o *Orchestrator) SetSchedule(s *schedule.Store) {
 	o.schedule = s
 }
 
-// SetSpeakerHA wires the optional speaker coordinator in — call once from
-// cmd/miranda with the same *ha.Client used for TTS, when HA is configured.
-// Without it, executeTool skips per-entity pre-call coordination and alice
-// tool calls fire immediately regardless of what the station is playing.
+// SetSpeakerHA wires the optional speaker-name resolver in — call once from
+// cmd/miranda with an *ha.Client, when HA is configured. Without it,
+// speak_reply and spoken reminders cannot turn a friendly device name into
+// the entity_id miranda-tts needs, and report that instead of speaking.
 func (o *Orchestrator) SetSpeakerHA(ha speakerHA) {
 	o.speakerHA = ha
 }
@@ -669,13 +669,11 @@ func NewOrchestrator(
 	toolManager *mcp.Manager,
 	historyStore *history.Store,
 	memoryStore *memory.Store,
-	ttsDispatcher *tts.Dispatcher,
 	h *hub.Hub,
 	usersRegistry *users.Registry,
 	agentCfg config.AgentConfig,
 	memoryCfg config.MemoryConfig,
 	ttsCfg config.TTSConfig,
-	chunkMaxChars int,
 	defaultUserID string,
 ) *Orchestrator {
 	return &Orchestrator{
@@ -683,12 +681,10 @@ func NewOrchestrator(
 		tools:            toolManager,
 		history:          historyStore,
 		memory:           memoryStore,
-		tts:              ttsDispatcher,
 		hub:              h,
 		users:            usersRegistry,
 		memoryCfg:        memoryCfg,
 		ttsCfg:           ttsCfg,
-		chunkMaxChars:    chunkMaxChars,
 		defaultUserID:    defaultUserID,
 		baseSystemPrompt: agentCfg.SystemPrompt,
 		memoryCache:      make(map[string]cachedMemory),
@@ -699,14 +695,6 @@ func NewOrchestrator(
 
 // Handle runs one full turn and returns the assistant's reply.
 func (o *Orchestrator) Handle(ctx context.Context, req InputRequest) (InputResponse, error) {
-	if req.Source == users.SourceHAAssist && o.tts != nil {
-		// Barge-in: interrupt whatever the station is still finishing from a
-		// previous turn *before* this turn's own speech has any chance to
-		// enqueue anything, so a new voice turn always cuts in rather than
-		// queuing after what's already playing.
-		o.tts.Stop()
-	}
-
 	userID := req.UserID
 	if userID == "" {
 		userID = o.defaultUserID
@@ -790,7 +778,7 @@ func (o *Orchestrator) Handle(ctx context.Context, req InputRequest) (InputRespo
 	}, priorMessages...)
 	messages = append(messages, llm.Message{Role: llm.RoleUser, Content: userContent, Parts: imageParts})
 
-	control := &turnControl{}
+	control := &turnControl{source: req.Source}
 	tools := o.availableTools(ctx, userID, control)
 	finalText, providerUsed, err := o.runAgentLoop(ctx, userID, convID, req.Source, messages, tools, control, outcome)
 	if err != nil && req.Source == users.SourceScheduled {
@@ -837,12 +825,6 @@ func (o *Orchestrator) Handle(ctx context.Context, req InputRequest) (InputRespo
 		o.hub.Publish(hub.Event{Source: "error", Message: err.Error()})
 		finalText = o.turnFailureReply(userID)
 		providerUsed = ""
-		if req.Source == users.SourceHAAssist {
-			// The normal live-TTS path (streamOneTurn's speakChunks) never
-			// got a chance to speak anything for this failed final
-			// call — say the fallback text out loud too, not just show it.
-			o.speakText(ctx, voiceText(finalText))
-		}
 	}
 	// downloads is recorded structurally alongside finalText, never folded
 	// into it — see history.Message.Downloads/toDownloadRefs for why. This
@@ -858,7 +840,7 @@ func (o *Orchestrator) Handle(ctx context.Context, req InputRequest) (InputRespo
 	}
 	o.publishChatMessage(userID, convID, history.Message{ID: assistantMsgID, ConversationID: convID, Role: "assistant", Content: finalText, Downloads: downloads})
 
-	// Applied after the reply is recorded (and, via TTS, already spoken) so
+	// Applied after the reply is recorded so
 	// an end/forget/restore request never costs the user their answer to
 	// this turn. All three are best-effort: a failure here shouldn't fail a
 	// turn the user already got a correct reply to, just leave the
@@ -879,9 +861,9 @@ func (o *Orchestrator) Handle(ctx context.Context, req InputRequest) (InputRespo
 		}
 	}
 
-	// A voice-classified source's HTTP reply is treated as equivalent to
-	// what gets spoken: same transformer as speakChunks/speak_reply, no
-	// footnote (voice doesn't need attachments — see appendDownloadFootnotes).
+	// A voice-classified source's HTTP reply is what gets spoken (for
+	// ha_assist, by the Assist pipeline's TTS engine): same transformer as
+	// speak_reply, no footnote (voice doesn't need attachments — see appendDownloadFootnotes).
 	// Every other source gets the plain-text download footnote fallback the
 	// web UI doesn't need (it renders a chip from Downloads instead).
 	var reply string

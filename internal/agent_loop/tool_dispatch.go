@@ -10,6 +10,7 @@ import (
 	"github.com/robfig/cron/v3"
 
 	llm "github.com/archer-developer/miranda-llm"
+	"github.com/archer-developer/miranda/internal/hub"
 	"github.com/archer-developer/miranda/internal/replyformat"
 	"github.com/archer-developer/miranda/internal/schedule"
 )
@@ -190,20 +191,25 @@ func (o *Orchestrator) executeTool(ctx context.Context, userID, conversationID, 
 		if args.Text == "" {
 			return "error: text is required"
 		}
-		spoken := voiceText(args.Text)
-		if args.Device != "" && o.tts != nil {
-			o.tts.SpeakTo(ctx, spoken, args.Device)
-		} else {
-			o.speakText(ctx, spoken)
+		if !o.ttsAvailable() {
+			return fmt.Sprintf("error: speech is unavailable: %s is not connected", ttsServerName)
 		}
+		entityID, err := o.resolveSpeakerEntity(ctx, args.Device)
+		if err != nil {
+			o.hub.Publish(hub.Event{Source: "tts", Message: "speak_reply: " + err.Error()})
+			return fmt.Sprintf("error: %v", err)
+		}
+		// Fire-and-forget: playback can outlast the turn by minutes, and a
+		// broken speaker must not stall the answer (failures go to the hub).
+		o.speakOnEntity(ctx, entityID, voiceText(args.Text))
 		return "spoken"
 	}
 
 	if tc.Name == stopSpeechToolName {
-		if o.tts != nil {
-			o.tts.Stop()
+		if !o.ttsAvailable() {
+			return fmt.Sprintf("error: speech is unavailable: %s is not connected", ttsServerName)
 		}
-		return "stopped"
+		return o.stopSpeech(ctx)
 	}
 
 	if tc.Name == sendNotificationToolName {

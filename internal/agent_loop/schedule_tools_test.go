@@ -21,11 +21,11 @@ import (
 	"github.com/archer-developer/miranda/internal/history"
 	"github.com/archer-developer/miranda/internal/hub"
 	"github.com/archer-developer/miranda/internal/mcp"
+	"github.com/archer-developer/miranda/internal/mcp/mcptest"
 	"github.com/archer-developer/miranda/internal/memory"
 	"github.com/archer-developer/miranda/internal/notify"
 	"github.com/archer-developer/miranda/internal/schedule"
 	"github.com/archer-developer/miranda/internal/telegram"
-	"github.com/archer-developer/miranda/internal/tts"
 	"github.com/archer-developer/miranda/internal/users"
 )
 
@@ -495,12 +495,12 @@ func TestOrchestrator_ListScheduledTasksTool_ShowsKind(t *testing.T) {
 
 // --- RunScheduledTasks: reminder delivery (the actual bug-fix path) ---
 
-// newTestOrchestratorWithReminderChannels wires TTS (fakeHAClient),
+// newTestOrchestratorWithReminderChannels wires TTS (a fake miranda-tts MCP server),
 // Telegram (fake Bot API server), the native notify feed, and a real
 // schedule.Store into one Orchestrator, so a single test can assert on
 // every reminder delivery leg (origin channel, always-additionally Notify,
 // Telegram-origin reply) at once.
-func newTestOrchestratorWithReminderChannels(t *testing.T, provider *llmtest.FakeProvider, configs []config.UserConfig) (*Orchestrator, *fakeHAClient, *[]sentTelegramMessage, *schedule.Store, *notify.Service) {
+func newTestOrchestratorWithReminderChannels(t *testing.T, provider *llmtest.FakeProvider, configs []config.UserConfig) (*Orchestrator, *mcptest.FakeClient, *[]sentTelegramMessage, *schedule.Store, *notify.Service) {
 	t.Helper()
 
 	r, err := router.New([]llm.Provider{provider}, selfEscalation(provider.Name()), "")
@@ -513,19 +513,8 @@ func newTestOrchestratorWithReminderChannels(t *testing.T, provider *llmtest.Fak
 	mem, err := memory.New(t.TempDir())
 	require.NoError(t, err)
 
-	ha := &fakeHAClient{}
-	yandexCfg := config.YandexStationConfig{
-		ChunkMaxChars:          100,
-		IdlePollIntervalMS:     1,
-		PlaybackStartTimeoutMS: 1,
-	}
-	ttsCfg := config.TTSConfig{
-		DefaultDevice: "test-kitchen",
-		Primary:       "yandex_station_text",
-		YandexStation: yandexCfg,
-	}
-	primary := tts.NewTextProvider(yandexCfg, ha, nil)
-	dispatcher := tts.NewDispatcher(primary, nil, ha, "test-kitchen", hub.New(100, nil), nil)
+	ha := newFakeTTSServer()
+	ttsCfg := config.TTSConfig{DefaultDevice: "test-kitchen"}
 
 	var sent []sentTelegramMessage
 	fakeAPI := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -546,12 +535,13 @@ func newTestOrchestratorWithReminderChannels(t *testing.T, provider *llmtest.Fak
 	}
 
 	o := NewOrchestrator(
-		r, mcp.NewManager(nil), h, mem, dispatcher, hub.New(100, nil), registry,
+		r, mcp.NewManager(nil, ha), h, mem, hub.New(100, nil), registry,
 		config.AgentConfig{},
 		config.MemoryConfig{},
 		ttsCfg,
-		100, "debug",
+		"debug",
 	)
+	o.SetSpeakerHA(fakeSpeakerResolver{})
 	o.SetTelegram(sender, config.TelegramConfig{SendMessageTool: true})
 
 	notifyStore, err := notify.Open(filepath.Join(t.TempDir(), "notify.db"))
@@ -746,8 +736,8 @@ func TestOrchestrator_RunScheduledTasks_RecurringReschedulesEvenOnFailure(t *tes
 
 // TestOrchestrator_RunScheduledTasks_ReminderVoiceDeliveryFails_RecordsError
 // pins down the fix making a voice-origin reminder's device-resolution
-// failure detectable: before it, deliverReminder called the fire-and-forget
-// speakText, which can never return an error, so a reminder aimed at a
+// failure detectable: before it, deliverReminder called a fire-and-forget
+// speak, which can never return an error, so a reminder aimed at a
 // misconfigured/unresolvable device was unconditionally recorded
 // StatusSent even though it could never have reached the user.
 func TestOrchestrator_RunScheduledTasks_ReminderVoiceDeliveryFails_RecordsError(t *testing.T) {
@@ -761,20 +751,18 @@ func TestOrchestrator_RunScheduledTasks_ReminderVoiceDeliveryFails_RecordsError(
 	mem, err := memory.New(t.TempDir())
 	require.NoError(t, err)
 
-	// fakeHAClient.ResolveMediaPlayer only resolves "test-kitchen" (see
-	// orchestrator_test.go) — pointing the dispatcher at any other name
-	// makes every resolution attempt fail deterministically.
-	ha := &fakeHAClient{}
-	yandexCfg := config.YandexStationConfig{ChunkMaxChars: 100, IdlePollIntervalMS: 1, PlaybackStartTimeoutMS: 1}
+	// fakeSpeakerResolver only resolves "test-kitchen" and "test-bedroom"
+	// (see orchestrator_test.go) — pointing the default device at any other
+	// name makes every resolution attempt fail deterministically.
+	ha := newFakeTTSServer()
 	const unresolvableDevice = "no-such-device"
-	ttsCfg := config.TTSConfig{DefaultDevice: unresolvableDevice, Primary: "yandex_station_text", YandexStation: yandexCfg}
-	primary := tts.NewTextProvider(yandexCfg, ha, nil)
-	dispatcher := tts.NewDispatcher(primary, nil, ha, unresolvableDevice, hub.New(100, nil), nil)
+	ttsCfg := config.TTSConfig{DefaultDevice: unresolvableDevice}
 
 	o := NewOrchestrator(
-		r, mcp.NewManager(nil), h, mem, dispatcher, hub.New(100, nil), nil,
-		config.AgentConfig{}, config.MemoryConfig{}, ttsCfg, 100, "debug",
+		r, mcp.NewManager(nil, ha), h, mem, hub.New(100, nil), nil,
+		config.AgentConfig{}, config.MemoryConfig{}, ttsCfg, "debug",
 	)
+	o.SetSpeakerHA(fakeSpeakerResolver{})
 
 	s, err := schedule.Open(filepath.Join(t.TempDir(), "schedule.db"))
 	require.NoError(t, err)
@@ -790,7 +778,7 @@ func TestOrchestrator_RunScheduledTasks_ReminderVoiceDeliveryFails_RecordsError(
 
 	require.NoError(t, o.RunScheduledTasks(context.Background(), nil))
 
-	require.Empty(t, ha.Calls(), "an unresolvable device must never reach play_media")
+	require.Empty(t, ha.CallsSnapshot(), "an unresolvable device must never reach miranda-tts")
 
 	tasks, err := s.ListForUser(context.Background(), "alex")
 	require.NoError(t, err)

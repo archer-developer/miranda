@@ -153,8 +153,8 @@ func newCalendarE2EHarness(t *testing.T, provider *llmtest.FakeProvider, oauthSv
 
 	eventHub := hub.New(100, nil)
 	orchestrator := agentloop.NewOrchestrator(
-		r, mcp.NewManager(nil), historyStore, memoryStore, nil, eventHub, nil,
-		config.AgentConfig{}, config.MemoryConfig{}, config.TTSConfig{}, 100, "debug",
+		r, mcp.NewManager(nil), historyStore, memoryStore, eventHub, nil,
+		config.AgentConfig{}, config.MemoryConfig{}, config.TTSConfig{}, "debug",
 	)
 	orchestrator.SetOAuth(oauthSvc, time.Minute, time.Minute, 10*time.Second)
 
@@ -246,8 +246,8 @@ func callCalendarToolIgnoringResult(oauthSvc *oauth2.Service, username, toolName
 	}
 
 	orchestrator := agentloop.NewOrchestrator(
-		r, mcp.NewManager(nil), historyStore, memoryStore, nil, hub.New(10, nil), nil,
-		config.AgentConfig{}, config.MemoryConfig{}, config.TTSConfig{}, 100, "debug",
+		r, mcp.NewManager(nil), historyStore, memoryStore, hub.New(10, nil), nil,
+		config.AgentConfig{}, config.MemoryConfig{}, config.TTSConfig{}, "debug",
 	)
 	orchestrator.SetOAuth(oauthSvc, time.Minute, time.Minute, 10*time.Second)
 

@@ -2,61 +2,84 @@ package ha
 
 import (
 	"context"
-	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"sync/atomic"
 	"testing"
 
 	"github.com/stretchr/testify/require"
 )
 
-func TestCallService_SendsAuthorizedRequest(t *testing.T) {
-	var gotAuth, gotPath string
-	var gotBody map[string]any
+const statesJSON = `[
+ {"entity_id":"media_player.station","attributes":{"friendly_name":"Станция Мини 3 Про"}},
+ {"entity_id":"assist_satellite.voice_pe","attributes":{"friendly_name":"Voice PE Спальня"}},
+ {"entity_id":"media_player.shared","attributes":{"friendly_name":"Общая"}},
+ {"entity_id":"assist_satellite.shared","attributes":{"friendly_name":"Общая"}},
+ {"entity_id":"light.kitchen","attributes":{"friendly_name":"Кухня"}},
+ {"entity_id":"media_player.nameless","attributes":{}}
+]`
 
+func newStatesServer(t *testing.T, calls *atomic.Int32) *httptest.Server {
+	t.Helper()
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		gotAuth = r.Header.Get("Authorization")
-		gotPath = r.URL.Path
-		require.NoError(t, json.NewDecoder(r.Body).Decode(&gotBody))
-		w.WriteHeader(http.StatusOK)
+		calls.Add(1)
+		require.Equal(t, "Bearer secret-token", r.Header.Get("Authorization"))
+		require.Equal(t, "/api/states", r.URL.Path)
+		_, _ = w.Write([]byte(statesJSON))
 	}))
-	defer server.Close()
-
-	c := New(server.URL, "secret-token")
-	err := c.CallService(context.Background(), "media_player", "play_media", map[string]any{
-		"entity_id": "media_player.kitchen",
-	})
-	require.NoError(t, err)
-	require.Equal(t, "Bearer secret-token", gotAuth)
-	require.Equal(t, "/api/services/media_player/play_media", gotPath)
-	require.Equal(t, "media_player.kitchen", gotBody["entity_id"])
+	t.Cleanup(server.Close)
+	return server
 }
 
-func TestCallService_NonSuccessStatusReturnsError(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusBadRequest)
-		_, _ = w.Write([]byte(`{"message":"invalid entity"}`))
-	}))
-	defer server.Close()
+func TestResolveSpeaker_FindsMediaPlayersAndSatellites(t *testing.T) {
+	var calls atomic.Int32
+	c := New(newStatesServer(t, &calls).URL, "secret-token")
 
-	c := New(server.URL, "token")
-	err := c.CallService(context.Background(), "media_player", "play_media", nil)
+	got, err := c.ResolveSpeaker(context.Background(), "Станция Мини 3 Про")
+	require.NoError(t, err)
+	require.Equal(t, "media_player.station", got)
+
+	got, err = c.ResolveSpeaker(context.Background(), "Voice PE Спальня")
+	require.NoError(t, err)
+	require.Equal(t, "assist_satellite.voice_pe", got)
+}
+
+func TestResolveSpeaker_MediaPlayerWinsOnNameClash(t *testing.T) {
+	var calls atomic.Int32
+	c := New(newStatesServer(t, &calls).URL, "secret-token")
+
+	got, err := c.ResolveSpeaker(context.Background(), "Общая")
+	require.NoError(t, err)
+	require.Equal(t, "media_player.shared", got)
+}
+
+func TestResolveSpeaker_IgnoresOtherDomainsAndFetchesOnce(t *testing.T) {
+	var calls atomic.Int32
+	c := New(newStatesServer(t, &calls).URL, "secret-token")
+
+	_, err := c.ResolveSpeaker(context.Background(), "Кухня")
 	require.Error(t, err)
-	require.Contains(t, err.Error(), "invalid entity")
+	_, _ = c.ResolveSpeaker(context.Background(), "Станция Мини 3 Про")
+
+	require.Equal(t, int32(1), calls.Load(), "states are fetched once and cached")
 }
 
-func TestAliceState_ReturnsAliceStateAttribute(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		require.Equal(t, "/api/states/media_player.kitchen", r.URL.Path)
-		_ = json.NewEncoder(w).Encode(map[string]any{
-			"state":      "paused", // the top-level media_player state -- must be ignored
-			"attributes": map[string]any{"alice_state": "NONE"},
-		})
+func TestResolveSpeaker_HTTPErrorIsRetriedNextCall(t *testing.T) {
+	var calls atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		if calls.Add(1) == 1 {
+			http.Error(w, "boom", http.StatusInternalServerError)
+			return
+		}
+		_, _ = w.Write([]byte(statesJSON))
 	}))
 	defer server.Close()
+	c := New(server.URL, "t")
 
-	c := New(server.URL, "token")
-	state, err := c.AliceState(context.Background(), "media_player.kitchen")
+	_, err := c.ResolveSpeaker(context.Background(), "Общая")
+	require.Error(t, err)
+
+	got, err := c.ResolveSpeaker(context.Background(), "Общая")
 	require.NoError(t, err)
-	require.Equal(t, "NONE", state)
+	require.Equal(t, "media_player.shared", got)
 }

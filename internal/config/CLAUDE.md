@@ -69,9 +69,7 @@ for `openai_compat`), via the identical `keyrotation` package.
 `keyrotation.Banlist` shared across every call a provider instance makes —
 `RotationConfig.QuotaBanMinutes`/`OverloadBanMinutes` (default 30 min
 each), `OverloadTimeoutSeconds` (default 10s) tune this, and it applies
-identically to `gemini_tts` (`internal/tts/gemini.go`,
-`GeminiTTSConfig`'s own matching fields) despite that provider using a
-separate config struct. This is what lets a deployment order a free-tier
+identically to the speech keys in the separate `miranda-tts` service. This is what lets a deployment order a free-tier
 key before a paid one and have Miranda fail over automatically once the
 free key is exhausted or looks overloaded, instead of re-discovering the
 same failure from scratch on every call — banning persists ACROSS separate

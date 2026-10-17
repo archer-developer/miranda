@@ -26,7 +26,7 @@ server:
   # Only these routes consult it. Everything else authenticates itself:
   # the Telegram webhook checks its own X-Telegram-Bot-Api-Secret-Token, the
   # OAuth callback validates the flow's state parameter, /healthz is
-  # deliberately open, /tts-audio and /files serve clients that cannot send
+  # deliberately open, /files serves clients that cannot send
   # a header, and the web UI at "/" uses session cookies. Browser calls
   # satisfy this via the session cookie too, so turning it on only affects
   # the HA integration and any curl/scripts.
@@ -57,10 +57,6 @@ server:
 storage:
   sqlite_path: "./data/miranda.db"
   memory_dir: "./data/memory"
-  # Where gemini_tts's content-addressed, permanent (no TTL) rendered-audio
-  # cache lives, and what GET /tts-audio/{key}.{ext} serves out of. Only
-  # relevant if tts.gemini_tts is enabled.
-  tts_cache_dir: "./data/storage"
   # Separate small SQLite file for passkey credentials (see webauthn:
   # below) — kept apart so wiping/backing up dialog history never touches
   # registered passkeys, and vice versa. Only used if webauthn.enabled.
@@ -379,6 +375,13 @@ mcp:
       url: "http://homeassistant.local:8123/api/mcp"
       token_env: "HA_MCP_TOKEN" # Home Assistant Long-Lived Access Token
       enabled: true
+    # Text-to-speech for non-Assist-pipeline replies (see the tts: section
+    # below). Its own speak/stop tools are never shown to the model — the
+    # speak_reply / stop_speech tools wrap them — so no lazy/description here.
+    - name: miranda-tts
+      url: "http://192.168.1.94:8794/mcp"
+      token_env: "MIRANDA_TTS_MCP_TOKEN"
+      enabled: true
     - name: code_exec_sandbox
       url: "http://127.0.0.1:8788/mcp"
       token_env: "SANDBOX_MCP_TOKEN"
@@ -474,60 +477,30 @@ file_upload:
   download_record_ttl_hours: 720
 
 tts:
-  # yandex_station_text (Yandex Station's own built-in voice — the default,
-  # zero external dependencies) or gemini_tts (renders audio via Gemini's
-  # API and plays it back through the same station as a fetched file — see
-  # gemini_tts: below). Dispatch is asynchronous either way: replies are
-  # enqueued onto a background player and never block the turn on synthesis
-  # or physical playback (see README).
-  primary: yandex_station_text
-  # Friendly name (not entity_id) of the media_player that receives TTS
-  # output when speak_reply's optional device argument isn't given — resolved
-  # to an entity_id via the HA REST API at runtime. Leave empty if you only
-  # ever have one entity in yandex_station.entities below.
+  # Spoken output is owned by the miranda-tts service (declared under mcp:
+  # servers above — see github.com/archer-developer/miranda-tts). It does two
+  # things, and neither is configured here:
+  #   * Home Assistant Assist-pipeline replies (source ha_assist) are voiced
+  #     by the pipeline's own TTS engine — add miranda-tts's Wyoming port as
+  #     a "Wyoming Protocol" integration in HA and select the resulting
+  #     entity as the pipeline's text-to-speech engine (see README). Miranda
+  #     only returns the reply text; it never speaks ha_assist turns itself.
+  #   * Every other source (Telegram, web UI, CLI, scheduled reminders) is
+  #     silent unless the model calls speak_reply; that tool asks
+  #     miranda-tts to play the text on the speaker resolved below.
+  #
+  # Friendly name (not entity_id) of the speaker — a media_player such as a
+  # Yandex Station, or an assist_satellite such as a Home Assistant Voice PE —
+  # that receives speech when speak_reply's optional device argument isn't
+  # given. Resolved to an entity_id via the HA REST API (HA_BASE_URL /
+  # HA_TOKEN) at runtime. Also the target of spoken reminders.
   default_device: ""
-  yandex_station:
-    entities: [] # media_player.* entity ids of your Yandex Stations
-    chunk_max_chars: 100 # Yandex Station's real-world text limit, even locally
-    idle_poll_interval_ms: 300
-    # Max time to wait, after play_media, for the entity to actually leave
-    # "idle" before giving up on that wait and moving on. Needed because the
-    # entity briefly still reports the *previous* idle state right after
-    # play_media returns (synthesis + station wake-up latency) — without
-    # this two-phase wait, the dispatcher could mistake that stale "idle"
-    # for "already finished" and fire the next chunk mid-utterance.
-    playback_start_timeout_ms: 3000
-  # Retried, with the same text, if primary's Speak reports its quota
-  # exhausted (gemini_tts exhausting every configured API key, most
-  # notably) — so the user still hears *something* instead of silence.
-  # Equal to primary (the default) disables the fallback path.
-  fallback: yandex_station_text
-  gemini_tts:
-    # Opt-in: needs real API keys and its own quota/cost tradeoffs, unlike
-    # the always-available yandex_station_text.
-    enabled: false
-    # Environment variable names, each holding one Gemini API key (never the
-    # keys themselves — see .env.example). Listing several lets Miranda
-    # rotate across them when one hits its quota (see README).
-    api_key_envs: ["GEMINI_API_KEY_1", "GEMINI_API_KEY_2"]
-    model: "gemini-3.1-flash-tts-preview"
-    voice: "Kore" # one of Gemini's prebuilt voice names
-    # "wav" (a bare RIFF header, no dependency) or "mp3" (via shine-mp3, pure
-    # Go). Whether a real Yandex Station accepts WAV over play_media's URL
-    # playback isn't verified against real hardware yet — try "mp3" if WAV
-    # doesn't play.
-    audio_format: "wav"
-    # Where the Yandex Station can reach Miranda's own GET /tts-audio/ route
-    # — e.g. Miranda's LAN address, or a reverse-proxied hostname.
-    public_base_url: "http://192.168.1.50:8787"
-    chunk_max_chars: 200
-  # Lets the model call speak_reply to dispatch this turn's reply to
-  # tts.primary even when the request didn't arrive via ha_assist, when the
-  # user explicitly asks to hear the answer read aloud.
+  # Lets the model call speak_reply to read an answer aloud on a non-
+  # ha_assist source, when the user explicitly asks to hear it. Needs the
+  # miranda-tts MCP server to be connected.
   speak_reply_tool: true
-  # Lets the model call stop_speech to interrupt whatever is currently
-  # speaking/queued, e.g. when the user explicitly asks Miranda to stop
-  # talking mid-reply.
+  # Lets the model call stop_speech to interrupt speech started by
+  # speak_reply, e.g. when the user asks Miranda to stop talking mid-reply.
   stop_speech_tool: true
 
 web_ui:

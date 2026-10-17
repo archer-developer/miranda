@@ -81,6 +81,15 @@ func (f *FakeClient) WithListToolsBlockingOn(unblock <-chan struct{}) *FakeClien
 	return f
 }
 
+// CallsSnapshot returns a copy of every call received so far, safe to read
+// while the code under test is still calling the FakeClient from another
+// goroutine (the bare Calls field is not).
+func (f *FakeClient) CallsSnapshot() []Call {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]Call(nil), f.Calls...)
+}
+
 // Name implements Client.
 func (f *FakeClient) Name() string { return f.name }
 

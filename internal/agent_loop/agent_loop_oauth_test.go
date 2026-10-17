@@ -98,11 +98,11 @@ func newTestOrchestratorWithOAuth(t *testing.T, provider *llmtest.FakeProvider, 
 	require.NoError(t, err)
 
 	o := NewOrchestrator(
-		r, mcp.NewManager(nil), h, mem, nil, hub.New(100, nil), registry,
+		r, mcp.NewManager(nil), h, mem, hub.New(100, nil), registry,
 		config.AgentConfig{},
 		config.MemoryConfig{},
 		config.TTSConfig{},
-		100, "debug",
+		"debug",
 	)
 	o.SetTelegram(sender, config.TelegramConfig{SendMessageTool: true})
 

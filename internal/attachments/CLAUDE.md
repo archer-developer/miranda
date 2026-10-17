@@ -28,7 +28,7 @@ which is what the current design does. See
   get a URI in case a tool needs the file itself).
 - `GET /files/{id}` (`handleFilesServe`) is **unauthenticated** — the id's
   randomness plus the store's TTL is the security boundary, same design
-  as `GET /tts-audio/{filename}` for TTS audio.
+  as the unauthenticated audio route `miranda-tts` serves to media players.
 - `cmd/miranda` refuses to start with file upload enabled and no
   `public_base_url` set.
 

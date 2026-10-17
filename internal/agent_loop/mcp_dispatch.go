@@ -17,28 +17,10 @@ import (
 // one of Miranda's own built-in tools or an internal/tools.Tool (see
 // o.webTools) ends up here, resolved against the MCP tool manager. Kept
 // separate from executeTool's builtin if-chain since this half is about one
-// concern — coordinating with TTS, injecting per-server arguments, routing
+// concern — injecting per-server arguments, routing
 // the call, and staging any file the result references — rather than
 // dispatching by tool name.
 func (o *Orchestrator) executeMCPTool(ctx context.Context, userID, conversationID string, tc llm.ToolCall, control *turnControl) string {
-	// For alice MCP tool calls that carry a "device" argument (the target
-	// speaker's friendly name), coordinate with the TTS Player before firing:
-	// drain any queued TTS first (WaitIdle), then confirm the physical station
-	// is idle via alice_state polling (WaitEntityIdle). This prevents a model
-	// that batches speak_reply + an alice command from having the alice command
-	// interrupt the TTS mid-utterance. Both steps are best-effort: errors are
-	// published to the hub but never abort the tool call.
-	if o.tts != nil && o.speakerHA != nil {
-		if device := aliceToolDevice(tc.Arguments); device != "" {
-			o.tts.WaitIdle(ctx)
-			if entityID, err := o.speakerHA.ResolveMediaPlayer(ctx, device); err == nil {
-				if err := o.tts.WaitEntityIdle(ctx, entityID); err != nil && ctx.Err() == nil {
-					o.hub.Publish(hub.Event{Source: "error", Message: "speaker coordination: " + err.Error()})
-				}
-			}
-		}
-	}
-
 	// Build the wire payload as a local variable, never overwriting
 	// tc.Arguments itself — runAgentLoop already called
 	// recordAssistantToolCallMessage with the model's original, unmutated
@@ -224,20 +206,6 @@ func waitForUserSession(ctx context.Context, mgr *mcp.Manager, name, userID stri
 		case <-time.After(200 * time.Millisecond):
 		}
 	}
-}
-
-// aliceToolDevice extracts the "device" string field from a tool call's JSON
-// arguments, returning "" if the field is absent, not a string, or the JSON
-// is malformed. Used by executeTool to detect alice MCP tool calls that
-// target a speaker by friendly name.
-func aliceToolDevice(args string) string {
-	var m struct {
-		Device string `json:"device"`
-	}
-	if err := json.Unmarshal([]byte(args), &m); err != nil {
-		return ""
-	}
-	return m.Device
 }
 
 // defaultEncryptionKeyArgName is the tool-call argument name used to strip

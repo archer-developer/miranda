@@ -107,7 +107,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 // SetUploadHandler wires the optional file routes in when file_upload is
-// enabled, mirroring SetTTSAudioHandler's post-construction style for
+// enabled, mirroring SetTelegramWebhook's post-construction style for
 // optional routes. maxBytes caps the per-file read limit
 // (config.FileUploadConfig.MaxFileSizeBytes) on POST /api/upload only — a
 // download's own remote size limit (e.g. the sandbox's
@@ -137,27 +137,6 @@ func (s *Server) SetUploadHandler(maxBytes int64) {
 	s.mux.HandleFunc("POST /api/upload", s.handleUpload)
 	s.mux.HandleFunc("GET /files/{id}", s.handleFilesServe)
 	s.mux.HandleFunc("GET /api/files/{file_id}", s.handleDownload)
-}
-
-// SetTTSAudioHandler wires the optional GET /tts-audio/{filename} route in,
-// mirroring SetTelegramWebhook's post-construction style for an optional
-// dependency — no existing NewServer call site has to change to pass one
-// more nil. h is a *tts.HTTPHandler (accepted as the http.Handler interface
-// to avoid an import cycle risk between internal/httpapi and internal/tts;
-// none exists today, but this keeps the dependency direction the same as
-// every other optional-feature setter here). A nil h is a no-op — that's
-// the case where TTS dispatch itself is disabled (no HA_BASE_URL) or
-// gemini_tts was never configured, so nothing ever serves synthesized
-// audio out of config.StorageConfig.TTSCacheDir.
-//
-// The route pattern captures the whole "{key}.{ext}" filename as one
-// wildcard, not two: net/http's ServeMux only supports one wildcard per
-// path segment, so tts.HTTPHandler.ServeHTTP splits key/ext itself.
-func (s *Server) SetTTSAudioHandler(h http.Handler) {
-	if h == nil {
-		return
-	}
-	s.mux.Handle("GET /tts-audio/{filename}", h)
 }
 
 // handleHealthz is an unauthenticated liveness check — used by the Home

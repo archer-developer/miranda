@@ -8,6 +8,7 @@ import (
 
 	llm "github.com/archer-developer/miranda-llm"
 	"github.com/archer-developer/miranda/internal/hub"
+	"github.com/archer-developer/miranda/internal/users"
 )
 
 // availableTools combines every connected MCP server's tools with the
@@ -134,10 +135,16 @@ func (o *Orchestrator) availableTools(ctx context.Context, userID string, contro
 		})
 	}
 
-	if o.ttsCfg.SpeakReplyTool {
+	// Spoken replies are offered only where nothing else voices them: an
+	// ha_assist turn is spoken by the Assist pipeline's own TTS engine, so a
+	// model-initiated speak_reply there would double-voice the answer.
+	// Delegated to miranda-tts, so both tools need that server connected.
+	speechTools := control.source != users.SourceHAAssist && o.ttsAvailable()
+
+	if speechTools && o.ttsCfg.SpeakReplyTool {
 		add(llm.ToolDef{
 			Name: speakReplyToolName,
-			Description: "Speak text out loud through the physical speaker, even though this request didn't arrive " +
+			Description: "Speak text out loud through a physical speaker, even though this request didn't arrive " +
 				"via the voice pipeline — use only when the user's own message explicitly asks to hear something " +
 				"read aloud (e.g. \"озвучь это\", \"расскажи голосом\", \"скажи вслух\", \"read that out loud\"). Never call this " +
 				"on your own initiative just because you judge the content important, urgent, or worth emphasizing " +
@@ -151,7 +158,7 @@ func (o *Orchestrator) availableTools(ctx context.Context, userID string, contro
 					"text": map[string]any{"type": "string", "description": "the text to speak aloud"},
 					"device": map[string]any{
 						"type":        "string",
-						"description": "friendly name of the speaker to use (e.g. \"Станция Мини 3 Про\") — omit to use the default device",
+						"description": "friendly name of the speaker (a media player or voice satellite, e.g. \"Станция Мини 3 Про\") — omit to use the default device",
 					},
 				},
 				"required": []string{"text"},
@@ -159,12 +166,12 @@ func (o *Orchestrator) availableTools(ctx context.Context, userID string, contro
 		})
 	}
 
-	if o.tts != nil && o.ttsCfg.StopSpeechTool {
+	if speechTools && o.ttsCfg.StopSpeechTool {
 		add(llm.ToolDef{
 			Name: stopSpeechToolName,
 			Description: "Stop speaking immediately — use when the user explicitly asks Miranda to stop talking " +
-				"(e.g. \"хватит\", \"замолчи\", \"stop talking\") — clears anything still queued and silences " +
-				"whatever is currently playing on the physical speaker.",
+				"(e.g. \"хватит\", \"замолчи\", \"stop talking\") — interrupts speech started by speak_reply on the " +
+				"physical speaker.",
 			Parameters: map[string]any{"type": "object", "properties": map[string]any{}},
 		})
 	}
@@ -378,7 +385,11 @@ func (o *Orchestrator) availableTools(ctx context.Context, userID string, contro
 	// needs to be in skip.
 	var pending []string
 	groupDescriptions := make(map[string]string, len(o.lazyServerDescriptions)+1)
-	skip := make(map[string]bool, len(o.lazyServerDescriptions))
+	skip := make(map[string]bool, len(o.lazyServerDescriptions)+1)
+	// miranda-tts's own speak/stop tools are never offered to the model
+	// directly — speak_reply/stop_speech wrap them (resolving device names to
+	// entity_ids, staying fire-and-forget, and staying off ha_assist turns).
+	skip[ttsServerName] = true
 	for name, desc := range o.lazyServerDescriptions {
 		groupDescriptions[name] = desc
 		skip[name] = true

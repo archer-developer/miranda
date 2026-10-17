@@ -14,15 +14,15 @@ const WebUISource = "web_ui"
 // TurnTimeout bounds one full agent turn: LLM generation and tool calls,
 // which for a turn that calls several tools (or escalates to a slower
 // provider) can legitimately take well past what a browser tab, VPN link,
-// or reverse proxy will hold a connection open for. TTS dispatch itself no
-// longer contributes to this: Dispatcher.Speak only enqueues text onto a
-// background Player and returns immediately (see internal/tts/player.go) —
-// synthesis and the physical speaker's actual playback duration happen
-// entirely off this turn's own goroutine. DetachedTurnContext below is what
-// makes TurnTimeout the thing that bounds a turn instead of the caller's
-// connection: once a reply may already have been enqueued for TTS or sent
-// to Telegram, it must still get recorded to history even if the original
-// HTTP/webhook connection drops first.
+// or reverse proxy will hold a connection open for. Speech does not
+// contribute to this: speak_reply hands the text to miranda-tts in a
+// goroutine and returns immediately (see speak.go) — synthesis and the
+// physical speaker's playback duration happen entirely off this turn's own
+// goroutine. DetachedTurnContext below is what makes TurnTimeout the thing
+// that bounds a turn instead of the caller's connection: once a reply may
+// already have been handed to miranda-tts or sent to Telegram, it must still
+// get recorded to history even if the original HTTP/webhook connection
+// drops first.
 const TurnTimeout = 5 * time.Minute
 
 // DetachedTurnContext derives a context for one Orchestrator.Handle call

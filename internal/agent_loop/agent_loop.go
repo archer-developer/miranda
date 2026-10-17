@@ -7,10 +7,9 @@ import (
 
 	llm "github.com/archer-developer/miranda-llm"
 	"github.com/archer-developer/miranda-llm/llmtrace/anomaly"
+	"github.com/archer-developer/miranda/internal/chunk"
 	"github.com/archer-developer/miranda/internal/hub"
 	"github.com/archer-developer/miranda/internal/replyformat"
-	"github.com/archer-developer/miranda/internal/tts"
-	"github.com/archer-developer/miranda/internal/users"
 )
 
 // turnControl lets a tool call executed mid-agent-loop (end_conversation,
@@ -19,6 +18,10 @@ import (
 // action must wait until after the final assistant reply is recorded (and,
 // via TTS, spoken), or that write would be orphaned/lost.
 type turnControl struct {
+	// source is the request source of this turn (users.SourceHAAssist, ...);
+	// availableTools uses it to withhold speak_reply/stop_speech from
+	// ha_assist turns, which the Assist pipeline already voices.
+	source          string
 	endRequested    bool
 	forgetRequested bool
 	// restoreConversationID is set by executeTool when the model calls
@@ -110,7 +113,7 @@ func (o *Orchestrator) runAgentLoop(ctx context.Context, userID, conversationID,
 	var providerUsed string
 
 	for i := 0; i < maxToolIterations; i++ {
-		text, toolCalls, err := o.streamOneTurn(ctx, source, messages, tools, &providerUsed)
+		text, toolCalls, err := o.streamOneTurn(ctx, messages, tools, &providerUsed)
 		if err != nil {
 			outcome.IterationCount = i + 1
 			outcome.TimedOut = errors.Is(err, context.DeadlineExceeded)
@@ -182,127 +185,70 @@ func (o *Orchestrator) runAgentLoop(ctx context.Context, userID, conversationID,
 	return "", "", fmt.Errorf("orchestrator: exceeded %d tool-call iterations without a final reply", maxToolIterations)
 }
 
+// publishChunkMaxChars bounds one assistant-text chunk published to the hub
+// (chat/log visibility) while a reply streams in.
+const publishChunkMaxChars = 200
+
 // streamOneTurn consumes one router stream: text deltas are pushed through a
-// tts.Accumulator so complete sentences get spoken as soon as they're
-// available, and tool calls are collected for the caller to execute.
-// providerUsed is read before the call to pin the request to whichever
-// provider answered the previous iteration of this same agent loop (see
-// runAgentLoop and router.ChatPinned) — "" on the loop's first iteration,
-// which is a no-op and behaves exactly like an unpinned router.Chat.
+// chunk.Accumulator so complete sentences reach the hub (live chat/log
+// view) as soon as they're available, and tool calls are collected for the
+// caller to execute. providerUsed is read before the call to pin the request
+// to whichever provider answered the previous iteration of this same agent
+// loop (see runAgentLoop and router.ChatPinned) — "" on the loop's first
+// iteration, which is a no-op and behaves exactly like an unpinned
+// router.Chat.
 //
-// Only ha_assist gets its streamed text spoken live here — that's the one
-// channel where the model's plain reply text is itself the thing to say out
-// loud. Every other source stays silent on this path no matter what the
-// model's text says; the only way those sources ever reach the Yandex
-// Station is the model explicitly calling speak_reply with the text to
-// speak (see executeTool) — a real tool call with a real argument, not a
-// flag inferred from *which* turn happened to contain the model's answer.
-// That sidesteps an entire class of bugs an earlier version of this code
-// had: content blocks stream in the order the model produced them (text,
-// then tool_use), so "speak whatever text this turn already streamed"
-// requires guessing, after the fact, whether a turn's text was the answer
-// or just a throwaway post-tool-call remark — get that guess wrong and the
-// same text can end up spoken twice. Passing the text as the tool's own
-// argument removes the guess entirely.
-func (o *Orchestrator) streamOneTurn(ctx context.Context, source string, messages []llm.Message, tools []llm.ToolDef, providerUsed *string) (string, []llm.ToolCall, error) {
+// Nothing is spoken from here, for any source. An ha_assist reply is voiced
+// by Home Assistant's Assist pipeline (its TTS engine is miranda-tts over
+// Wyoming) from the text this turn returns to conversation.py; every other
+// source stays silent unless the model explicitly calls speak_reply with the
+// text to speak (see executeTool) — a real tool call with a real argument,
+// not a flag inferred from *which* turn happened to contain the model's
+// answer. That sidesteps an entire class of bugs an earlier version of this
+// code had: content blocks stream in the order the model produced them
+// (text, then tool_use), so "speak whatever text this turn already
+// streamed" requires guessing, after the fact, whether a turn's text was the
+// answer or just a throwaway post-tool-call remark — get that guess wrong
+// and the same text can end up spoken twice. Passing the text as the tool's
+// own argument removes the guess entirely.
+func (o *Orchestrator) streamOneTurn(ctx context.Context, messages []llm.Message, tools []llm.ToolDef, providerUsed *string) (string, []llm.ToolCall, error) {
 	stream, err := o.router.ChatPinned(ctx, llm.ChatRequest{Messages: messages, Tools: tools}, *providerUsed, func(name string) { *providerUsed = name })
 	if err != nil {
 		return "", nil, fmt.Errorf("orchestrator: chat: %w", err)
 	}
 
-	speakLive := source == users.SourceHAAssist
-
 	var fullText string
 	var toolCalls []llm.ToolCall
-	acc := tts.NewAccumulator(o.chunkMaxChars)
+	acc := chunk.NewAccumulator(publishChunkMaxChars)
 
-	for chunk := range stream {
-		if chunk.Err != nil {
-			return "", nil, fmt.Errorf("orchestrator: stream: %w", chunk.Err)
+	for part := range stream {
+		if part.Err != nil {
+			return "", nil, fmt.Errorf("orchestrator: stream: %w", part.Err)
 		}
-		if chunk.TextDelta != "" {
-			fullText += chunk.TextDelta
-			ready := acc.Push(chunk.TextDelta)
-			if speakLive {
-				o.speakChunks(ctx, ready)
-			} else {
-				o.publishChunks(ready)
-			}
+		if part.TextDelta != "" {
+			fullText += part.TextDelta
+			o.publishChunks(acc.Push(part.TextDelta))
 		}
-		if chunk.ToolCall != nil {
-			toolCalls = append(toolCalls, *chunk.ToolCall)
+		if part.ToolCall != nil {
+			toolCalls = append(toolCalls, *part.ToolCall)
 		}
 	}
-	final := acc.Flush()
-	if speakLive {
-		o.speakChunks(ctx, final)
-	} else {
-		o.publishChunks(final)
-	}
+	o.publishChunks(acc.Flush())
 
 	return fullText, toolCalls, nil
 }
 
 // publishChunks puts each chunk on the hub as an "assistant" event (chat/log
-// visibility) without any TTS decision — used for every source other than
-// ha_assist; see streamOneTurn.
+// visibility).
 func (o *Orchestrator) publishChunks(chunks []string) {
-	for _, chunk := range chunks {
-		o.hub.Publish(hub.Event{Source: "assistant", Message: chunk})
-	}
-}
-
-// speakChunks publishes each chunk (see publishChunks) and dispatches it to
-// TTS — only ever called for ha_assist turns (see streamOneTurn), the one
-// channel where the reply needs to come out of a physical speaker, separate
-// from — and in addition to — the text reply HA's own pipeline may speak
-// (see README).
-func (o *Orchestrator) speakChunks(ctx context.Context, chunks []string) {
-	o.publishChunks(chunks)
-	for _, chunk := range chunks {
-		o.speakText(ctx, voiceText(chunk))
+	for _, c := range chunks {
+		o.hub.Publish(hub.Event{Source: "assistant", Message: c})
 	}
 }
 
 // voiceText strips markdown-lite markup down to plain spoken text (see
-// replyformat.ToVoiceText). Applied independently per already-chunked
-// piece of text, not buffered and re-parsed across a whole streamed
-// reply — buffering would kill live-stream responsiveness. A bold/link
-// span that happens to straddle two TTS chunk boundaries can therefore
-// degrade to a stray literal "**"/"_" character rather than being stripped
-// cleanly; acceptable given voice replies are already capped at ~100 chars
-// by the system prompt.
+// replyformat.ToVoiceText) — applied to the reply returned to Home
+// Assistant's pipeline, to speak_reply's argument and to spoken reminders.
 func voiceText(text string) string {
 	return replyformat.ToVoiceText(replyformat.Parse(text))
-}
-
-// speakText enqueues one already-voice-approved piece of text onto
-// tts.primary's background Player (via Dispatcher.Speak) — it returns
-// immediately without waiting for synthesis or physical playback, and any
-// eventual failure is published to the hub by the Player itself (Source:
-// "tts"), not returned here, so a broken speaker shouldn't stop the
-// assistant from answering.
-func (o *Orchestrator) speakText(ctx context.Context, text string) {
-	if o.tts == nil || text == "" {
-		return
-	}
-	o.tts.Speak(ctx, text)
-}
-
-// speakTextChecked is like speakText, but returns an error when the TTS
-// device couldn't be resolved (see Dispatcher.SpeakChecked) — the one class
-// of TTS failure detectable before playback is even enqueued. Physical
-// synthesis/playback still happens asynchronously and its own failures
-// remain undetectable here, same as speakText. Used by deliverReminder,
-// which — unlike a live turn — has no other way to notice a voice-origin
-// reminder never had anywhere to go and needs to report that honestly
-// instead of always recording StatusSent.
-func (o *Orchestrator) speakTextChecked(ctx context.Context, text string) error {
-	if o.tts == nil {
-		return fmt.Errorf("tts not configured")
-	}
-	if text == "" {
-		return nil
-	}
-	return o.tts.SpeakChecked(ctx, text)
 }

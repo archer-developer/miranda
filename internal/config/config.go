@@ -159,14 +159,6 @@ type StorageConfig struct {
 	// on (no config toggle — see internal/keyring), so this path is always
 	// in use.
 	KeyringSQLitePath string `yaml:"keyring_sqlite_path"`
-	// TTSCacheDir is where the gemini_tts provider's content-addressed,
-	// permanent (no TTL/expiry — see internal/tts/cache.go) rendered-audio
-	// cache lives; it's also the directory tts.HTTPHandler serves
-	// GET /tts-audio/{key}.{ext} out of. A cache hit skips calling Gemini's
-	// API entirely, which is the main reason this exists — quota, not just
-	// latency. Only relevant when gemini_tts is the configured primary or
-	// fallback TTS provider.
-	TTSCacheDir string `yaml:"tts_cache_dir"`
 	// OAuthSQLitePath is a separate SQLite file for encrypted OAuth2
 	// access/refresh tokens (internal/oauth2) — kept apart from other stores
 	// for the same isolation reasoning as KeyringSQLitePath: losing it is
@@ -332,7 +324,7 @@ type ScheduleConfig struct {
 // timestamped tar.gz archive that's copied into Dir atomically, with the
 // oldest archives pruned once more than RetentionCount accumulate.
 // Deliberately scoped to the SQLite stores only: MemoryDir's markdown and
-// AvatarsDir/TTSCacheDir are not covered, since VACUUM INTO only applies
+// AvatarsDir is not covered, since VACUUM INTO only applies
 // to a SQLite database file.
 //
 // Opt-in (Enabled defaults false), same posture as WebAuthn/Telegram/OAuth:
@@ -417,11 +409,8 @@ type FileUploadConfig struct {
 	// built from: Miranda stages an uploaded attachment's bytes locally
 	// (internal/attachments.Store) and hands the model a URI under this
 	// base, rather than pushing bytes anywhere itself — whichever tool the
-	// model calls with that URI is responsible for fetching it. Mirrors
-	// TTSConfig's gemini_tts.PublicBaseURL, which solves the identical
-	// problem (a LAN device fetching a Miranda-hosted resource by URL) for
-	// synthesized audio — required (checked at startup) whenever Enabled is
-	// true, the same way gemini_tts checks it at the point of use.
+	// model calls with that URI is responsible for fetching it. Required
+	// (checked at startup) whenever Enabled is true.
 	PublicBaseURL string `yaml:"public_base_url"`
 }
 
@@ -851,7 +840,7 @@ type OAuthConfig struct {
 	// PublicBaseURL is the public HTTPS origin the OAuth provider redirects
 	// the user's browser back to after consent — Miranda does not
 	// terminate TLS itself, front it with a reverse proxy (same posture as
-	// Telegram/FileUpload/GeminiTTS's own PublicBaseURL fields).
+	// Telegram/FileUpload's own PublicBaseURL fields).
 	PublicBaseURL string `yaml:"public_base_url"`
 	// CallbackPath is the path prefix the provider's own name is appended
 	// to, e.g. "/oauth/callback" -> "/oauth/callback/google_calendar".
@@ -990,125 +979,27 @@ type RedactConfig struct {
 	ExtraPatterns []string `yaml:"extra_patterns"`
 }
 
-// YandexStationConfig configures the Yandex Station-specific TTS parameters.
-type YandexStationConfig struct {
-	ChunkMaxChars      int `yaml:"chunk_max_chars"`
-	IdlePollIntervalMS int `yaml:"idle_poll_interval_ms"`
-	// PlaybackStartTimeoutMS bounds how long the dispatcher waits, after a
-	// play_media call, for the entity to actually leave "idle" before giving
-	// up and moving on to waiting for it to return to idle. See waitIdle in
-	// internal/tts/dispatcher.go for why this two-phase wait exists.
-	PlaybackStartTimeoutMS int `yaml:"playback_start_timeout_ms"`
-}
-
-// GeminiTTSConfig configures the optional gemini_tts provider — an
-// alternative to Yandex Station's own built-in voice, selected via
-// TTSConfig.Primary/Fallback ("gemini_tts"). See internal/tts/gemini.go for
-// the request/response shape this drives. Disabled by default: it needs
-// real API keys and has its own quota/cost tradeoffs a deployment has to
-// opt into deliberately, unlike the always-available yandex_station_text
-// provider.
-type GeminiTTSConfig struct {
-	Enabled bool `yaml:"enabled"`
-	// APIKeyEnvs lists environment variable names, each expected to hold one
-	// Gemini API key (never the keys themselves — same *_env convention as
-	// every other secret in this codebase). See
-	// internal/tts.geminiProvider's key-rotation doc comment for why more
-	// than one is useful: free-tier Gemini keys have a low per-key quota,
-	// and rotating across several multiplies the effective quota for a
-	// purely personal/household deployment.
-	APIKeyEnvs []string `yaml:"api_key_envs"`
-	// Model is the Gemini model id to call generateContent on, e.g.
-	// "gemini-2.5-flash-preview-tts".
-	Model string `yaml:"model"`
-	// Voice is one of Gemini's prebuilt voice names (the request's
-	// generationConfig.speechConfig.voiceConfig.prebuiltVoiceConfig.voiceName).
-	Voice string `yaml:"voice"`
-	// AudioFormat selects the container the raw PCM Gemini returns is
-	// wrapped in before being served to the Yandex Station: "wav" (a bare
-	// 44-byte RIFF/WAVE header, no new dependency) or "mp3" (encoded via
-	// github.com/braheezy/shine-mp3, pure Go, no cgo). Whether a real
-	// station's play_media URL playback actually accepts WAV isn't verified
-	// against real hardware yet — see README — so this is a one-line config
-	// change to try the other format, not a code change.
-	AudioFormat string `yaml:"audio_format"`
-	// PublicBaseURL is the base URL the Yandex Station can reach Miranda's
-	// own GET /tts-audio/ route through (e.g. "http://192.168.1.50:8787", or
-	// a reverse-proxied hostname) — combined with the cached file's name to
-	// build the URL handed to media_player.play_media.
-	PublicBaseURL string `yaml:"public_base_url"`
-	// ChunkMaxChars is this provider's sentence-boundary chunk size (see
-	// tts.Accumulator/Chunk) — larger than Yandex Station's own text limit,
-	// since Gemini renders a real audio file rather than being limited by
-	// whatever the station's own on-device TTS can swallow in one call.
-	ChunkMaxChars int `yaml:"chunk_max_chars"`
-	// RequestTimeoutSeconds bounds one HTTP call to Gemini's generateContent
-	// endpoint.
-	RequestTimeoutSeconds int `yaml:"request_timeout_seconds"`
-	// QuotaCooldownSeconds is how long to sleep before retrying the whole
-	// API key list again if every key hit a quota error in one pass — most
-	// free-tier Gemini quota windows are per-minute, so a short cooldown
-	// often recovers a key that failed moments ago.
-	QuotaCooldownSeconds int `yaml:"quota_cooldown_seconds"`
-	// MaxQuotaRetryCycles bounds how many times the whole key list is
-	// retried (with QuotaCooldownSeconds between passes) before giving up
-	// and returning tts.ErrQuotaExceeded.
-	MaxQuotaRetryCycles int `yaml:"max_quota_retry_cycles"`
-	// QuotaBanMinutes is how long a key that hit a quota error is skipped
-	// by every subsequent Speak call, not just retried within the current
-	// one — the mechanism behind ordering a free-tier key before a paid
-	// one and having Miranda fail over automatically once the free key is
-	// exhausted, instead of rediscovering the same 429 from scratch on
-	// every call.
-	QuotaBanMinutes int `yaml:"quota_ban_minutes"`
-	// OverloadBanMinutes is the same idea for a key that looks like it hit
-	// an overloaded backend (an explicit "overloaded" error, or a
-	// response slower than OverloadResponseTimeoutSeconds) — the mechanism
-	// behind switching to a paid key when the free tier is overloaded,
-	// instead of waiting out the full RequestTimeoutSeconds on it every
-	// time.
-	OverloadBanMinutes int `yaml:"overload_ban_minutes"`
-	// OverloadResponseTimeoutSeconds bounds how long one generateContent
-	// call is allowed to take before it's treated as "this key looks
-	// overloaded" (ban + try the next key) rather than waited out —
-	// shorter than RequestTimeoutSeconds, which remains the hard per-call
-	// cutoff.
-	OverloadResponseTimeoutSeconds int `yaml:"overload_response_timeout_seconds"`
-}
-
-// TTSConfig selects and configures the TTS channel(s).
+// TTSConfig configures how Miranda asks for speech on non-pipeline channels.
+// Synthesis and playback are owned by the miranda-tts service (declared as an
+// ordinary mcp.servers entry named "miranda-tts"); Miranda only decides
+// whether to speak and on which speaker. Replies to Home Assistant's Assist
+// pipeline are voiced by the pipeline's own TTS engine (miranda-tts over
+// Wyoming), not through anything configured here.
 type TTSConfig struct {
-	// DefaultDevice is the friendly name of the media_player entity that
-	// receives TTS output when no specific device is requested — e.g.
-	// "Станция Мини 3 Про". The dispatcher resolves this name to an
-	// entity_id via the HA REST API at runtime (see ha.Client.ResolveMediaPlayer).
-	// speak_reply's optional device argument overrides this per-call.
+	// DefaultDevice is the friendly name of the speaker (a media_player or
+	// assist_satellite entity) that receives speech when no specific device
+	// is requested — e.g. "Станция Мини 3 Про". Resolved to an entity_id via
+	// the HA REST API at runtime (see ha.Client.ResolveSpeaker); speak_reply's
+	// optional device argument overrides it per call.
 	DefaultDevice string `yaml:"default_device"`
-	// Primary is the TTS provider tried first for every Speak call:
-	// "yandex_station_text" (Yandex Station's own built-in voice, played via
-	// media_content_type "text" — the default) or "gemini_tts" (an external
-	// voice rendered by Gemini and played back through the same station as
-	// a fetched audio file — see GeminiTTSConfig).
-	Primary       string              `yaml:"primary"`
-	YandexStation YandexStationConfig `yaml:"yandex_station"`
-	// Fallback is the provider retried, with the same text, if Primary's
-	// Speak returns tts.ErrQuotaExceeded — e.g. gemini_tts exhausting every
-	// configured API key falls back to yandex_station_text so the user
-	// still hears *something* instead of silence. Equal to Primary (the
-	// default) or empty both disable the fallback path.
-	Fallback string `yaml:"fallback"`
-	// GeminiTTS configures the optional gemini_tts provider — only consulted
-	// when Primary or Fallback names it.
-	GeminiTTS GeminiTTSConfig `yaml:"gemini_tts"`
-	// SpeakReplyTool controls whether the speak_reply tool (see
-	// internal/httpapi) is offered to the model — it lets the model dispatch
-	// this turn's reply to the primary TTS channel even on a source other
-	// than ha_assist, when the user explicitly asks to hear the answer.
+	// SpeakReplyTool controls whether the speak_reply tool is offered to the
+	// model on sources other than ha_assist — it lets the model read an
+	// answer aloud when the user explicitly asks to hear it.
 	SpeakReplyTool bool `yaml:"speak_reply_tool"`
-	// StopSpeechTool controls whether the stop_speech tool (see
-	// internal/httpapi) is offered to the model — it lets the model
-	// interrupt whatever tts is currently speaking or has queued, e.g. when
-	// the user explicitly asks Miranda to stop talking mid-reply.
+	// StopSpeechTool controls whether the stop_speech tool is offered to the
+	// model on sources other than ha_assist — it lets the model interrupt
+	// speech started by speak_reply, e.g. when the user asks Miranda to stop
+	// talking mid-reply.
 	StopSpeechTool bool `yaml:"stop_speech_tool"`
 }
 
@@ -1179,7 +1070,6 @@ func Default() Config {
 			TelegramChatsPath:  "./data/telegram_chats.json",
 			ScheduleSQLitePath: "./data/schedule.db",
 			KeyringSQLitePath:  "./data/keyring.db",
-			TTSCacheDir:        "./data/storage",
 			OAuthSQLitePath:    "./data/oauth.db",
 			NotifySQLitePath:   "./data/notify.db",
 		},
@@ -1214,32 +1104,6 @@ func Default() Config {
 			WebFetch:  WebFetchToolConfig{Enabled: false},
 		},
 		TTS: TTSConfig{
-			// Opt-in gemini_tts is a new channel, not a default swap — this
-			// stays the always-available, zero-external-dependency provider.
-			Primary: "yandex_station_text",
-			YandexStation: YandexStationConfig{
-				ChunkMaxChars:          100,
-				IdlePollIntervalMS:     300,
-				PlaybackStartTimeoutMS: 3000,
-			},
-			// Equal to Primary by default, i.e. no active fallback until a
-			// deployment actually configures gemini_tts as Primary.
-			Fallback: "yandex_station_text",
-			GeminiTTS: GeminiTTSConfig{
-				Enabled: false,
-				// A bare 44-byte RIFF/WAVE header needs zero new
-				// dependencies; try "mp3" (via shine-mp3) if the real
-				// Yandex Station rejects WAV over play_media's URL
-				// playback.
-				AudioFormat:                    "wav",
-				ChunkMaxChars:                  200,
-				RequestTimeoutSeconds:          30,
-				QuotaCooldownSeconds:           5,
-				MaxQuotaRetryCycles:            3,
-				QuotaBanMinutes:                30,
-				OverloadBanMinutes:             30,
-				OverloadResponseTimeoutSeconds: 10,
-			},
 			SpeakReplyTool: true,
 			StopSpeechTool: true,
 		},
