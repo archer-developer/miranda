@@ -6,6 +6,7 @@ import (
 	"net/http/httptest"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 )
@@ -60,8 +61,9 @@ func TestResolveSpeaker_IgnoresOtherDomainsAndFetchesOnce(t *testing.T) {
 	_, err := c.ResolveSpeaker(context.Background(), "Кухня")
 	require.Error(t, err)
 	_, _ = c.ResolveSpeaker(context.Background(), "Станция Мини 3 Про")
+	_, _ = c.ResolveSpeaker(context.Background(), "Кухня")
 
-	require.Equal(t, int32(1), calls.Load(), "states are fetched once and cached")
+	require.Equal(t, int32(1), calls.Load(), "states are fetched once; a miss within the refresh interval does not refetch")
 }
 
 func TestResolveSpeaker_HTTPErrorIsRetriedNextCall(t *testing.T) {
@@ -82,4 +84,52 @@ func TestResolveSpeaker_HTTPErrorIsRetriedNextCall(t *testing.T) {
 	got, err := c.ResolveSpeaker(context.Background(), "Общая")
 	require.NoError(t, err)
 	require.Equal(t, "media_player.shared", got)
+}
+
+func TestResolveSpeaker_MissReloadsCacheAfterInterval(t *testing.T) {
+	var calls atomic.Int32
+	devices := `[{"entity_id":"media_player.station","attributes":{"friendly_name":"Станция"}}]`
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		calls.Add(1)
+		_, _ = w.Write([]byte(devices))
+	}))
+	defer server.Close()
+	c := New(server.URL, "t")
+	c.speakerRefreshInterval = time.Millisecond
+
+	_, err := c.ResolveSpeaker(context.Background(), "Новая")
+	require.Error(t, err)
+
+	// The device appears in HA later; no restart needed.
+	devices = `[{"entity_id":"assist_satellite.new","attributes":{"friendly_name":"Новая"}}]`
+	time.Sleep(5 * time.Millisecond)
+	got, err := c.ResolveSpeaker(context.Background(), "Новая")
+
+	require.NoError(t, err)
+	require.Equal(t, "assist_satellite.new", got)
+	require.Equal(t, int32(2), calls.Load())
+}
+
+func TestResolveSpeaker_FailedReloadKeepsOldCache(t *testing.T) {
+	var calls atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		if calls.Add(1) > 1 {
+			http.Error(w, "boom", http.StatusInternalServerError)
+			return
+		}
+		_, _ = w.Write([]byte(statesJSON))
+	}))
+	defer server.Close()
+	c := New(server.URL, "t")
+	c.speakerRefreshInterval = time.Millisecond
+
+	_, err := c.ResolveSpeaker(context.Background(), "Общая")
+	require.NoError(t, err)
+	time.Sleep(5 * time.Millisecond)
+	_, err = c.ResolveSpeaker(context.Background(), "Нет такой")
+	require.Error(t, err)
+
+	got, err := c.ResolveSpeaker(context.Background(), "Станция Мини 3 Про")
+	require.NoError(t, err)
+	require.Equal(t, "media_player.station", got)
 }

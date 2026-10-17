@@ -326,6 +326,16 @@ type Orchestrator struct {
 	// stop_speech knows which speakers to interrupt; guarded by speakingMu.
 	speakingMu sync.Mutex
 	speaking   map[string]int
+	// speakQueue holds speak jobs waiting behind the one running on the same
+	// entity_id, and speakRunning marks entities with a drain goroutine
+	// active, so utterances to one speaker play in order instead of
+	// interrupting each other (miranda-tts cuts off a running speak when a
+	// new one arrives on the same entity). lastSpoke records when each entity
+	// was last spoken on, so stop_speech still reaches playback that outlived
+	// its speak call. All guarded by speakingMu.
+	speakQueue   map[string][]speakJob
+	speakRunning map[string]bool
+	lastSpoke    map[string]time.Time
 	// keyring is set via SetKeyring; nil means executeTool never injects an
 	// encryption_key argument into any MCP tool call, regardless of
 	// mcpExtensions above — see docs/encryption.md.

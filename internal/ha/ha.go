@@ -34,9 +34,19 @@ type Client struct {
 	// RWMutex would only add complexity without measurable gain.
 	speakerCacheMu sync.Mutex
 	// speakerCache maps speaker friendly names to entity_ids, populated
-	// lazily on the first ResolveSpeaker call and never invalidated.
+	// lazily on the first ResolveSpeaker call and refreshed when a lookup
+	// misses (see speakerRefreshInterval).
 	speakerCache map[string]string
+	// speakerLoadedAt is when speakerCache was last filled successfully.
+	speakerLoadedAt time.Time
+	// speakerRefreshInterval is the minimum age of the cache before a miss
+	// triggers a reload; zero means speakerRefreshMinInterval.
+	speakerRefreshInterval time.Duration
 }
+
+// speakerRefreshMinInterval rate-limits cache reloads on a lookup miss, so a
+// misspelled device name can't make every call hit HA's /api/states.
+const speakerRefreshMinInterval = 30 * time.Second
 
 // New builds a Client against baseURL (e.g. "http://homeassistant.local:8123")
 // authenticating with a long-lived access token.
@@ -66,6 +76,14 @@ func (c *Client) ResolveSpeaker(ctx context.Context, friendlyName string) (strin
 	}
 
 	entityID, ok := c.speakerCache[friendlyName]
+	if !ok && time.Since(c.speakerLoadedAt) >= c.refreshInterval() {
+		// A device added after the first load (e.g. a new satellite) must not
+		// need a Miranda restart to be found. A failed reload keeps the old
+		// cache and falls through to the not-found error below.
+		if err := c.loadSpeakerCache(ctx); err == nil {
+			entityID, ok = c.speakerCache[friendlyName]
+		}
+	}
 	if !ok {
 		return "", fmt.Errorf("ha: no media_player or assist_satellite entity with friendly name %q", friendlyName)
 	}
@@ -120,5 +138,13 @@ func (c *Client) loadSpeakerCache(ctx context.Context) error {
 		}
 	}
 	c.speakerCache = cache
+	c.speakerLoadedAt = time.Now()
 	return nil
+}
+
+func (c *Client) refreshInterval() time.Duration {
+	if c.speakerRefreshInterval > 0 {
+		return c.speakerRefreshInterval
+	}
+	return speakerRefreshMinInterval
 }
