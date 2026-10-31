@@ -16,7 +16,7 @@
 // vendor/json-formatter-js/).
 import { t } from "../i18n.js";
 import { icon } from "../icons.js";
-import { on, replay, LLM_LOG_MAX_BUFFERED } from "../ws.js";
+import { on, replay, LLM_LOG_MAX_BUFFERED, APP_LOG_MAX_BUFFERED } from "../ws.js";
 import { buildTraceRow } from "./logs-trace-view.js";
 
 const TABS = [
@@ -55,15 +55,26 @@ function showEmptyState(message) {
   emptyEl.classList.remove("hidden");
 }
 
+/** Builds one plain-text app_log row (not yet attached to the DOM). */
+function buildLine(ev) {
+  const line = document.createElement("div");
+  line.className = "whitespace-pre-wrap break-words py-0.5 text-(--color-text-muted)";
+  line.textContent = ev.message;
+  return line;
+}
+
 function appendLine(ev) {
   if (ev.source !== activeSource) return;
   const stick = isNearBottom();
 
   emptyEl.classList.add("hidden");
-  const line = document.createElement("div");
-  line.className = "whitespace-pre-wrap break-words py-0.5 text-(--color-text-muted)";
-  line.textContent = ev.message;
-  paneEl.appendChild(line);
+  paneEl.appendChild(buildLine(ev));
+  // Drop the oldest rows past the cap (the empty-state placeholder is
+  // hidden but may still be a child, so only count/remove log rows).
+  while (paneEl.children.length > APP_LOG_MAX_BUFFERED + 1 && paneEl.firstElementChild) {
+    if (paneEl.firstElementChild === emptyEl) break;
+    paneEl.firstElementChild.remove();
+  }
 
   if (stick) paneEl.scrollTop = paneEl.scrollHeight;
 }
@@ -125,7 +136,12 @@ function renderActiveTab() {
     showEmptyState(t("logs_empty", "No log lines yet."));
   } else {
     emptyEl.classList.add("hidden");
-    for (const ev of lines) appendLine(ev);
+    // Build all rows off-DOM and attach once: appending (and measuring
+    // scroll position) per line forces a reflow each time, which is
+    // quadratic for a long replay.
+    const frag = document.createDocumentFragment();
+    for (const ev of lines.slice(-APP_LOG_MAX_BUFFERED)) frag.appendChild(buildLine(ev));
+    paneEl.appendChild(frag);
   }
   paneEl.scrollTop = paneEl.scrollHeight;
 }

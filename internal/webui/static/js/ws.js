@@ -25,13 +25,26 @@ const buffered = new Map(); // source -> event[] (everything seen so far, for la
 // applies the same cap to the rendered DOM list, so both stay in sync.
 export const LLM_LOG_MAX_BUFFERED = 100;
 
+// Same reasoning for the plain-text "app_log" feed: a tab left open for days
+// accumulates every line the server ever logged, and rendering that many
+// DOM rows freezes the page. logs.js trims the rendered list to this too.
+export const APP_LOG_MAX_BUFFERED = 500;
+
+// Fallback cap for every other source, so no feed can grow without bound.
+const DEFAULT_MAX_BUFFERED = 500;
+
+function maxBufferedFor(source) {
+  if (source === "llm_log") return LLM_LOG_MAX_BUFFERED;
+  if (source === "app_log") return APP_LOG_MAX_BUFFERED;
+  return DEFAULT_MAX_BUFFERED;
+}
+
 function dispatch(ev) {
   if (!buffered.has(ev.source)) buffered.set(ev.source, []);
   const arr = buffered.get(ev.source);
   arr.push(ev);
-  if (ev.source === "llm_log" && arr.length > LLM_LOG_MAX_BUFFERED) {
-    arr.splice(0, arr.length - LLM_LOG_MAX_BUFFERED);
-  }
+  const max = maxBufferedFor(ev.source);
+  if (arr.length > max) arr.splice(0, arr.length - max);
 
   const fns = listeners.get(ev.source);
   if (fns) for (const fn of fns) fn(ev);
