@@ -13,13 +13,14 @@ import (
 	"net"
 	"net/http"
 	"os/exec"
+	"slices"
 	"strings"
 	"sync"
 	"time"
 
 	llm "github.com/archer-developer/miranda-llm"
+	"github.com/archer-developer/miranda-llm/claudecode"
 	"github.com/archer-developer/miranda/internal/chunk"
-	"github.com/archer-developer/miranda/internal/claudecode"
 	"github.com/archer-developer/miranda/internal/config"
 	"github.com/google/uuid"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
@@ -254,10 +255,18 @@ func (e *claudeCodeEngine) runTurn(ctx context.Context, t engineTurn) (string, s
 
 	msg := claudecode.UserMessage{Text: composeClaudeCodeMessage(t, fresh)}
 	for _, p := range t.imageParts {
-		msg.Images = append(msg.Images, claudecode.Image{MIMEType: p.MIMEType, Base64: p.ImageBase64})
+		// processAttachments re-encodes images to JPEG, but sends the
+		// original when it can't decode it (e.g. image/heic) — a type the
+		// Messages API rejects, which would fail the whole turn. Drop it
+		// with a note instead, so the model can say it couldn't see it.
+		if !claudecode.SupportedAttachment(p.MIMEType) {
+			msg.Text += fmt.Sprintf("\n\n[Изображение в формате %s не передано: этот формат не поддерживается.]", p.MIMEType)
+			continue
+		}
+		msg.Attachments = append(msg.Attachments, claudecode.Attachment{MIMEType: p.MIMEType, Base64: p.ImageBase64})
 	}
 
-	tr := newCCTraceBuilder(t.stableSystem, msg.Text, tools)
+	tb := claudecode.NewTraceBuilder(e.tracer, claudeCodeProviderName, "mcp__"+mirandaMCPServerName+"__", t.stableSystem, msg, tools)
 	acc := chunk.NewAccumulator(publishChunkMaxChars)
 	res, err := sess.proc.Turn(ctx, msg, claudecode.Handler{
 		OnInit: func(names []string) {
@@ -265,26 +274,25 @@ func (e *claudeCodeEngine) runTurn(ctx context.Context, t engineTurn) (string, s
 			sess.initTools = names
 			sess.mu.Unlock()
 		},
-		OnTextDelta: func(d string) { e.o.publishChunks(acc.Push(d)) },
-		OnAssistant: func(_ string, b claudecode.ContentBlock) { tr.addResponse(b) },
-		OnToolResults: func(bs []claudecode.ContentBlock) {
-			tr.flush(ctx, e.tracer, nil)
-			tr.nextRequest(bs)
-		},
+		OnTextDelta:   func(d string) { e.o.publishChunks(acc.Push(d)) },
+		OnAssistant:   func(id string, b claudecode.ContentBlock) { tb.AddResponse(ctx, id, b) },
+		OnToolResults: tb.ToolResults,
 	})
 	e.o.publishChunks(acc.Flush())
 
 	t.outcome.IterationCount = res.NumTurns
+	tb.Flush(ctx, err)
 	if err != nil {
+		// No result event, so no num_turns: count the model calls the
+		// trace saw instead.
+		t.outcome.IterationCount = tb.Calls()
 		t.outcome.TimedOut = errors.Is(err, context.DeadlineExceeded)
-		tr.flush(ctx, e.tracer, err)
 		// A failed/cancelled turn leaves the process killed or in an
 		// unknown state — drop it; the next turn starts a fresh one and
 		// replays the conversation from history.
 		e.dropSession(t.userID, sess)
 		return "", "", fmt.Errorf("orchestrator: claude_code: %w", err)
 	}
-	tr.flush(ctx, e.tracer, nil)
 
 	switch {
 	case res.Subtype == "error_max_turns":
@@ -346,7 +354,7 @@ func (e *claudeCodeEngine) session(t engineTurn, tools []llm.ToolDef) (sess *ccS
 		MCPServers: map[string]claudecode.MCPServer{
 			mirandaMCPServerName: {Type: "http", URL: e.baseURL, Headers: map[string]string{"Authorization": "Bearer " + token}},
 		},
-		BuiltinTools:   e.cfg.BuiltinTools,
+		BuiltinTools:   builtinTools(e.cfg.BuiltinTools),
 		AllowedTools:   []string{"mcp__" + mirandaMCPServerName + "__*"},
 		MaxTurns:       e.cfg.MaxTurns,
 		AllowAPIKeyEnv: e.cfg.AllowAPIKeyEnv,
@@ -651,7 +659,7 @@ func composeClaudeCodeMessage(t engineTurn, fresh bool) string {
 	var b strings.Builder
 	if fresh && len(t.prior) > 0 {
 		b.WriteString("Ниже — предыдущая часть этого разговора, восстановленная из истории Miranda. Продолжай его с учётом этого контекста; не пересказывай его.\n<previous_conversation>\n")
-		b.WriteString(renderTranscript(t.prior))
+		b.WriteString(claudecode.RenderTranscript(t.prior, transcriptToolResultMax))
 		b.WriteString("</previous_conversation>\n\n")
 	}
 	b.WriteString("[")
@@ -665,109 +673,21 @@ func composeClaudeCodeMessage(t engineTurn, fresh bool) string {
 // model to know what came back, without re-sending a huge document.
 const transcriptToolResultMax = 1000
 
-func renderTranscript(msgs []llm.Message) string {
-	var b strings.Builder
-	for _, m := range msgs {
-		switch m.Role {
-		case llm.RoleUser:
-			fmt.Fprintf(&b, "[user]: %s\n", m.Content)
-		case llm.RoleAssistant:
-			if m.Content != "" {
-				fmt.Fprintf(&b, "[assistant]: %s\n", m.Content)
-			}
-			for _, tc := range m.ToolCalls {
-				fmt.Fprintf(&b, "[tool call] %s(%s)\n", tc.Name, tc.Arguments)
-			}
-		case llm.RoleTool:
-			content := m.Content
-			if r := []rune(content); len(r) > transcriptToolResultMax {
-				content = string(r[:transcriptToolResultMax]) + "…"
-			}
-			fmt.Fprintf(&b, "[tool result]: %s\n", content)
-		}
-	}
-	return b.String()
-}
+// toolSearchTool is the CLI's built-in deferred-schema loader.
+const toolSearchTool = "ToolSearch"
 
-// ccTraceBuilder renders a claude_code turn into llm.log blocks, one per
-// model call inside the CLI (a call ends where the CLI feeds tool results
-// back). Responses use the Anthropic Messages shape ({"content":[...]}), so
-// miranda-llm's llmtrace/analyze — and with it the anomaly detector and the
-// llm-trace CLI — read them unchanged.
-type ccTraceBuilder struct {
-	request  any
-	response []json.RawMessage
-	started  time.Time
-}
-
-func newCCTraceBuilder(system, userText string, tools []llm.ToolDef) *ccTraceBuilder {
-	names := make([]map[string]string, 0, len(tools))
-	for _, t := range tools {
-		names = append(names, map[string]string{"name": t.Name})
+// builtinTools is the --tools value: configured plus ToolSearch, always.
+// The CLI defers large MCP tool sets (the model sees names only and fetches
+// a schema via ToolSearch when it needs one) — but only when ToolSearch
+// itself is in the --tools allowlist; without it every schema is inlined
+// into every request. Measured with 120 MCP tools: 55,786 input tokens per
+// turn without it, 8,949 with it. It grants no new capability — it can
+// only load schemas of tools the process already has — so it isn't a
+// config choice. (miranda-llm/claudecode passes BuiltinTools as given, so
+// the orchestrator adds it here.)
+func builtinTools(configured []string) []string {
+	if slices.Contains(configured, toolSearchTool) {
+		return configured
 	}
-	return &ccTraceBuilder{
-		request: map[string]any{
-			"system":   []map[string]string{{"type": "text", "text": system}},
-			"messages": []any{map[string]any{"role": "user", "content": []any{map[string]string{"type": "text", "text": userText}}}},
-			"tools":    names,
-		},
-		started: time.Now(),
-	}
-}
-
-func (tb *ccTraceBuilder) addResponse(b claudecode.ContentBlock) {
-	// The CLI doesn't expose thinking text (the blocks arrive empty), so
-	// they would only add noise to the trace.
-	if b.Type == "thinking" || b.Type == "redacted_thinking" {
-		return
-	}
-	tb.response = append(tb.response, unprefixToolUse(b))
-}
-
-// unprefixToolUse strips the CLI's "mcp__miranda__" namespace from a
-// tool_use block's name, so the trace names tools exactly as the request's
-// tool list (and history, and the miranda orchestrator's traces) do —
-// otherwise the anomaly detector would flag every call as an unknown tool.
-func unprefixToolUse(b claudecode.ContentBlock) json.RawMessage {
-	name, ok := strings.CutPrefix(b.Name, "mcp__"+mirandaMCPServerName+"__")
-	if b.Type != "tool_use" || !ok {
-		return b.Raw
-	}
-	var m map[string]any
-	if json.Unmarshal(b.Raw, &m) != nil {
-		return b.Raw
-	}
-	m["name"] = name
-	out, err := json.Marshal(m)
-	if err != nil {
-		return b.Raw
-	}
-	return out
-}
-
-func (tb *ccTraceBuilder) nextRequest(results []claudecode.ContentBlock) {
-	raws := make([]json.RawMessage, 0, len(results))
-	for _, r := range results {
-		raws = append(raws, r.Raw)
-	}
-	tb.request = map[string]any{"messages": []any{map[string]any{"role": "user", "content": raws}}}
-	tb.started = time.Now()
-}
-
-// flush writes the pending block (if there is anything to write) and
-// resets the response.
-func (tb *ccTraceBuilder) flush(ctx context.Context, tracer llm.Tracer, err error) {
-	if tracer == nil || (len(tb.response) == 0 && err == nil) {
-		return
-	}
-	req, _ := json.Marshal(tb.request)
-	var resp []byte
-	if err == nil {
-		resp, _ = json.Marshal(map[string]any{
-			"content":     tb.response,
-			"duration_ms": time.Since(tb.started).Milliseconds(),
-		})
-	}
-	tracer.Trace(ctx, claudeCodeProviderName, string(req), string(resp), err)
-	tb.response = nil
+	return append(append([]string{}, configured...), toolSearchTool)
 }

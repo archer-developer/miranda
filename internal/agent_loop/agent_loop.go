@@ -44,7 +44,7 @@ type turnControl struct {
 	// mid-turn never became callable within that turn (seen in production:
 	// "загрузила группу дневника, но инструменты не появились"). The CLI
 	// defers large MCP tool sets itself (ToolSearch — see
-	// internal/claudecode.builtinTools), so the stub isn't needed there.
+	// claude_code_engine.go builtinTools), so the stub isn't needed there.
 	loadAllGroups bool
 	// groupsChanged is set by executeTool whenever loadedGroups grew this
 	// iteration, so runAgentLoop knows to recompute the tool list before the

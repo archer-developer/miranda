@@ -20,7 +20,7 @@ import (
 	"github.com/archer-developer/miranda-llm/llmtest"
 	"github.com/archer-developer/miranda-llm/llmtrace"
 	"github.com/archer-developer/miranda-llm/llmtrace/analyze"
-	"github.com/archer-developer/miranda/internal/claudecode"
+	"github.com/archer-developer/miranda-llm/claudecode"
 	"github.com/archer-developer/miranda/internal/config"
 	"github.com/archer-developer/miranda/internal/mcp"
 	"github.com/archer-developer/miranda/internal/mcp/mcptest"
@@ -302,4 +302,14 @@ func listedTools(reply string) []string {
 func TestComposeClaudeCodeMessage(t *testing.T) {
 	turn := engineTurn{volatileSystem: "Текущее время пользователя: 10:00.", userContent: "привет"}
 	require.Equal(t, "[Текущее время пользователя: 10:00.]\n\nпривет", composeClaudeCodeMessage(turn, true))
+}
+
+// TestBuiltinToolsAlwaysIncludesToolSearch: without ToolSearch in --tools
+// the CLI inlines every MCP schema into every request (55,786 vs 8,949
+// input tokens per turn with 120 tools) — miranda-llm/claudecode passes
+// BuiltinTools verbatim, so the orchestrator must add it itself.
+func TestBuiltinToolsAlwaysIncludesToolSearch(t *testing.T) {
+	require.Equal(t, []string{"WebSearch", "ToolSearch"}, builtinTools([]string{"WebSearch"}))
+	require.Equal(t, []string{"ToolSearch"}, builtinTools(nil))
+	require.Equal(t, []string{"ToolSearch", "WebFetch"}, builtinTools([]string{"ToolSearch", "WebFetch"}), "never duplicated")
 }

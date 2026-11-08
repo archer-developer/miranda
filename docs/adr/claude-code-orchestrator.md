@@ -82,10 +82,14 @@ sequenceDiagram
     E-->>H: finalText, "claude_code"
 ```
 
-### 3.1 Процесс на пользователя (`internal/claudecode`)
+### 3.1 Процесс на пользователя (`miranda-llm/claudecode`)
 
-Пакет `internal/claudecode` ничего не знает о Miranda — только жизненный
-цикл процесса и протокол stream-json. Флаги (`buildArgs`):
+Пакет `claudecode` ничего не знает о Miranda — только жизненный цикл
+процесса и протокол stream-json. Изначально он жил здесь как
+`internal/claudecode`; 2026-11-08 перенесён в `miranda-llm/claudecode` и
+используется также медкартой (её one-shot провайдер конвейера и движок
+`medical.ask`, `miranda-medical-card/docs/adr/010-claude-code-engine.md`).
+Оттуда же Miranda берёт `TraceBuilder` и `RenderTranscript`. Флаги (`buildArgs`):
 
 - `--no-session-persistence` — CLI не пишет транскрипт на диск. Проверено:
   в `~/.claude/projects` после прогонов не появляется ничего. Источник
@@ -171,7 +175,7 @@ MCP-тулов: модель видит только имена, а схему �
 Но только если `ToolSearch` есть в белом списке `--tools` — иначе каждая
 схема целиком идёт в каждый запрос, и `ENABLE_TOOL_SEARCH` этого не меняет.
 Замер на 120 MCP-тулах: 55 786 входных токенов на ход без него, 8 949 с
-ним; вызов отложенного тула проверен. Поэтому `internal/claudecode`
+ним; вызов отложенного тула проверен. Поэтому `builtinTools` (`claude_code_engine.go`)
 добавляет его к `builtin_tools` безусловно — он не даёт новых
 возможностей, только загружает схемы уже доступных тулов. `syncTools` применяет только разницу; go-sdk рассылает
 `tools/list_changed`, CLI перечитывает список. Хэндлер дополнительно
@@ -232,7 +236,7 @@ agent:
 
 ## 5. Проверка
 
-- `go test ./internal/claudecode/` — протокол и жизненный цикл на
+- `go test ./claudecode/` в `miranda-llm` — протокол и жизненный цикл на
   фейковом CLI (self-exec тестового бинаря): переиспользование процесса,
   kill по таймауту, stderr при падении, удаление рабочей директории,
   флаги изоляции, очистка env.
