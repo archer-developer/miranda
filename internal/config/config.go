@@ -730,8 +730,12 @@ type MCPServer struct {
 	// alongside medical.ask), and injecting an argument a tool's schema
 	// doesn't expect is exactly the kind of mismatch that made
 	// EncryptionKeyArgName necessary in the first place — see that field's
-	// own doc comment on the diary incident. Empty (the default) means this
-	// server receives no injection at all — see docs/medical-card-session-injection.md.
+	// own doc comment on the diary incident. Empty (the default) means no
+	// config-driven injection — a server can instead declare it itself by
+	// marking the argument `"x-injected": "conversation_id"` in its tool
+	// schema (mcp.InjectedKeyword), which needs no entry here and is how
+	// miranda-medical-card's medical.ask does it now. See
+	// docs/adr/medical-card-session-injection.md §6.
 	SessionIDTools []string `yaml:"session_id_tools,omitempty"`
 	// Lazy opts this server's tools out of every turn's default tool list.
 	// Instead of this server's own real tool schemas, httpapi.Orchestrator's

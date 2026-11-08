@@ -191,3 +191,64 @@ func TestAvailableTools_HidesInjectedSessionIDFromModel(t *testing.T) {
 	require.Contains(t, profile.Parameters["properties"], "sessionId", "only SessionIDTools lose the argument")
 	require.Contains(t, schema["properties"], "sessionId", "the server's own schema must not be mutated")
 }
+
+// markedSchema is a tool schema whose "sessionId" carries the given
+// x-injected kind, plus an ordinary "question" argument.
+func markedSchema(kind string) map[string]any {
+	return map[string]any{
+		"type": "object",
+		"properties": map[string]any{
+			"question":  map[string]any{"type": "string"},
+			"sessionId": map[string]any{"type": "string", "x-injected": kind},
+		},
+		"required": []any{"question", "sessionId"},
+	}
+}
+
+func toolsByName(t *testing.T, o *Orchestrator) map[string]llm.ToolDef {
+	t.Helper()
+	byName := map[string]llm.ToolDef{}
+	for _, td := range o.availableTools(context.Background(), "alex", &turnControl{}) {
+		byName[td.Name] = td
+	}
+	return byName
+}
+
+// TestXInjectedConversationID_NeedsNoConfig covers the server-declared path:
+// a `x-injected: conversation_id` argument is hidden from the model and
+// filled with the conversation id with no SessionIDTools configured at all.
+func TestXInjectedConversationID_NeedsNoConfig(t *testing.T) {
+	medical := mcptest.New("medical_card", llm.ToolDef{Name: "medical.ask", Parameters: markedSchema("conversation_id")}).WithResult("medical.ask", "answer")
+	provider := llmtest.New("local",
+		llmtest.Response{ToolCall: &llm.ToolCall{ID: "call-1", Name: "medical_card_medical_ask", Arguments: `{"question":"hi"}`}},
+		llmtest.Response{Text: "Done."},
+	)
+	o, _, _ := newTestOrchestrator(t, provider, medical)
+
+	ask := toolsByName(t, o)["medical_card_medical_ask"]
+	require.NotContains(t, ask.Parameters["properties"], "sessionId")
+	require.Equal(t, []any{"question"}, ask.Parameters["required"])
+
+	resp, err := o.Handle(context.Background(), InputRequest{Source: "cli", UserID: "alex", Text: "ask the medical card"})
+	require.NoError(t, err)
+	require.Len(t, medical.Calls, 1)
+	var wireArgs map[string]any
+	require.NoError(t, json.Unmarshal([]byte(medical.Calls[0].ArgumentsJSON), &wireArgs))
+	require.Equal(t, resp.ConversationID, wireArgs["sessionId"])
+}
+
+// TestXInjectedEncryptionKey_IgnoredWithoutWhitelist guards the security
+// boundary: a server can't get an argument hidden (let alone a key sent) by
+// claiming x-injected: encryption_key — only config's keyring whitelist
+// decides that.
+func TestXInjectedEncryptionKey_IgnoredWithoutWhitelist(t *testing.T) {
+	medical := mcptest.New("medical_card", llm.ToolDef{Name: "medical.ask", Parameters: markedSchema("encryption_key")})
+	o, _, _ := newTestOrchestrator(t, llmtest.New("local"), medical)
+	require.Contains(t, toolsByName(t, o)["medical_card_medical_ask"].Parameters["properties"], "sessionId")
+}
+
+func TestXInjectedUnknownKind_StaysVisible(t *testing.T) {
+	medical := mcptest.New("medical_card", llm.ToolDef{Name: "medical.ask", Parameters: markedSchema("telepathy")})
+	o, _, _ := newTestOrchestrator(t, llmtest.New("local"), medical)
+	require.Contains(t, toolsByName(t, o)["medical_card_medical_ask"].Parameters["properties"], "sessionId")
+}

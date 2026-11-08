@@ -467,7 +467,11 @@ mcp:
     #   token_env: "MEDICAL_CARD_MCP_TOKEN"
     #   enabled: true
     #   expose_files: true
-    #   session_id_tools: ["medical.ask"]
+    #   # session_id_tools is unnecessary for medical-card now: medical.ask
+    #   # marks its sessionId `x-injected: conversation_id` itself (see
+    #   # docs/adr/medical-card-session-injection.md §6). Still honored for a
+    #   # server that doesn't declare the marker.
+    #   # session_id_tools: ["medical.ask"]
     #   lazy: true
     #   description: "Medical records: Q&A over the full medical history; health profile (diagnoses, medications, allergies, vaccinations, labs, vitals); event timeline; documents; self-reported events; upcoming-action reminders; diagnosis resolution."
     # Google Calendar is NOT an MCP server entry here — Google's own hosted

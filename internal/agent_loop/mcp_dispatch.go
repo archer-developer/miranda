@@ -36,7 +36,7 @@ func (o *Orchestrator) executeMCPTool(ctx context.Context, userID, conversationI
 	// tc.Name's owning server (and, where relevant, its bare tool name, or
 	// that server's bundle of opted-in behaviors) instead of each
 	// re-running the same prefix-matching scan over o.tools' server list.
-	toolServer, toolName, toolServerOK := o.tools.ServerAndTool(tc.Name)
+	toolServer, _, toolServerOK := o.tools.ServerAndTool(tc.Name)
 	var toolExt MCPServerExtension
 	if toolServerOK {
 		toolExt = o.mcpExtensions[toolServer]
@@ -70,13 +70,14 @@ func (o *Orchestrator) executeMCPTool(ctx context.Context, userID, conversationI
 	// Session-id injection is independent of the keyring block above — it
 	// operates on callArgs' current value (already keyring-adjusted, if
 	// applicable) rather than tc.Arguments, so the two compose for a tool
-	// call that happens to be whitelisted for both. Config-driven and
-	// generic across any MCP server/tool pair (o.sessionIDAllowed, built by
-	// cmd/miranda from every config.MCPServer.SessionIDTools), not specific
-	// to any one server — see docs/medical-card-session-injection.md.
-	if toolExt.SessionIDArg != "" && toolExt.SessionIDTools[toolName] {
+	// call that happens to be whitelisted for both. Which arguments get the
+	// id comes from injectionPlanFor — the server's own `x-injected:
+	// conversation_id` schema marker, or config's SessionIDTools — the same
+	// plan hideInjectedArgs used to hide them from the model, so a hidden
+	// argument is always filled. See docs/adr/medical-card-session-injection.md.
+	for _, arg := range o.injectionPlanFor(tc.Name).conversationArgs {
 		var setOK bool
-		callArgs, setOK = setSessionIDArg(callArgs, toolExt.SessionIDArg, conversationID)
+		callArgs, setOK = setSessionIDArg(callArgs, arg, conversationID)
 		if !setOK {
 			o.hub.Publish(hub.Event{Source: "error", Message: "session id not attached to " + tc.Name + ": arguments were not valid JSON"})
 		}

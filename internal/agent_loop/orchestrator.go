@@ -253,11 +253,14 @@ type speakerHA interface {
 // Home Assistant's TTS engine, and everything else by the speak_reply tool
 // delegating to miranda-tts (see speak.go).
 type Orchestrator struct {
-	router  *router.Router
-	tools   *mcp.Manager
-	history *history.Store
-	memory  *memory.Store
-	hub     *hub.Hub
+	router *router.Router
+	tools  *mcp.Manager
+	// warnedInjected dedupes injectionPlanFor's "unknown x-injected kind"
+	// warning to once per tool argument.
+	warnedInjected sync.Map
+	history        *history.Store
+	memory         *memory.Store
+	hub            *hub.Hub
 	// logger is set via SetLogger; nil means tool-call failures (e.g. an
 	// MCP server rejecting a call) are only visible in logs/llm.log's full
 	// request/response trace, not in the app log/journal or the web UI's

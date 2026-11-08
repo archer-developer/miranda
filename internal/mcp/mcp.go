@@ -67,6 +67,48 @@ func sanitizeToolName(name string) string {
 type toolAlias struct {
 	server string
 	tool   string // unprefixed, unsanitized — passed straight to Client.CallTool
+	// injected maps each argument the server marked with InjectedKeyword
+	// to its kind (see InjectedArgs); nil when none is marked.
+	injected map[string]string
+}
+
+// InjectedKeyword is the JSON Schema extension keyword an MCP server puts on
+// a tool argument to say "the calling system's backend fills this in, not
+// the model": `"sessionId": {"type": "string", "x-injected":
+// "conversation_id"}`. The value names what to inject — see
+// InjectedConversationID/InjectedEncryptionKey. It is only a declaration:
+// which kinds Miranda honors, and for which servers, is decided by the
+// agent loop (internal/agent_loop's injectionPlanFor) — a server can never
+// make Miranda send it something its config doesn't allow (an encryption
+// key above all). See docs/adr/medical-card-session-injection.md §6.
+const InjectedKeyword = "x-injected"
+
+// The x-injected kinds Miranda knows.
+const (
+	// InjectedConversationID asks for Miranda's resolved conversation id.
+	InjectedConversationID = "conversation_id"
+	// InjectedEncryptionKey asks for the user's encryption key — honored
+	// only for a server whitelisted for the keyring in config.
+	InjectedEncryptionKey = "encryption_key"
+)
+
+// injectedArgs reads InjectedKeyword off each top-level property of a tool's
+// input schema.
+func injectedArgs(params map[string]any) map[string]string {
+	props, _ := params["properties"].(map[string]any)
+	var out map[string]string
+	for name, p := range props {
+		prop, _ := p.(map[string]any)
+		kind, _ := prop[InjectedKeyword].(string)
+		if kind == "" {
+			continue
+		}
+		if out == nil {
+			out = make(map[string]string)
+		}
+		out[name] = kind
+	}
+	return out
 }
 
 // Client is one MCP server's tool source: it can list its tools and invoke
@@ -406,7 +448,7 @@ func (m *Manager) listTools(ctx context.Context, userID string, order []string, 
 			original := t.Name
 			sanitized := sanitizeToolName(prefixedToolName(name, original))
 			t.Name = sanitized
-			newAliases[sanitized] = toolAlias{server: name, tool: original}
+			newAliases[sanitized] = toolAlias{server: name, tool: original, injected: injectedArgs(t.Parameters)}
 			out = append(out, t)
 		}
 	}
@@ -471,6 +513,15 @@ func (m *Manager) orderSnapshot() []string {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	return append([]string(nil), m.order...)
+}
+
+// InjectedArgs returns the arguments of prefixedName's schema marked with
+// InjectedKeyword (argument name → kind), as of the last listing that minted
+// the name; nil for an unknown tool or one with no marked argument.
+func (m *Manager) InjectedArgs(prefixedName string) map[string]string {
+	m.aliasMu.RLock()
+	defer m.aliasMu.RUnlock()
+	return m.aliases[prefixedName].injected
 }
 
 // ServerAndTool returns which server owns prefixedName (as produced by

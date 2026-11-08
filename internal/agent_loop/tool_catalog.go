@@ -3,6 +3,7 @@ package agentloop
 import (
 	"context"
 	"fmt"
+	"github.com/archer-developer/miranda/internal/mcp"
 	"sort"
 	"strings"
 
@@ -455,30 +456,79 @@ func (o *Orchestrator) loadToolGroupStub(pending []string, descriptions map[stri
 	}
 }
 
-// hideInjectedArgs removes from an MCP tool's schema the arguments Miranda's
-// backend fills in itself right before dispatch (executeMCPTool) — the
-// conversation id for a server's SessionIDTools, the encryption key for a
-// keyring-whitelisted server — so the model is never asked for a value it
-// can't know. Injection overwrites whatever the model wrote anyway; leaving
-// the argument visible only invited trouble, and under the claude_code
-// orchestrator it broke medical.ask outright (2026-11-08): the schema marks
-// sessionId required with "never invented by the model", so Claude refused
-// to call the tool at all ("нет идентификатора сессии"), where Gemini had
-// just filled in a placeholder. The cached schema is never mutated — a
-// shallow copy with fresh properties/required is returned.
-func (o *Orchestrator) hideInjectedArgs(t llm.ToolDef) llm.ToolDef {
-	server, tool, ok := o.tools.ServerAndTool(t.Name)
-	if !ok || t.Parameters == nil {
-		return t
+// injectionPlan is which arguments of one MCP tool Miranda's backend fills
+// in itself, right before dispatch (executeMCPTool).
+type injectionPlan struct {
+	// conversationArgs receive the resolved conversation id.
+	conversationArgs []string
+	// hidden are removed from the schema the model sees (hideInjectedArgs):
+	// exactly the arguments the backend will fill, never more — an argument
+	// hidden but not filled could never be supplied at all.
+	hidden map[string]bool
+}
+
+// injectionPlanFor decides a tool's injected arguments from two sources:
+//
+//   - the server's own declaration — an argument marked
+//     `"x-injected": "conversation_id"` in its schema (mcp.InjectedKeyword)
+//     gets the conversation id. A conversation id is an internal UUID, not
+//     a secret, so a server may ask for it on any of its tools;
+//   - config — a server's SessionIDTools/SessionIDArg (the pre-marker way,
+//     still honored), and EncryptionKeyArg: the key is only ever sent to a
+//     server whitelisted for the keyring, so `"x-injected":
+//     "encryption_key"` merely confirms which argument that is and hides it;
+//     on a non-whitelisted server the marker is ignored and the key is
+//     stripped as before (setEncryptionKeyArg).
+//
+// An unknown kind is left visible and logged once.
+func (o *Orchestrator) injectionPlanFor(prefixedName string) injectionPlan {
+	plan := injectionPlan{hidden: map[string]bool{}}
+	server, tool, ok := o.tools.ServerAndTool(prefixedName)
+	if !ok {
+		return plan
 	}
 	ext := o.mcpExtensions[server]
-	hidden := map[string]bool{}
+	addConversation := func(arg string) {
+		if !plan.hidden[arg] {
+			plan.conversationArgs = append(plan.conversationArgs, arg)
+			plan.hidden[arg] = true
+		}
+	}
 	if ext.SessionIDArg != "" && ext.SessionIDTools[tool] {
-		hidden[ext.SessionIDArg] = true
+		addConversation(ext.SessionIDArg)
 	}
 	if ext.EncryptionKeyArg != "" {
-		hidden[ext.EncryptionKeyArg] = true
+		plan.hidden[ext.EncryptionKeyArg] = true
 	}
+	for arg, kind := range o.tools.InjectedArgs(prefixedName) {
+		switch kind {
+		case mcp.InjectedConversationID:
+			addConversation(arg)
+		case mcp.InjectedEncryptionKey:
+			// Handled by EncryptionKeyArg above — config, not the
+			// server's word, decides whether a key is ever sent.
+		default:
+			if _, warned := o.warnedInjected.LoadOrStore(prefixedName+"/"+arg, true); !warned && o.logger != nil {
+				o.logger.Warn("mcp: unknown x-injected kind, leaving the argument to the model", "tool", prefixedName, "arg", arg, "kind", kind)
+			}
+		}
+	}
+	return plan
+}
+
+// hideInjectedArgs removes from an MCP tool's schema the arguments Miranda's
+// backend fills in itself (injectionPlanFor), so the model is never asked
+// for a value it can't know. Leaving them visible broke medical.ask under
+// the claude_code orchestrator (2026-11-08): the schema marks sessionId
+// required and "never invented by the model", so Claude refused to call the
+// tool at all, where Gemini had just written a placeholder the injection
+// then overwrote. The cached schema is never mutated — a shallow copy with
+// fresh properties/required is returned.
+func (o *Orchestrator) hideInjectedArgs(t llm.ToolDef) llm.ToolDef {
+	if t.Parameters == nil {
+		return t
+	}
+	hidden := o.injectionPlanFor(t.Name).hidden
 	props, _ := t.Parameters["properties"].(map[string]any)
 	found := false
 	for name := range hidden {
