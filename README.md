@@ -354,7 +354,7 @@ memory:
   auto_summarize: true
   explicit_tool: true # remember_this
   search_history_tool: true # search_history + restore_conversation
-  session_idle_timeout_minutes: 25 # how long before an idle chat is closed and summarized
+  session_idle_timeout_minutes: 60 # how long before an idle chat is closed and summarized
 ```
 
 A conversation only closes (and becomes searchable/restorable) after it's

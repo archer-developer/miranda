@@ -523,6 +523,19 @@ func run(cfg config.Config, logger *slog.Logger, eventHub *hub.Hub, configDir st
 	}
 	orchestrator.SetMCPServerExtensions(mcpExtensions, downloadRecordTTL)
 
+	// agent.orchestrator picks what drives each turn's reasoning/tool loop.
+	// The default leaves the miranda orchestrator NewOrchestrator already
+	// installed; claude_code swaps in headless Claude Code processes that
+	// call Miranda's tools back over a loopback MCP endpoint. The router is
+	// still needed either way — conversation summarization runs through it.
+	// See docs/adr/claude-code-orchestrator.md.
+	if cfg.Agent.Orchestrator == config.OrchestratorClaudeCode {
+		if err := orchestrator.EnableClaudeCode(cfg.Agent.ClaudeCode, &redact.Tracer{Next: llmTracer, Redactor: redactor}); err != nil {
+			return fmt.Errorf("main: %w", err)
+		}
+	}
+	defer orchestrator.Close()
+
 	var webHandler http.Handler
 	if cfg.WebUI.Enabled {
 		wh, err := webui.New(historyStore, memoryStore, orchestrator, webauthnSvc, notifyForWebUI, keyringService, usersRegistry, sessions, cfg.WebUI.DefaultLanguage, cfg.Storage.AvatarsDir, logger)

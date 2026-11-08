@@ -220,6 +220,35 @@ tavily:
   web_fetch:
     enabled: false
 
+agent:
+  # What drives each turn's reasoning/tool-selection loop:
+  #   miranda     — Miranda's own agent loop over the llm.providers router
+  #                 above (default).
+  #   claude_code — a long-lived headless Claude Code CLI process per user
+  #                 (billed against the Claude subscription it is logged in
+  #                 with), calling Miranda's tools back through a loopback
+  #                 MCP endpoint. History, memory, sessions and every tool
+  #                 behave the same; llm.providers is still needed for
+  #                 conversation summarization.
+  # See docs/adr/claude-code-orchestrator.md.
+  orchestrator: "miranda"
+  claude_code:
+    # Must be logged in (`claude auth status`) as the OS user Miranda runs as.
+    binary: "claude"
+    model: "sonnet" # alias for the latest Sonnet; or haiku / opus / a full model id
+    # Claude Code built-in tools on top of Miranda's own (auto-approved).
+    # Keep code-running tools (Bash, Write, ...) off: the process runs on
+    # this host — code execution belongs to the sandbox MCP server.
+    builtin_tools: ["WebSearch", "WebFetch"]
+    max_turns: 15 # tool-loop bound per turn, like the miranda orchestrator's
+    # Close a user's idle process; 0 = never. Matched to
+    # memory.session_idle_timeout_minutes (a new conversation restarts the
+    # process anyway) and long enough to keep reusing the prompt cache.
+    process_idle_minutes: 60
+    # Keep ANTHROPIC_API_KEY in the CLI's environment — it would then bill
+    # the API key instead of the subscription.
+    allow_api_key_env: false
+
 memory:
   # End-of-session LLM summarization pass that merges durable facts into
   # data/memory/<user_id>.md, as a safety net alongside the explicit tool below.
@@ -229,7 +258,9 @@ memory:
   # How long a conversation can sit idle before it's ended and summarized.
   # The server owns session continuity (not any conversation_id a caller
   # sends back), so this is what actually governs session boundaries.
-  session_idle_timeout_minutes: 25
+  # 60 matches agent.claude_code.process_idle_minutes: under the claude_code
+  # orchestrator a new conversation means a cold Claude Code process.
+  session_idle_timeout_minutes: 60
   # Lets the model call search_history when the user references an earlier
   # conversation ("помнишь мы говорили о..."), and the companion
   # restore_conversation tool to resume one as the active session ("давай

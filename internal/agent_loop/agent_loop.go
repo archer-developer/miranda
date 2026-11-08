@@ -37,6 +37,15 @@ type turnControl struct {
 	// history/memory: re-collapsing to the compact stub on the next turn is
 	// intentional, not a bug — see docs/adr/lazy-mcp-tool-loading.md §3/§4.
 	loadedGroups map[string]bool
+	// loadAllGroups makes availableTools treat every lazy group as already
+	// loaded — real schemas up front, no load_tool_group stub. Set by the
+	// claude_code orchestrator: the Claude Code CLI only applies a
+	// tools/list_changed refresh to its NEXT message, so a group loaded
+	// mid-turn never became callable within that turn (seen in production:
+	// "загрузила группу дневника, но инструменты не появились"). The CLI
+	// defers large MCP tool sets itself (ToolSearch — see
+	// internal/claudecode.builtinTools), so the stub isn't needed there.
+	loadAllGroups bool
 	// groupsChanged is set by executeTool whenever loadedGroups grew this
 	// iteration, so runAgentLoop knows to recompute the tool list before the
 	// next call instead of doing it unconditionally every iteration.

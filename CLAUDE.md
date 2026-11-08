@@ -69,7 +69,7 @@ Session continuity is **server-owned, keyed only on user identity** —
 shape but never read. The same user on any channel (HA, web UI, Telegram,
 future mobile) always continues the same open conversation, because
 `resolveConversation` looks it up via `history.OpenConversation(userID)`.
-Only the idle timeout (`Memory.SessionIdleTimeoutMinutes`, default 25) and
+Only the idle timeout (`Memory.SessionIdleTimeoutMinutes`, default 60) and
 the explicit `end_conversation`/`forget_conversation` tools ever close a
 session.
 
@@ -117,6 +117,30 @@ Destructive actions (`DeleteConversation`, ending+summarizing) only run
 *after* the assistant's reply is recorded — a tool call mid-loop just sets
 a flag on `turnControl`, so a request never loses the reply it already
 generated.
+
+### Orchestrators (`agent.orchestrator`)
+
+The diagram's tool loop is one of two swappable **turn engines**
+(`turnEngine`, `internal/agent_loop/engine.go`); everything else in
+`Handle` — conversation resolution, memory, attachments, recording the
+user/assistant messages, end/forget/restore, anomaly reporting — is shared.
+
+- `miranda` (default): `mirandaEngine` → `runAgentLoop` over `llm.Router`.
+- `claude_code`: `claudeCodeEngine` (`claude_code_engine.go`) — one
+  long-lived headless Claude Code process per user (`internal/claudecode`,
+  stream-json, no session persistence, model `sonnet` by default, only the
+  WebSearch/WebFetch built-in tools on), calling
+  Miranda's tools back through a loopback "Miranda MCP" server whose tool
+  list mirrors `availableTools` per turn and whose handlers go through
+  `executeTool`/`recordToolCall`. Lazy tool groups are expanded up front
+  (`turnControl.loadAllGroups`) — the CLI only applies tools/list_changed
+  to its next message, never mid-turn; schema size is handled by the CLI's
+  own deferral via `ToolSearch`, which `internal/claudecode` always enables
+  (without it every schema is inlined into every request). Restarted on a new conversation or a
+  changed stable system prompt, replaying history into the fresh process.
+
+Never add tool logic to either engine — add it to `availableTools`/
+`executeTool` and both get it. See `docs/adr/claude-code-orchestrator.md`.
 
 ### Response routing
 
