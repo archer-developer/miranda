@@ -22,6 +22,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -52,8 +53,8 @@ type Options struct {
 	// (--strict-mcp-config ignores the user's own ~/.claude config).
 	MCPServers map[string]MCPServer
 	// BuiltinTools are the Claude Code built-in tools enabled for the
-	// process (--tools), e.g. "WebSearch", "WebFetch". Empty disables every
-	// built-in tool. Each one is also auto-approved.
+	// process (--tools), e.g. "WebSearch", "WebFetch"; ToolSearch is always
+	// added on top (see builtinTools). Each one is also auto-approved.
 	BuiltinTools []string
 	// AllowedTools are auto-approved without a permission prompt (in -p
 	// mode an unapproved tool is simply denied), e.g. "mcp__miranda__*".
@@ -230,9 +231,9 @@ func buildArgs(opts Options, promptPath, mcpPath string) []string {
 		"--verbose", // required by -p together with stream-json output
 		"--include-partial-messages",
 		"--no-session-persistence",
-		// Only the listed built-in tools exist for the model; an empty value
-		// disables all of them. MCP tools are unaffected.
-		"--tools", strings.Join(opts.BuiltinTools, ","),
+		// Only the listed built-in tools exist for the model, plus
+		// ToolSearch — see builtinTools. MCP tools are unaffected.
+		"--tools", strings.Join(builtinTools(opts.BuiltinTools), ","),
 		"--strict-mcp-config",
 		"--mcp-config", mcpPath,
 		// Ignore the invoking OS user's own user/project/local settings
@@ -242,7 +243,7 @@ func buildArgs(opts Options, promptPath, mcpPath string) []string {
 		"--disable-slash-commands",
 		"--system-prompt-file", promptPath,
 	}
-	if allowed := append(append([]string{}, opts.BuiltinTools...), opts.AllowedTools...); len(allowed) > 0 {
+	if allowed := append(builtinTools(opts.BuiltinTools), opts.AllowedTools...); len(allowed) > 0 {
 		args = append(args, "--allowedTools", strings.Join(allowed, ","))
 	}
 	if opts.Model != "" {
@@ -277,6 +278,24 @@ func CheckAuth(ctx context.Context, binary string, allowAPIKeyEnv bool) (AuthSta
 		return AuthStatus{}, fmt.Errorf("claudecode: parse auth status: %w", err)
 	}
 	return st, nil
+}
+
+// toolSearchTool is the CLI's built-in deferred-schema loader.
+const toolSearchTool = "ToolSearch"
+
+// builtinTools is the --tools value: configured plus ToolSearch, always.
+// The CLI defers large MCP tool sets (the model sees names only and fetches
+// a schema via ToolSearch when it needs one) — but only when ToolSearch
+// itself is in the --tools allowlist; without it every schema is inlined
+// into every request. Measured with 120 MCP tools: 55,786 input tokens per
+// turn without it, 8,949 with it. It grants no new capability — it can
+// only load schemas of tools the process already has — so it isn't a
+// config choice.
+func builtinTools(configured []string) []string {
+	if slices.Contains(configured, toolSearchTool) {
+		return configured
+	}
+	return append(append([]string{}, configured...), toolSearchTool)
 }
 
 // childEnv is the process environment minus the API-key variables (unless

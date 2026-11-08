@@ -154,14 +154,17 @@ func TestBuildArgsIsolatesTheProcess(t *testing.T) {
 	for _, want := range []string{
 		"--input-format stream-json", "--output-format stream-json", "--no-session-persistence",
 		"--strict-mcp-config", "--mcp-config /m", "--disable-slash-commands", "--system-prompt-file /p",
-		"--tools WebSearch,WebFetch", "--allowedTools WebSearch,WebFetch,mcp__miranda__*", "--model haiku", "--max-turns 7",
+		"--tools WebSearch,WebFetch,ToolSearch", "--allowedTools WebSearch,WebFetch,ToolSearch,mcp__miranda__*", "--model haiku", "--max-turns 7",
 	} {
 		if !strings.Contains(joined, want) {
 			t.Errorf("args missing %q: %v", want, args)
 		}
 	}
-	if none := buildArgs(Options{}, "/p", "/m"); slices.Index(none, "--tools") < 0 || none[slices.Index(none, "--tools")+1] != "" {
-		t.Errorf("no BuiltinTools must pass an empty --tools (all built-ins off): %v", none)
+	if none := buildArgs(Options{}, "/p", "/m"); slices.Index(none, "--tools") < 0 || none[slices.Index(none, "--tools")+1] != "ToolSearch" {
+		t.Errorf("no BuiltinTools must still keep ToolSearch, or MCP schemas are never deferred: %v", none)
+	}
+	if got := builtinTools([]string{"ToolSearch", "WebSearch"}); !slices.Equal(got, []string{"ToolSearch", "WebSearch"}) {
+		t.Errorf("ToolSearch must not be duplicated: %v", got)
 	}
 	if i := slices.Index(args, "--setting-sources"); i < 0 || args[i+1] != "" {
 		t.Errorf("--setting-sources must be followed by an empty value: %v", args)

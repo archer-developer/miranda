@@ -134,7 +134,9 @@ user/assistant messages, end/forget/restore, anomaly reporting — is shared.
   list mirrors `availableTools` per turn and whose handlers go through
   `executeTool`/`recordToolCall`. Lazy tool groups are expanded up front
   (`turnControl.loadAllGroups`) — the CLI only applies tools/list_changed
-  to its next message, never mid-turn. Restarted on a new conversation or a
+  to its next message, never mid-turn; schema size is handled by the CLI's
+  own deferral via `ToolSearch`, which `internal/claudecode` always enables
+  (without it every schema is inlined into every request). Restarted on a new conversation or a
   changed stable system prompt, replaying history into the fresh process.
 
 Never add tool logic to either engine — add it to `availableTools`/
