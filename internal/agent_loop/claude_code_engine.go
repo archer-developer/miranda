@@ -237,6 +237,9 @@ func (e *claudeCodeEngine) runTurn(ctx context.Context, t engineTurn) (string, s
 	unlock := e.lockUser(t.userID)
 	defer unlock()
 
+	// Lazy groups can't be expanded mid-turn here — see
+	// turnControl.loadAllGroups.
+	t.control.loadAllGroups = true
 	tools := e.o.availableTools(ctx, t.userID, t.control)
 	sess, fresh, err := e.session(t, tools)
 	if err != nil {

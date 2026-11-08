@@ -393,7 +393,7 @@ func (o *Orchestrator) availableTools(ctx context.Context, userID string, contro
 	for name, desc := range o.lazyServerDescriptions {
 		groupDescriptions[name] = desc
 		skip[name] = true
-		if control.loadedGroups[name] {
+		if control.loadAllGroups || control.loadedGroups[name] {
 			for _, t := range o.tools.ToolsForServerAndUser(ctx, name, userID) {
 				addMCP(t)
 			}
@@ -410,7 +410,7 @@ func (o *Orchestrator) availableTools(ctx context.Context, userID string, contro
 	// servers like diary/yazio/medical_card.
 	if o.calendarEnabled() {
 		groupDescriptions[googleCalendarProvider] = calendarToolGroupDescription
-		if control.loadedGroups[googleCalendarProvider] {
+		if control.loadAllGroups || control.loadedGroups[googleCalendarProvider] {
 			for _, t := range calendarToolDefs() {
 				addMCP(t)
 			}

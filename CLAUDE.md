@@ -132,7 +132,9 @@ user/assistant messages, end/forget/restore, anomaly reporting — is shared.
   WebSearch/WebFetch built-in tools on), calling
   Miranda's tools back through a loopback "Miranda MCP" server whose tool
   list mirrors `availableTools` per turn and whose handlers go through
-  `executeTool`/`recordToolCall`. Restarted on a new conversation or a
+  `executeTool`/`recordToolCall`. Lazy tool groups are expanded up front
+  (`turnControl.loadAllGroups`) — the CLI only applies tools/list_changed
+  to its next message, never mid-turn. Restarted on a new conversation or a
   changed stable system prompt, replaying history into the fresh process.
 
 Never add tool logic to either engine — add it to `availableTools`/

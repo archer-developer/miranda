@@ -16,12 +16,14 @@ import (
 	sdkmcp "github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/stretchr/testify/require"
 
+	llm "github.com/archer-developer/miranda-llm"
 	"github.com/archer-developer/miranda-llm/llmtest"
 	"github.com/archer-developer/miranda-llm/llmtrace"
 	"github.com/archer-developer/miranda-llm/llmtrace/analyze"
 	"github.com/archer-developer/miranda/internal/claudecode"
 	"github.com/archer-developer/miranda/internal/config"
 	"github.com/archer-developer/miranda/internal/mcp"
+	"github.com/archer-developer/miranda/internal/mcp/mcptest"
 	"github.com/archer-developer/miranda/internal/users"
 )
 
@@ -204,6 +206,28 @@ func TestClaudeCode_ToolListFollowsAvailableToolsPerTurn(t *testing.T) {
 	require.NotContains(t, listedTools(voice.Reply), speakReplyToolName)
 	require.Contains(t, voice.Reply, "unknown tool", "a withheld tool is not registered on Miranda MCP at all")
 	requireNeverSpoken(t, tts)
+}
+
+// TestClaudeCode_LazyGroupsAreExpandedUpFront is the regression test for
+// the first production turn: the CLI applies tools/list_changed only to its
+// next message, so a lazy group loaded mid-turn via load_tool_group never
+// became callable. Under claude_code every lazy group's real tools must be
+// listed from the start, with no load_tool_group stub at all.
+func TestClaudeCode_LazyGroupsAreExpandedUpFront(t *testing.T) {
+	t.Setenv(fakeClaudeEnv, "1")
+	diary := mcptest.New("diary", llm.ToolDef{Name: "add_entry", Parameters: map[string]any{"type": "object"}}).
+		WithResult("add_entry", "saved")
+	o, _, _ := newTestOrchestrator(t, llmtest.New("local"), diary)
+	o.SetLazyMCPServers(map[string]string{"diary": "Personal diary."})
+	require.NoError(t, o.EnableClaudeCode(config.ClaudeCodeConfig{Binary: os.Args[0]}, nil))
+	t.Cleanup(o.Close)
+
+	resp, err := o.Handle(context.Background(), InputRequest{Source: WebUISource, UserID: "alex",
+		Text: `CALL diary_add_entry {"text":"подключила Claude Code"}`})
+	require.NoError(t, err)
+	require.Contains(t, listedTools(resp.Reply), "diary_add_entry")
+	require.NotContains(t, listedTools(resp.Reply), loadToolGroupToolName)
+	require.Contains(t, resp.Reply, "result=saved", "the lazy server's tool must be callable on the first turn")
 }
 
 func TestClaudeCode_FailedTurnFallsBackAndRecovers(t *testing.T) {
