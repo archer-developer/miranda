@@ -356,6 +356,7 @@ func (o *Orchestrator) availableTools(ctx context.Context, userID string, contro
 	}
 
 	addMCP := func(t llm.ToolDef) {
+		t = o.hideInjectedArgs(t)
 		if names[t.Name] {
 			o.hub.Publish(hub.Event{Source: "error", Message: fmt.Sprintf(
 				"mcp tool %q collides with a built-in tool of the same name — dropping the mcp one", t.Name)})
@@ -452,4 +453,63 @@ func (o *Orchestrator) loadToolGroupStub(pending []string, descriptions map[stri
 			"required": []string{"group"},
 		},
 	}
+}
+
+// hideInjectedArgs removes from an MCP tool's schema the arguments Miranda's
+// backend fills in itself right before dispatch (executeMCPTool) — the
+// conversation id for a server's SessionIDTools, the encryption key for a
+// keyring-whitelisted server — so the model is never asked for a value it
+// can't know. Injection overwrites whatever the model wrote anyway; leaving
+// the argument visible only invited trouble, and under the claude_code
+// orchestrator it broke medical.ask outright (2026-11-08): the schema marks
+// sessionId required with "never invented by the model", so Claude refused
+// to call the tool at all ("нет идентификатора сессии"), where Gemini had
+// just filled in a placeholder. The cached schema is never mutated — a
+// shallow copy with fresh properties/required is returned.
+func (o *Orchestrator) hideInjectedArgs(t llm.ToolDef) llm.ToolDef {
+	server, tool, ok := o.tools.ServerAndTool(t.Name)
+	if !ok || t.Parameters == nil {
+		return t
+	}
+	ext := o.mcpExtensions[server]
+	hidden := map[string]bool{}
+	if ext.SessionIDArg != "" && ext.SessionIDTools[tool] {
+		hidden[ext.SessionIDArg] = true
+	}
+	if ext.EncryptionKeyArg != "" {
+		hidden[ext.EncryptionKeyArg] = true
+	}
+	props, _ := t.Parameters["properties"].(map[string]any)
+	found := false
+	for name := range hidden {
+		if _, ok := props[name]; ok {
+			found = true
+		}
+	}
+	if !found {
+		return t
+	}
+
+	params := make(map[string]any, len(t.Parameters))
+	for k, v := range t.Parameters {
+		params[k] = v
+	}
+	newProps := make(map[string]any, len(props))
+	for k, v := range props {
+		if !hidden[k] {
+			newProps[k] = v
+		}
+	}
+	params["properties"] = newProps
+	if req, ok := t.Parameters["required"].([]any); ok {
+		kept := make([]any, 0, len(req))
+		for _, r := range req {
+			if name, _ := r.(string); !hidden[name] {
+				kept = append(kept, r)
+			}
+		}
+		params["required"] = kept
+	}
+	t.Parameters = params
+	return t
 }

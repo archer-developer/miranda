@@ -225,3 +225,19 @@ func setSessionIDArg(args, argName, sessionID string) (result string, ok bool) {
 2. Follow-up вопрос в той же беседе → второй вызов `medical.ask` с тем же `sessionId` → ответ демонстрирует использование контекста первого вопроса (см. `miranda-medical-card/internal/ask/agent_loop_test.go`'s `TestAsk_SessionContinuity_ReplaysHistoryIntoSecondCall` за примером того, что именно должно происходить на стороне medical-card).
 3. Вызов любого другого тула сервера `medical_card` (например `medical.profile`) не содержит внедрённого `sessionId` — подтверждает, что scope ограничен `SessionIDTools`, а не всем сервером.
 4. Модель, попытавшаяся сама вписать `sessionId` в аргументы `medical.ask`, не может повлиять на итоговое значение — `setSessionIDArg` всегда перезаписывает.
+
+## 6. Подставляемые аргументы скрыты от модели (2026-11-08)
+
+Изначально `sessionId` оставался в JSON Schema тула, которую видит модель, — расчёт был на то,
+что подстановка всё равно перезапишет любое значение. Под оркестратором `claude_code` это
+сломало `medical.ask`: схема помечает `sessionId` обязательным с описанием «never invented or
+guessed by the model», и Claude отказывался вызывать тул вовсе («нет идентификатора сессии,
+придумывать не буду»), тогда как Gemini просто вписывал что-нибудь.
+
+Теперь `availableTools` пропускает каждую MCP-схему через `hideInjectedArgs`
+(`internal/agent_loop/tool_catalog.go`): аргумент `SessionIDArg` у тулов из `SessionIDTools` и
+`EncryptionKeyArg` у серверов с ключом шифрования убираются из `properties` и `required`
+(кэшированная схема сервера не мутируется). Подстановка в `executeMCPTool` не изменилась — она
+по-прежнему кладёт настоящий `conversationID`/ключ в каждый вызов. Контракт medical-card
+(обязательный `sessionId`, громкая ошибка при пустом) тоже не меняется: обязательность теперь
+обеспечивает бэкенд Miranda, а не модель.

@@ -154,3 +154,40 @@ func TestSetSessionIDArg_ReturnsNotOKOnInvalidJSON(t *testing.T) {
 	require.False(t, ok)
 	require.Equal(t, "not json", result)
 }
+
+// TestAvailableTools_HidesInjectedSessionIDFromModel is the regression test
+// for medical.ask failing under the claude_code orchestrator: the model saw
+// a required sessionId it had no way to know and refused to call the tool.
+// Injected arguments must not appear in the schema the model gets — and the
+// injection itself (TestExecuteTool_InjectsSessionIDForAllowedTool) still
+// supplies them.
+func TestAvailableTools_HidesInjectedSessionIDFromModel(t *testing.T) {
+	schema := map[string]any{
+		"type": "object",
+		"properties": map[string]any{
+			"question":  map[string]any{"type": "string"},
+			"sessionId": map[string]any{"type": "string"},
+		},
+		"required": []any{"question", "sessionId"},
+	}
+	medical := mcptest.New("medical_card",
+		llm.ToolDef{Name: "medical.ask", Parameters: schema},
+		llm.ToolDef{Name: "medical.profile", Parameters: schema},
+	)
+	o, _, _ := newTestOrchestrator(t, llmtest.New("local"), medical)
+	o.SetMCPServerExtensions(map[string]MCPServerExtension{
+		"medical_card": {SessionIDArg: "sessionId", SessionIDTools: map[string]bool{"medical.ask": true}},
+	}, 0)
+
+	byName := map[string]llm.ToolDef{}
+	for _, td := range o.availableTools(context.Background(), "alex", &turnControl{}) {
+		byName[td.Name] = td
+	}
+	ask := byName["medical_card_medical_ask"]
+	require.NotContains(t, ask.Parameters["properties"], "sessionId")
+	require.Equal(t, []any{"question"}, ask.Parameters["required"])
+
+	profile := byName["medical_card_medical_profile"]
+	require.Contains(t, profile.Parameters["properties"], "sessionId", "only SessionIDTools lose the argument")
+	require.Contains(t, schema["properties"], "sessionId", "the server's own schema must not be mutated")
+}
