@@ -10,8 +10,8 @@ github.com/SherClockHolmes/webpush-go v1.4.0 h1:ocnzNKWN23T9nvHi6IfyrQjkIc0oJWv1
 github.com/SherClockHolmes/webpush-go v1.4.0/go.mod h1:XSq8pKX11vNV8MJEMwjrlTkxhAj1zKfxmyhdV7Pd6UA=
 github.com/anthropics/anthropic-sdk-go v1.59.0 h1:Idp7NBr9y1MZd6/zVHMZkdCVzqYxU3ujb2IKfxEpzZ0=
 github.com/anthropics/anthropic-sdk-go v1.59.0/go.mod h1:3EfIfmFqxH6rbiLcIP4tPFyXL/IHakx2wDG4OU+TIEI=
-github.com/archer-developer/miranda-llm v0.1.1 h1:OQTsx+myHSSIStDRuF0Lb26CKEYNtKNET+r3uLYapr0=
-github.com/archer-developer/miranda-llm v0.1.1/go.mod h1:vcitjTFzvDa/2PZvo3ltcEx+Kq3XuRm1L3o9JTuX7So=
+github.com/archer-developer/miranda-llm v0.1.2-0.20261108164502-ce465bff3939 h1:143aVA+WwwekhoQ6mvJYRqRRUkZiupYKibIqgn3ZEN0=
+github.com/archer-developer/miranda-llm v0.1.2-0.20261108164502-ce465bff3939/go.mod h1:vcitjTFzvDa/2PZvo3ltcEx+Kq3XuRm1L3o9JTuX7So=
 github.com/bahlo/generic-list-go v0.2.0 h1:5sz/EEAK+ls5wF+NeqDpk5+iNdMDXrh3z3nPnH1Wvgk=
 github.com/bahlo/generic-list-go v0.2.0/go.mod h1:2KvAjgMlE5NNynlg/5iLrrCCZ2+5xWbdbCW3pNTGyYg=
 github.com/buger/jsonparser v1.1.2 h1:frqHqw7otoVbk5M8LlE/L7HTnIq2v9RX6EJ48i9AxJk=
