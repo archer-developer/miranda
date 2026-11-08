@@ -69,7 +69,7 @@ Session continuity is **server-owned, keyed only on user identity** —
 shape but never read. The same user on any channel (HA, web UI, Telegram,
 future mobile) always continues the same open conversation, because
 `resolveConversation` looks it up via `history.OpenConversation(userID)`.
-Only the idle timeout (`Memory.SessionIdleTimeoutMinutes`, default 120) and
+Only the idle timeout (`Memory.SessionIdleTimeoutMinutes`, default 60) and
 the explicit `end_conversation`/`forget_conversation` tools ever close a
 session.
 

@@ -244,7 +244,7 @@ agent:
     # Close a user's idle process; 0 = never. Matched to
     # memory.session_idle_timeout_minutes (a new conversation restarts the
     # process anyway) and long enough to keep reusing the prompt cache.
-    process_idle_minutes: 120
+    process_idle_minutes: 60
     # Keep ANTHROPIC_API_KEY in the CLI's environment — it would then bill
     # the API key instead of the subscription.
     allow_api_key_env: false
@@ -258,9 +258,9 @@ memory:
   # How long a conversation can sit idle before it's ended and summarized.
   # The server owns session continuity (not any conversation_id a caller
   # sends back), so this is what actually governs session boundaries.
-  # 120 matches agent.claude_code.process_idle_minutes: under the claude_code
+  # 60 matches agent.claude_code.process_idle_minutes: under the claude_code
   # orchestrator a new conversation means a cold Claude Code process.
-  session_idle_timeout_minutes: 120
+  session_idle_timeout_minutes: 60
   # Lets the model call search_history when the user references an earlier
   # conversation ("помнишь мы говорили о..."), and the companion
   # restore_conversation tool to resume one as the active session ("давай

@@ -643,7 +643,7 @@ type MemoryConfig struct {
 	// AutoSummarize (see that field's doc comment). The server — not any
 	// conversation_id a caller echoes back — is what decides session
 	// continuity (see history.Store.OpenConversation), so this timeout is
-	// what actually governs when a session boundary happens. Defaults to 120:
+	// what actually governs when a session boundary happens. Defaults to 60:
 	// under the claude_code orchestrator a new conversation means a fresh
 	// Claude Code process (cold start, no prompt cache), so a session lasts
 	// as long as ClaudeCodeConfig.ProcessIdleMinutes keeps its process.
@@ -1087,9 +1087,10 @@ type ClaudeCodeConfig struct {
 	MaxTurns int `yaml:"max_turns"`
 	// ProcessIdleMinutes closes a user's Claude Code process after this long
 	// without a turn, so idle household members don't each hold a resident
-	// process. Defaults to 120 — matched to Memory.SessionIdleTimeoutMinutes,
-	// since a new conversation restarts the process anyway, and long enough
-	// to keep reusing the CLI's prompt cache across a long session. 0
+	// process. Defaults to 60 — matched to Memory.SessionIdleTimeoutMinutes,
+	// since a new conversation restarts the process anyway, and equal to the
+	// longest Anthropic prompt-cache TTL (1 hour) — a process kept warmer
+	// than that would have lost its cache regardless. 0
 	// disables the reaper (processes then only restart on a
 	// conversation/system-prompt change or exit at shutdown).
 	ProcessIdleMinutes int `yaml:"process_idle_minutes"`
@@ -1149,7 +1150,7 @@ func Default() Config {
 		Memory: MemoryConfig{
 			AutoSummarize:             true,
 			ExplicitTool:              true,
-			SessionIdleTimeoutMinutes: 120,
+			SessionIdleTimeoutMinutes: 60,
 			SearchHistoryTool:         true,
 			EndConversationTool:       true,
 			ForgetConversationTool:    true,
@@ -1176,7 +1177,7 @@ func Default() Config {
 				Model:              "sonnet",
 				BuiltinTools:       []string{"WebSearch", "WebFetch"},
 				MaxTurns:           15,
-				ProcessIdleMinutes: 120,
+				ProcessIdleMinutes: 60,
 			},
 		},
 		WebUI: WebUIConfig{
