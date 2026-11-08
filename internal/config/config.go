@@ -643,7 +643,10 @@ type MemoryConfig struct {
 	// AutoSummarize (see that field's doc comment). The server — not any
 	// conversation_id a caller echoes back — is what decides session
 	// continuity (see history.Store.OpenConversation), so this timeout is
-	// what actually governs when a session boundary happens.
+	// what actually governs when a session boundary happens. Defaults to 120:
+	// under the claude_code orchestrator a new conversation means a fresh
+	// Claude Code process (cold start, no prompt cache), so a session lasts
+	// as long as ClaudeCodeConfig.ProcessIdleMinutes keeps its process.
 	SessionIdleTimeoutMinutes int `yaml:"session_idle_timeout_minutes"`
 	// SearchHistoryTool exposes a search_history tool the model can call when
 	// the user references an earlier conversation ("помнишь мы говорили о
@@ -1041,6 +1044,64 @@ type AgentConfig struct {
 	// LLM conversation. Override this in config.yaml to change the assistant
 	// persona, add standing instructions, or restrict topic scope.
 	SystemPrompt string `yaml:"system_prompt"`
+	// Orchestrator selects what drives a turn's reasoning/tool-selection
+	// loop: OrchestratorMiranda (the default — Miranda's own agent loop over
+	// the llm.providers router) or OrchestratorClaudeCode (a long-lived
+	// headless Claude Code process per user, calling Miranda's tools back
+	// through a loopback MCP endpoint). Everything around the loop —
+	// conversation resolution, history, memory, attachments, the
+	// end/forget/restore lifecycle — is shared by both. See
+	// docs/adr/claude-code-orchestrator.md.
+	Orchestrator string `yaml:"orchestrator"`
+	// ClaudeCode tunes the claude_code orchestrator; ignored otherwise.
+	ClaudeCode ClaudeCodeConfig `yaml:"claude_code"`
+}
+
+// Orchestrator names accepted by AgentConfig.Orchestrator.
+const (
+	OrchestratorMiranda    = "miranda"
+	OrchestratorClaudeCode = "claude_code"
+)
+
+// ClaudeCodeConfig configures the claude_code orchestrator — see
+// AgentConfig.Orchestrator and docs/adr/claude-code-orchestrator.md.
+type ClaudeCodeConfig struct {
+	// Binary is the Claude Code CLI executable, resolved via $PATH when it
+	// has no slash. It must already be logged in (`claude auth status`) as
+	// the same OS user Miranda runs as — that login is what makes turns bill
+	// against the Claude subscription rather than an API key.
+	Binary string `yaml:"binary"`
+	// Model is passed as --model ("haiku", "sonnet", "opus" or a full model
+	// id); "" leaves the CLI's own default. The default "sonnet" alias always
+	// resolves to the latest Sonnet (claude-sonnet-5-5 as of 2026-11).
+	Model string `yaml:"model"`
+	// BuiltinTools are the Claude Code built-in tools the process may use
+	// in addition to Miranda MCP (passed as --tools and auto-approved).
+	// Default: WebSearch and WebFetch. Everything else — Bash, Read, Write,
+	// Edit, ... — stays off: the process runs on Miranda's host, and code
+	// execution belongs to the sandbox MCP server. An empty list disables
+	// every built-in tool.
+	BuiltinTools []string `yaml:"builtin_tools"`
+	// MaxTurns bounds one Miranda turn's internal tool loop (--max-turns),
+	// the counterpart of the miranda orchestrator's maxToolIterations.
+	MaxTurns int `yaml:"max_turns"`
+	// ProcessIdleMinutes closes a user's Claude Code process after this long
+	// without a turn, so idle household members don't each hold a resident
+	// process. Defaults to 120 — matched to Memory.SessionIdleTimeoutMinutes,
+	// since a new conversation restarts the process anyway, and long enough
+	// to keep reusing the CLI's prompt cache across a long session. 0
+	// disables the reaper (processes then only restart on a
+	// conversation/system-prompt change or exit at shutdown).
+	ProcessIdleMinutes int `yaml:"process_idle_minutes"`
+	// AllowAPIKeyEnv keeps ANTHROPIC_API_KEY/ANTHROPIC_AUTH_TOKEN in the
+	// child's environment. Off by default: Miranda's own anthropic provider
+	// may have that variable set, and the CLI prefers it over the
+	// subscription login — silently turning "free under the subscription"
+	// into per-token API billing.
+	AllowAPIKeyEnv bool `yaml:"allow_api_key_env"`
+	// ExtraArgs are appended verbatim to the CLI command line — an escape
+	// hatch for flags this config doesn't model yet.
+	ExtraArgs []string `yaml:"extra_args"`
 }
 
 // Default returns the built-in configuration used when config.yaml is absent
@@ -1088,7 +1149,7 @@ func Default() Config {
 		Memory: MemoryConfig{
 			AutoSummarize:             true,
 			ExplicitTool:              true,
-			SessionIdleTimeoutMinutes: 25,
+			SessionIdleTimeoutMinutes: 120,
 			SearchHistoryTool:         true,
 			EndConversationTool:       true,
 			ForgetConversationTool:    true,
@@ -1109,6 +1170,14 @@ func Default() Config {
 		},
 		Agent: AgentConfig{
 			SystemPrompt: prompts.SystemPrompt,
+			Orchestrator: OrchestratorMiranda,
+			ClaudeCode: ClaudeCodeConfig{
+				Binary:             "claude",
+				Model:              "sonnet",
+				BuiltinTools:       []string{"WebSearch", "WebFetch"},
+				MaxTurns:           15,
+				ProcessIdleMinutes: 120,
+			},
 		},
 		WebUI: WebUIConfig{
 			Enabled:         true,
@@ -1344,7 +1413,27 @@ func Load(paths ...string) (Config, error) {
 	if err := validateServerAuthToken(cfg); err != nil {
 		return cfg, err
 	}
+	if err := validateOrchestrator(cfg.Agent); err != nil {
+		return cfg, err
+	}
 	return cfg, nil
+}
+
+// validateOrchestrator rejects an unknown agent.orchestrator value — a typo
+// must fail at startup instead of silently falling back to the miranda
+// orchestrator and leaving the operator wondering why nothing changed.
+func validateOrchestrator(a AgentConfig) error {
+	switch a.Orchestrator {
+	case OrchestratorMiranda:
+		return nil
+	case OrchestratorClaudeCode:
+		if a.ClaudeCode.Binary == "" {
+			return fmt.Errorf("config: agent.claude_code.binary must not be empty when agent.orchestrator is %q", OrchestratorClaudeCode)
+		}
+		return nil
+	default:
+		return fmt.Errorf("config: agent.orchestrator %q is not one of %q, %q", a.Orchestrator, OrchestratorMiranda, OrchestratorClaudeCode)
+	}
 }
 
 // validateServerAuthToken rejects the retired inline `server.auth_token`

@@ -9,7 +9,6 @@ import (
 	"sync"
 	"time"
 
-	llm "github.com/archer-developer/miranda-llm"
 	"github.com/archer-developer/miranda-llm/llmtrace"
 	"github.com/archer-developer/miranda-llm/llmtrace/anomaly"
 	"github.com/archer-developer/miranda-llm/router"
@@ -391,6 +390,11 @@ type Orchestrator struct {
 	// anomaly.go). Zero value (the default) disables it entirely — Handle
 	// never attaches a Recorder to a turn's ctx.
 	anomaly AnomalyConfig
+	// engine drives each turn's reasoning/tool loop (see turnEngine):
+	// mirandaEngine from NewOrchestrator, replaced by claudeCodeEngine via
+	// EnableClaudeCode when agent.orchestrator is "claude_code". Always
+	// non-nil.
+	engine turnEngine
 }
 
 // TurnStatus reports whether userID currently has a Handle turn in flight
@@ -686,7 +690,7 @@ func NewOrchestrator(
 	ttsCfg config.TTSConfig,
 	defaultUserID string,
 ) *Orchestrator {
-	return &Orchestrator{
+	o := &Orchestrator{
 		router:           r,
 		tools:            toolManager,
 		history:          historyStore,
@@ -701,6 +705,8 @@ func NewOrchestrator(
 		calendar:         calendar.New(),
 		turns:            NewTurnTracker(),
 	}
+	o.engine = mirandaEngine{o: o}
+	return o
 }
 
 // Handle runs one full turn and returns the assistant's reply.
@@ -777,20 +783,22 @@ func (o *Orchestrator) Handle(ctx context.Context, req InputRequest) (InputRespo
 		return InputResponse{}, fmt.Errorf("orchestrator: set system prompt: %w", err)
 	}
 
-	// Sent as two separate RoleSystem messages, stable first — see
-	// buildSystemPrompt's doc comment and docs/adr/system-prompt-caching.md:
-	// anthropic.Provider places its prompt-cache breakpoint on the FIRST
-	// system message specifically so the volatile one (current time,
-	// different on every turn) never defeats reuse of the stable one.
-	messages := append([]llm.Message{
-		{Role: llm.RoleSystem, Content: stableSystem},
-		{Role: llm.RoleSystem, Content: volatileSystem},
-	}, priorMessages...)
-	messages = append(messages, llm.Message{Role: llm.RoleUser, Content: userContent, Parts: imageParts})
-
+	// The configured engine (agent.orchestrator) owns only the reasoning/
+	// tool loop — see turnEngine. Everything before and after this call is
+	// identical for every engine.
 	control := &turnControl{source: req.Source}
-	tools := o.availableTools(ctx, userID, control)
-	finalText, providerUsed, err := o.runAgentLoop(ctx, userID, convID, req.Source, messages, tools, control, outcome)
+	finalText, providerUsed, err := o.engine.runTurn(ctx, engineTurn{
+		userID:         userID,
+		convID:         convID,
+		source:         req.Source,
+		stableSystem:   stableSystem,
+		volatileSystem: volatileSystem,
+		prior:          priorMessages,
+		userContent:    userContent,
+		imageParts:     imageParts,
+		control:        control,
+		outcome:        outcome,
+	})
 	if err != nil && req.Source == users.SourceScheduled {
 		// RunScheduledTasks needs the real error, not a graceful cover-up:
 		// it's what tells the store the fire failed, keeps the task due for
