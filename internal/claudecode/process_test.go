@@ -30,6 +30,14 @@ func TestMain(m *testing.M) {
 // text block, a tool_result echo and a result. Special texts: "hang" never
 // answers, "crash" exits non-zero with a stderr message.
 func runFakeCLI() {
+	if len(os.Args) == 3 && os.Args[1] == "auth" && os.Args[2] == "status" {
+		method := "claude.ai"
+		if os.Getenv("ANTHROPIC_API_KEY") != "" {
+			method = "api_key"
+		}
+		fmt.Printf(`{"loggedIn":true,"authMethod":%q}`+"\n", method)
+		return
+	}
 	in := bufio.NewScanner(os.Stdin)
 	in.Buffer(make([]byte, 1<<20), 1<<20)
 	out := json.NewEncoder(os.Stdout)
@@ -163,6 +171,19 @@ func TestBuildArgsIsolatesTheProcess(t *testing.T) {
 	}
 	if args[len(args)-1] != "--x" {
 		t.Errorf("ExtraArgs must come last: %v", args)
+	}
+}
+
+func TestCheckAuthUsesTheTurnEnvironment(t *testing.T) {
+	t.Setenv(fakeEnv, "1")
+	t.Setenv("ANTHROPIC_API_KEY", "sk-test")
+	st, err := CheckAuth(context.Background(), os.Args[0], false)
+	if err != nil || !st.LoggedIn || st.AuthMethod != "claude.ai" {
+		t.Fatalf("CheckAuth(strip) = %+v, %v; want the subscription login", st, err)
+	}
+	st, err = CheckAuth(context.Background(), os.Args[0], true)
+	if err != nil || st.AuthMethod != "api_key" {
+		t.Fatalf("CheckAuth(keep) = %+v, %v; want api_key", st, err)
 	}
 }
 

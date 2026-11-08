@@ -254,6 +254,31 @@ func buildArgs(opts Options, promptPath, mcpPath string) []string {
 	return append(args, opts.ExtraArgs...)
 }
 
+// AuthStatus is the subset of `claude auth status` the orchestrator logs.
+type AuthStatus struct {
+	LoggedIn         bool   `json:"loggedIn"`
+	AuthMethod       string `json:"authMethod"`
+	SubscriptionType string `json:"subscriptionType"`
+}
+
+// CheckAuth runs `claude auth status` with exactly the environment Start
+// gives a turn (childEnv) — otherwise an ANTHROPIC_API_KEY in Miranda's own
+// environment makes the CLI report "api_key" even though every turn, run
+// with that key stripped, actually uses the subscription login.
+func CheckAuth(ctx context.Context, binary string, allowAPIKeyEnv bool) (AuthStatus, error) {
+	cmd := exec.CommandContext(ctx, binary, "auth", "status")
+	cmd.Env = childEnv(os.Environ(), allowAPIKeyEnv)
+	out, err := cmd.Output()
+	if err != nil {
+		return AuthStatus{}, fmt.Errorf("claudecode: auth status: %w", err)
+	}
+	var st AuthStatus
+	if err := json.Unmarshal(out, &st); err != nil {
+		return AuthStatus{}, fmt.Errorf("claudecode: parse auth status: %w", err)
+	}
+	return st, nil
+}
+
 // childEnv is the process environment minus the API-key variables (unless
 // allowAPIKey), so the CLI authenticates with its own subscription login.
 // CLAUDECODE is dropped too: it marks "running inside Claude Code", which

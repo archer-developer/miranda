@@ -180,13 +180,8 @@ func (e *claudeCodeEngine) checkLogin() {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
-	out, err := exec.CommandContext(ctx, e.cfg.Binary, "auth", "status").Output()
-	var st struct {
-		LoggedIn         bool   `json:"loggedIn"`
-		AuthMethod       string `json:"authMethod"`
-		SubscriptionType string `json:"subscriptionType"`
-	}
-	if err != nil || json.Unmarshal(out, &st) != nil || !st.LoggedIn {
+	st, err := claudecode.CheckAuth(ctx, e.cfg.Binary, e.cfg.AllowAPIKeyEnv)
+	if err != nil || !st.LoggedIn {
 		e.logger.Warn("orchestrator: claude_code: CLI is not logged in — run `claude auth login` as the user Miranda runs as", "binary", e.cfg.Binary, "error", err)
 		return
 	}
